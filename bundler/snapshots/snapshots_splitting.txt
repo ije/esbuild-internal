@@ -1,0 +1,498 @@
+TestRequireResolve
+---------- /out.js ----------
+// /entry.js
+console.log(require.resolve);
+console.log(require.resolve());
+console.log(require.resolve(foo));
+console.log(require.resolve("a", "b"));
+console.log(require.resolve("./present-file"));
+console.log(require.resolve("./missing-file"));
+console.log(require.resolve("./external-file"));
+console.log(require.resolve("missing-pkg"));
+console.log(require.resolve("external-pkg"));
+console.log(require.resolve("@scope/missing-pkg"));
+console.log(require.resolve("@scope/external-pkg"));
+try {
+  console.log(require.resolve("inside-try"));
+} catch (e) {
+}
+if (false) {
+  console.log(null);
+}
+
+================================================================================
+TestSplittingAssignToLocal
+---------- /out/a.js ----------
+import {
+  foo,
+  setFoo
+} from "./chunk.6PVTQRRZ.js";
+
+// /a.js
+setFoo(123);
+console.log(foo);
+
+---------- /out/b.js ----------
+import {
+  foo
+} from "./chunk.6PVTQRRZ.js";
+
+// /b.js
+console.log(foo);
+
+---------- /out/chunk.6PVTQRRZ.js ----------
+// /shared.js
+let foo;
+function setFoo(value) {
+  foo = value;
+}
+
+export {
+  foo,
+  setFoo
+};
+
+================================================================================
+TestSplittingCircularReferenceIssue251
+---------- /out/a.js ----------
+import {
+  p,
+  q
+} from "./chunk.4MSIEML2.js";
+
+// /a.js
+export {
+  p,
+  q
+};
+
+---------- /out/b.js ----------
+import {
+  p,
+  q
+} from "./chunk.4MSIEML2.js";
+
+// /b.js
+export {
+  p,
+  q
+};
+
+---------- /out/chunk.4MSIEML2.js ----------
+// /b.js
+var q = 6;
+
+// /a.js
+var p = 5;
+
+export {
+  p,
+  q
+};
+
+================================================================================
+TestSplittingCrossChunkAssignmentDependencies
+---------- /out/a.js ----------
+import {
+  setValue
+} from "./chunk.77LFXWQJ.js";
+
+// /a.js
+setValue(123);
+
+---------- /out/b.js ----------
+import "./chunk.77LFXWQJ.js";
+
+// /b.js
+
+---------- /out/chunk.77LFXWQJ.js ----------
+// /shared.js
+var observer;
+var value;
+function getValue() {
+  return value;
+}
+function setValue(next) {
+  value = next;
+  if (observer)
+    observer();
+}
+sideEffects(getValue);
+
+export {
+  setValue
+};
+
+================================================================================
+TestSplittingCrossChunkAssignmentDependenciesRecursive
+---------- /out/a.js ----------
+import {
+  setX
+} from "./chunk.SX7Q6B5D.js";
+
+// /a.js
+setX();
+
+---------- /out/b.js ----------
+import {
+  setZ
+} from "./chunk.HWV4XK3G.js";
+import "./chunk.SX7Q6B5D.js";
+
+// /b.js
+setZ();
+
+---------- /out/c.js ----------
+import {
+  setY2,
+  setZ2
+} from "./chunk.HWV4XK3G.js";
+import {
+  setX2
+} from "./chunk.SX7Q6B5D.js";
+
+// /c.js
+setX2();
+setY2();
+setZ2();
+
+---------- /out/chunk.HWV4XK3G.js ----------
+import {
+  setX
+} from "./chunk.SX7Q6B5D.js";
+
+// /y.js
+let _y;
+function setY(v) {
+  _y = v;
+}
+function setY2(v) {
+  setX(v);
+  _y = v;
+}
+
+// /z.js
+let _z;
+function setZ(v) {
+  _z = v;
+}
+function setZ2(v) {
+  setY(v);
+  _z = v;
+}
+
+export {
+  setZ,
+  setY2,
+  setZ2
+};
+
+---------- /out/chunk.SX7Q6B5D.js ----------
+// /x.js
+let _x;
+function setX(v) {
+  _x = v;
+}
+function setX2(v) {
+  _x = v;
+}
+
+export {
+  setX,
+  setX2
+};
+
+================================================================================
+TestSplittingDuplicateChunkCollision
+---------- /out/a.js ----------
+import"./chunk.WEHALL2E.js";
+
+---------- /out/b.js ----------
+import"./chunk.WEHALL2E.js";
+
+---------- /out/chunk.WEHALL2E.js ----------
+console.log(123);
+
+---------- /out/c.js ----------
+import"./chunk.WEHALL2E.js";
+
+---------- /out/d.js ----------
+import"./chunk.WEHALL2E.js";
+
+================================================================================
+TestSplittingDynamicAndNotDynamicCommonJSIntoES6
+---------- /out/entry.js ----------
+import {
+  require_foo
+} from "./chunk.FPKGPTVM.js";
+
+// /entry.js
+const foo = __toModule(require_foo());
+import("./foo.js").then(({default: {bar: b}}) => console.log(foo.bar, b));
+
+---------- /out/foo.js ----------
+import {
+  require_foo
+} from "./chunk.FPKGPTVM.js";
+
+// /foo.js
+export default require_foo();
+
+---------- /out/chunk.FPKGPTVM.js ----------
+// /foo.js
+var require_foo = __commonJS((exports) => {
+  exports.bar = 123;
+});
+
+export {
+  require_foo
+};
+
+================================================================================
+TestSplittingDynamicAndNotDynamicES6IntoES6
+---------- /out/entry.js ----------
+import {
+  bar
+} from "./chunk.T36DLUHD.js";
+
+// /entry.js
+import("./foo.js").then(({bar: b}) => console.log(bar, b));
+
+---------- /out/foo.js ----------
+import {
+  bar
+} from "./chunk.T36DLUHD.js";
+
+// /foo.js
+export {
+  bar
+};
+
+---------- /out/chunk.T36DLUHD.js ----------
+// /foo.js
+let bar = 123;
+
+export {
+  bar
+};
+
+================================================================================
+TestSplittingDynamicCommonJSIntoES6
+---------- /out/entry.js ----------
+// /entry.js
+import("./foo.js").then(({default: {bar}}) => console.log(bar));
+
+---------- /out/foo.js ----------
+// /foo.js
+var require_foo = __commonJS((exports) => {
+  exports.bar = 123;
+});
+export default require_foo();
+
+================================================================================
+TestSplittingDynamicES6IntoES6
+---------- /out/entry.js ----------
+// /entry.js
+import("./foo.js").then(({bar}) => console.log(bar));
+
+---------- /out/foo.js ----------
+// /foo.js
+let bar = 123;
+export {
+  bar
+};
+
+================================================================================
+TestSplittingDynamicImportIssue272
+---------- /out/a.js ----------
+// /a.js
+import("./b.js");
+
+---------- /out/b.js ----------
+// /b.js
+var b_default = 1;
+export {
+  b_default as default
+};
+
+================================================================================
+TestSplittingDynamicImportOutsideSourceTreeIssue264
+---------- /out/src/entry1.js ----------
+// /Users/user/project/src/entry1.js
+import("../node_modules/package/index.js");
+
+---------- /out/src/entry2.js ----------
+// /Users/user/project/src/entry2.js
+import("../node_modules/package/index.js");
+
+---------- /out/node_modules/package/index.js ----------
+// /Users/user/project/node_modules/package/index.js
+console.log("imported");
+
+================================================================================
+TestSplittingMissingLazyExport
+---------- /out/a.js ----------
+import "./chunk.T3B3VZJH.js";
+
+// /empty.js
+const empty_exports = {};
+
+// /common.js
+function foo() {
+  return [empty_exports, void 0];
+}
+
+// /a.js
+console.log(foo());
+
+---------- /out/b.js ----------
+import "./chunk.T3B3VZJH.js";
+
+// /common.js
+function bar() {
+  return [void 0];
+}
+
+// /b.js
+console.log(bar());
+
+---------- /out/chunk.T3B3VZJH.js ----------
+// /empty.js
+
+// /common.js
+
+================================================================================
+TestSplittingNestedDirectories
+---------- /Users/user/project/out/pageA/page.js ----------
+import {
+  shared_default
+} from "../chunk.MPPSAPHD.js";
+
+// /Users/user/project/src/pages/pageA/page.js
+console.log(shared_default);
+
+---------- /Users/user/project/out/pageB/page.js ----------
+import {
+  shared_default
+} from "../chunk.MPPSAPHD.js";
+
+// /Users/user/project/src/pages/pageB/page.js
+console.log(-shared_default);
+
+---------- /Users/user/project/out/chunk.MPPSAPHD.js ----------
+// /Users/user/project/src/pages/shared.js
+var shared_default = 123;
+
+export {
+  shared_default
+};
+
+================================================================================
+TestSplittingReExportIssue273
+---------- /out/a.js ----------
+import {
+  a
+} from "./chunk.FXMNXTQ2.js";
+
+// /a.js
+export {
+  a
+};
+
+---------- /out/b.js ----------
+import {
+  a
+} from "./chunk.FXMNXTQ2.js";
+
+// /b.js
+export {
+  a
+};
+
+---------- /out/chunk.FXMNXTQ2.js ----------
+// /a.js
+const a = 1;
+
+export {
+  a
+};
+
+================================================================================
+TestSplittingSharedCommonJSIntoES6
+---------- /out/a.js ----------
+import {
+  require_shared
+} from "./chunk.LOHJC32K.js";
+
+// /a.js
+const {foo} = require_shared();
+console.log(foo);
+
+---------- /out/b.js ----------
+import {
+  require_shared
+} from "./chunk.LOHJC32K.js";
+
+// /b.js
+const {foo} = require_shared();
+console.log(foo);
+
+---------- /out/chunk.LOHJC32K.js ----------
+// /shared.js
+var require_shared = __commonJS((exports) => {
+  exports.foo = 123;
+});
+
+export {
+  require_shared
+};
+
+================================================================================
+TestSplittingSharedES6IntoES6
+---------- /out/a.js ----------
+import {
+  foo
+} from "./chunk.RCMQKSK6.js";
+
+// /a.js
+console.log(foo);
+
+---------- /out/b.js ----------
+import {
+  foo
+} from "./chunk.RCMQKSK6.js";
+
+// /b.js
+console.log(foo);
+
+---------- /out/chunk.RCMQKSK6.js ----------
+// /shared.js
+let foo = 123;
+
+export {
+  foo
+};
+
+================================================================================
+TestSplittingSideEffectsWithoutDependencies
+---------- /out/a.js ----------
+import "./chunk.LKVKH4P2.js";
+
+// /shared.js
+let a = 1;
+
+// /a.js
+console.log(a);
+
+---------- /out/b.js ----------
+import "./chunk.LKVKH4P2.js";
+
+// /shared.js
+let b = 2;
+
+// /b.js
+console.log(b);
+
+---------- /out/chunk.LKVKH4P2.js ----------
+// /shared.js
+console.log("side effect");

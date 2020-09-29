@@ -1,0 +1,186 @@
+TestAutoExternal
+---------- /out/entry.js ----------
+// /entry.js
+import "http://example.com/code.js";
+import "https://example.com/code.js";
+import "//example.com/code.js";
+import "data:application/javascript;base64,ZXhwb3J0IGRlZmF1bHQgMTIz";
+
+================================================================================
+TestBase64ImportURLInCSS
+---------- /out/entry.css ----------
+/* /entry.css */
+a {
+  background: url(data:image/png;base64,iVBORw0KGgo=);
+}
+
+================================================================================
+TestBinaryImportURLInCSS
+---------- /out/entry.css ----------
+/* /entry.css */
+a {
+  background: url(data:application/octet-stream;base64,iVBORw0KGgo=);
+}
+
+================================================================================
+TestCSSAtImport
+---------- /out.css ----------
+/* /shared.css */
+.shared {
+  color: black;
+}
+
+/* /a.css */
+.a {
+  color: green;
+}
+
+/* /b.css */
+.b {
+  color: blue;
+}
+
+/* /entry.css */
+.entry {
+  color: red;
+}
+
+================================================================================
+TestCSSAtImportExternal
+---------- /out.css ----------
+@charset "UTF-8";
+@import "./external1.css";
+@import "./external2.css";
+
+/* /internal.css */
+.before {
+  color: red;
+}
+
+/* /charset1.css */
+.middle {
+  color: green;
+}
+
+/* /charset2.css */
+.after {
+  color: blue;
+}
+
+/* /entry.css */
+
+================================================================================
+TestCSSEntryPoint
+---------- /out.css ----------
+/* /entry.css */
+body {
+  background: white;
+  color: black;
+}
+
+================================================================================
+TestCSSFromJSMissingStarImport
+---------- /out/entry.js ----------
+// /a.css
+
+// /entry.js
+console.log(void 0);
+
+---------- /out/entry.css ----------
+/* /a.css */
+.a {
+  color: red;
+}
+
+================================================================================
+TestDataURLImportURLInCSS
+---------- /out/entry.css ----------
+/* /entry.css */
+a {
+  background: url(data:image/png;base64,iVBORw0KGgo=);
+}
+
+================================================================================
+TestExternalImportURLInCSS
+---------- /out/entry.css ----------
+/* /src/entry.css */
+div:after {
+  content: 'If this is recognized, the path should become "../src/external.png"';
+  background: url(../src/external.png);
+}
+a {
+  background: url(http://example.com/images/image.png);
+}
+b {
+  background: url(https://example.com/images/image.png);
+}
+c {
+  background: url(//example.com/images/image.png);
+}
+d {
+  background: url(data:image/png;base64,iVBORw0KGgo=);
+}
+path {
+  fill: url(#filter);
+}
+
+================================================================================
+TestFileImportURLInCSS
+---------- /out/example.RPS4CMHF.data ----------
+This is some data.
+---------- /out/entry.css ----------
+/* /one.css */
+a {
+  background: url(example.RPS4CMHF.data);
+}
+
+/* /two.css */
+b {
+  background: url(example.RPS4CMHF.data);
+}
+
+/* /entry.css */
+
+================================================================================
+TestIgnoreURLsInAtRulePrelude
+---------- /out/entry.css ----------
+/* /entry.css */
+@supports (background: url(ignored.png)) {
+  a {
+    color: red;
+  }
+}
+
+================================================================================
+TestImportCSSFromJS
+---------- /out/entry.js ----------
+// /a.css
+
+// /a.js
+console.log("a");
+
+// /b.css
+
+// /b.js
+console.log("b");
+
+// /entry.js
+
+---------- /out/entry.css ----------
+/* /a.css */
+.a {
+  color: red;
+}
+
+/* /b.css */
+.b {
+  color: blue;
+}
+
+================================================================================
+TestTextImportURLInCSSText
+---------- /out/entry.css ----------
+/* /entry.css */
+a {
+  background: url(data:text/plain;base64,VGhpcyBpcyBzb21lIHRleHQu);
+}
