@@ -3,6 +3,7 @@ package css_ast
 import (
 	"github.com/ije/esbuild-internal/ast"
 	"github.com/ije/esbuild-internal/css_lexer"
+	"github.com/ije/esbuild-internal/logger"
 )
 
 // CSS syntax comes in two layers: a minimal syntax that generally accepts
@@ -42,6 +43,9 @@ type Token struct {
 	// This index points to that import record.
 	ImportRecordIndex uint32 // 4 bytes
 
+	// The division between the number and the unit for "TDimension" tokens.
+	UnitOffset uint16 // 2 bytes
+
 	// This will never be "TWhitespace" because whitespace isn't stored as a
 	// token directly. Instead it is stored in "HasWhitespaceAfter" on the
 	// previous token.
@@ -51,6 +55,18 @@ type Token struct {
 	// token. This isn't strictly true in some cases because sometimes this flag
 	// is changed to make the generated code look better (e.g. around commas).
 	HasWhitespaceAfter bool // 1 byte
+}
+
+func (t Token) PercentValue() string {
+	return t.Text[:len(t.Text)-1]
+}
+
+func (t Token) DimensionValue() string {
+	return t.Text[:t.UnitOffset]
+}
+
+func (t Token) DimensionUnit() string {
+	return t.Text[t.UnitOffset:]
 }
 
 // This interface is never called. Its purpose is to encode a variant type in
@@ -106,8 +122,10 @@ type RQualified struct {
 }
 
 type RDeclaration struct {
-	Key       string
+	KeyText   string
 	Value     []Token
+	KeyRange  logger.Range
+	Key       D // Compare using this instead of "Key" for speed
 	Important bool
 }
 

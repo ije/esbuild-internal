@@ -9,11 +9,10 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/ije/esbuild-internal/css_ast"
-
 	"github.com/ije/esbuild-internal/ast"
 	"github.com/ije/esbuild-internal/compat"
 	"github.com/ije/esbuild-internal/config"
+	"github.com/ije/esbuild-internal/css_ast"
 	"github.com/ije/esbuild-internal/css_printer"
 	"github.com/ije/esbuild-internal/fs"
 	"github.com/ije/esbuild-internal/js_ast"
@@ -235,6 +234,12 @@ type partRef struct {
 	partIndex   uint32
 }
 
+type partRange struct {
+	sourceIndex    uint32
+	partIndexBegin uint32
+	partIndexEnd   uint32
+}
+
 type chunkInfo struct {
 	// The path of this chunk's directory relative to the output directory. Note:
 	// this must have OS-independent path separators (i.e. '/' not '\').
@@ -248,6 +253,7 @@ type chunkInfo struct {
 
 	filesWithPartsInChunk map[uint32]bool
 	filesInChunkInOrder   []uint32
+	partsInChunkInOrder   []partRange
 	entryBits             bitSet
 
 	// This information is only useful if "isEntryPoint" is true
@@ -536,7 +542,7 @@ func (c *linkerContext) link() []OutputFile {
 
 	if c.options.Mode == config.ModePassThrough {
 		for _, entryPoint := range c.entryPoints {
-			c.markExportsAsUnbound(entryPoint)
+			c.preventExportsFromBeingRenamed(entryPoint)
 		}
 	}
 
@@ -556,10 +562,12 @@ func (c *linkerContext) generateChunksInParallel(chunks []chunkInfo) []OutputFil
 	{
 		originalChunks := chunks
 		for i, chunk := range originalChunks {
-			js, css := c.chunkFileOrder(&chunk)
+			js, jsParts, css := c.chunkFileOrder(&chunk)
+
 			switch chunk.repr.(type) {
 			case *chunkReprJS:
 				chunks[i].filesInChunkInOrder = js
+				chunks[i].partsInChunkInOrder = jsParts
 
 				// If JS files include CSS files, make a sibling chunk for the CSS
 				if len(css) > 0 {
@@ -1101,6 +1109,15 @@ func (c *linkerContext) scanImportsAndExports() {
 			c.generateCodeForLazyExport(sourceIndex)
 		}
 
+		// If the output format doesn't have an implicit CommonJS wrapper, any file
+		// that uses CommonJS features will need to be wrapped, even though the
+		// resulting wrapper won't be invoked by other files.
+		if repr.meta.cjsStyleExports &&
+			(c.options.OutputFormat == config.FormatIIFE ||
+				c.options.OutputFormat == config.FormatESModule) {
+			repr.meta.cjsWrap = true
+		}
+
 		// Even if the output file is CommonJS-like, we may still need to wrap
 		// CommonJS-style files. Any file that imports a CommonJS-style file will
 		// cause that file to need to be wrapped. This is because the import
@@ -1149,15 +1166,6 @@ func (c *linkerContext) scanImportsAndExports() {
 
 		if len(repr.ast.NamedImports) > 0 {
 			c.matchImportsWithExportsForFile(uint32(sourceIndex))
-		}
-
-		// If the output format doesn't have an implicit CommonJS wrapper, any file
-		// that uses CommonJS features will need to be wrapped, even though the
-		// resulting wrapper won't be invoked by other files.
-		if !repr.meta.cjsWrap && repr.meta.cjsStyleExports &&
-			(c.options.OutputFormat == config.FormatIIFE ||
-				c.options.OutputFormat == config.FormatESModule) {
-			repr.meta.cjsWrap = true
 		}
 
 		// If we're exporting as CommonJS and this file doesn't need a wrapper,
@@ -2452,7 +2460,37 @@ func (a chunkOrderArray) Less(i int, j int) bool {
 	return a[i].distance < a[j].distance || (a[i].distance == a[j].distance && a[i].path.ComesBeforeInSortedOrder(a[j].path))
 }
 
-func (c *linkerContext) chunkFileOrder(chunk *chunkInfo) (js []uint32, css []uint32) {
+func appendOrExtendPartRange(ranges []partRange, sourceIndex uint32, partIndex uint32) []partRange {
+	if i := len(ranges) - 1; i >= 0 {
+		if r := &ranges[i]; r.sourceIndex == sourceIndex && r.partIndexEnd == partIndex {
+			r.partIndexEnd = partIndex + 1
+			return ranges
+		}
+	}
+
+	return append(ranges, partRange{
+		sourceIndex:    sourceIndex,
+		partIndexBegin: partIndex,
+		partIndexEnd:   partIndex + 1,
+	})
+}
+
+func (c *linkerContext) shouldIncludePart(repr *reprJS, part js_ast.Part) bool {
+	// As an optimization, ignore parts containing a single import statement to
+	// an internal non-CommonJS file. These will be ignored anyway and it's a
+	// performance hit to spin up a goroutine only to discover this later.
+	if len(part.Stmts) == 1 {
+		if s, ok := part.Stmts[0].Data.(*js_ast.SImport); ok {
+			record := &repr.ast.ImportRecords[s.ImportRecordIndex]
+			if record.SourceIndex != nil && !c.files[*record.SourceIndex].repr.(*reprJS).meta.cjsStyleExports {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (c *linkerContext) chunkFileOrder(chunk *chunkInfo) (js []uint32, jsParts []partRange, css []uint32) {
 	sorted := make(chunkOrderArray, 0, len(chunk.filesWithPartsInChunk))
 
 	// Attach information to the files for use with sorting
@@ -2471,7 +2509,7 @@ func (c *linkerContext) chunkFileOrder(chunk *chunkInfo) (js []uint32, css []uin
 	sort.Sort(sorted)
 
 	visited := make(map[uint32]bool)
-	jsSuffix := []uint32{}
+	jsPartsPrefix := []partRange{}
 
 	// Traverse the graph using this stable order and linearize the files with
 	// dependencies before dependents
@@ -2487,11 +2525,17 @@ func (c *linkerContext) chunkFileOrder(chunk *chunkInfo) (js []uint32, css []uin
 
 		switch repr := file.repr.(type) {
 		case *reprJS:
+			// CommonJS files can't be split because they are all inside the wrapper
+			canFileBeSplit := !repr.meta.cjsWrap
+
+			// Make sure the generated call to "__export(exports, ...)" comes first
+			// before anything else in this file
+			if canFileBeSplit && chunk.entryBits.equals(repr.meta.partMeta[repr.meta.nsExportPartIndex].entryBits) {
+				jsParts = appendOrExtendPartRange(jsParts, sourceIndex, repr.meta.nsExportPartIndex)
+			}
+
 			for partIndex, part := range repr.ast.Parts {
 				isPartInThisChunk := chunk.entryBits.equals(repr.meta.partMeta[partIndex].entryBits)
-				if isPartInThisChunk {
-					isFileInThisChunk = true
-				}
 
 				// Also traverse any files imported by this part
 				for _, importRecordIndex := range part.ImportRecordIndices {
@@ -2504,19 +2548,30 @@ func (c *linkerContext) chunkFileOrder(chunk *chunkInfo) (js []uint32, css []uin
 						visit(*record.SourceIndex)
 					}
 				}
+
+				// Then include this part after the files it imports
+				if isPartInThisChunk {
+					isFileInThisChunk = true
+					if canFileBeSplit && uint32(partIndex) != repr.meta.nsExportPartIndex && c.shouldIncludePart(repr, part) {
+						if sourceIndex == runtime.SourceIndex {
+							jsPartsPrefix = appendOrExtendPartRange(jsPartsPrefix, sourceIndex, uint32(partIndex))
+						} else {
+							jsParts = appendOrExtendPartRange(jsParts, sourceIndex, uint32(partIndex))
+						}
+					}
+				}
 			}
 
-			// Always put all CommonJS wrappers before any other non-runtime code to
-			// deal with cycles in the module graph. CommonJS wrapper declarations
-			// aren't hoisted so starting to evaluate them before they are all declared
-			// could end up with one being used before being declared. These wrappers
-			// don't have side effects so an easy fix is to just declare them all
-			// before starting to evaluate them.
 			if isFileInThisChunk {
-				if sourceIndex == runtime.SourceIndex || repr.meta.cjsWrap {
-					js = append(js, sourceIndex)
-				} else {
-					jsSuffix = append(jsSuffix, sourceIndex)
+				js = append(js, sourceIndex)
+
+				// CommonJS files are all-or-nothing so all parts must be contiguous
+				if !canFileBeSplit {
+					jsPartsPrefix = append(jsPartsPrefix, partRange{
+						sourceIndex:    sourceIndex,
+						partIndexBegin: 0,
+						partIndexEnd:   uint32(len(repr.ast.Parts)),
+					})
 				}
 			}
 
@@ -2540,7 +2595,7 @@ func (c *linkerContext) chunkFileOrder(chunk *chunkInfo) (js []uint32, css []uin
 	for _, data := range sorted {
 		visit(data.sourceIndex)
 	}
-	js = append(js, jsSuffix...)
+	jsParts = append(jsPartsPrefix, jsParts...)
 	return
 }
 
@@ -2864,21 +2919,23 @@ type compileResultJS struct {
 func (c *linkerContext) generateCodeForFileInChunkJS(
 	r renamer.Renamer,
 	waitGroup *sync.WaitGroup,
-	sourceIndex uint32,
+	partRange partRange,
 	entryBits bitSet,
 	commonJSRef js_ast.Ref,
 	toModuleRef js_ast.Ref,
 	result *compileResultJS,
 ) {
-	file := &c.files[sourceIndex]
+	file := &c.files[partRange.sourceIndex]
 	repr := file.repr.(*reprJS)
+	nsExportPartIndex := repr.meta.nsExportPartIndex
 	needsWrapper := false
 	stmtList := stmtList{}
 
 	// Make sure the generated call to "__export(exports, ...)" comes first
 	// before anything else.
-	if entryBits.equals(repr.meta.partMeta[repr.meta.nsExportPartIndex].entryBits) {
-		c.convertStmtsForChunk(sourceIndex, &stmtList, repr.ast.Parts[repr.meta.nsExportPartIndex].Stmts)
+	if nsExportPartIndex >= partRange.partIndexBegin && nsExportPartIndex < partRange.partIndexEnd &&
+		entryBits.equals(repr.meta.partMeta[nsExportPartIndex].entryBits) {
+		c.convertStmtsForChunk(partRange.sourceIndex, &stmtList, repr.ast.Parts[nsExportPartIndex].Stmts)
 
 		// Move everything to the prefix list
 		stmtList.prefixStmts = append(stmtList.prefixStmts, stmtList.normalStmts...)
@@ -2886,13 +2943,14 @@ func (c *linkerContext) generateCodeForFileInChunkJS(
 	}
 
 	// Add all other parts in this chunk
-	for partIndex, part := range repr.ast.Parts {
+	for partIndex := partRange.partIndexBegin; partIndex < partRange.partIndexEnd; partIndex++ {
+		part := repr.ast.Parts[partIndex]
 		if !entryBits.equals(repr.meta.partMeta[partIndex].entryBits) {
 			// Skip the part if it's not in this chunk
 			continue
 		}
 
-		if uint32(partIndex) == repr.meta.nsExportPartIndex {
+		if uint32(partIndex) == nsExportPartIndex {
 			// Skip the generated call to "__export()" that was extracted above
 			continue
 		}
@@ -2909,7 +2967,7 @@ func (c *linkerContext) generateCodeForFileInChunkJS(
 			continue
 		}
 
-		c.convertStmtsForChunk(sourceIndex, &stmtList, part.Stmts)
+		c.convertStmtsForChunk(partRange.sourceIndex, &stmtList, part.Stmts)
 	}
 
 	// Hoist all import statements before any normal statements. ES6 imports
@@ -2953,7 +3011,7 @@ func (c *linkerContext) generateCodeForFileInChunkJS(
 	}
 
 	// Only generate a source map if needed
-	sourceForSourceMap := &c.files[sourceIndex].source
+	sourceForSourceMap := &c.files[partRange.sourceIndex].source
 	if !file.loader.CanHaveSourceMap() || c.options.SourceMap == config.SourceMapNone {
 		sourceForSourceMap = nil
 	}
@@ -2972,7 +3030,7 @@ func (c *linkerContext) generateCodeForFileInChunkJS(
 		MangleSyntax:        c.options.MangleSyntax,
 		ToModuleRef:         toModuleRef,
 		ExtractComments:     c.options.Mode == config.ModeBundle && c.options.RemoveWhitespace,
-		UnsupportedFeatures: c.options.UnsupportedFeatures,
+		UnsupportedFeatures: c.options.UnsupportedJSFeatures,
 		SourceForSourceMap:  sourceForSourceMap,
 		InputSourceMap:      file.sourceMap,
 		WrapperRefForSource: func(sourceIndex uint32) js_ast.Ref {
@@ -2983,7 +3041,7 @@ func (c *linkerContext) generateCodeForFileInChunkJS(
 	tree.Parts = []js_ast.Part{{Stmts: stmts}}
 	*result = compileResultJS{
 		PrintResult: js_printer.Print(tree, c.symbols, r, printOptions),
-		sourceIndex: sourceIndex,
+		sourceIndex: partRange.sourceIndex,
 	}
 
 	// Write this separately as the entry point tail so it can be split off
@@ -3130,7 +3188,7 @@ func (c *linkerContext) renameSymbolsInChunk(chunk *chunkInfo, filesInOrder []ui
 
 func (repr *chunkReprJS) generate(c *linkerContext, chunk *chunkInfo) func([]ast.ImportRecord) []OutputFile {
 	var results []OutputFile
-	compileResults := make([]compileResultJS, 0, len(chunk.filesInChunkInOrder))
+	compileResults := make([]compileResultJS, 0, len(chunk.partsInChunkInOrder))
 	runtimeMembers := c.files[runtime.SourceIndex].repr.(*reprJS).ast.ModuleScope.Members
 	commonJSRef := js_ast.FollowSymbols(c.symbols, runtimeMembers["__commonJS"].Ref)
 	toModuleRef := js_ast.FollowSymbols(c.symbols, runtimeMembers["__toModule"].Ref)
@@ -3138,15 +3196,11 @@ func (repr *chunkReprJS) generate(c *linkerContext, chunk *chunkInfo) func([]ast
 
 	// Generate JavaScript for each file in parallel
 	waitGroup := sync.WaitGroup{}
-	for _, sourceIndex := range chunk.filesInChunkInOrder {
+	for _, partRange := range chunk.partsInChunkInOrder {
 		// Skip the runtime in test output
-		if sourceIndex == runtime.SourceIndex && c.options.OmitRuntimeForTests {
+		if partRange.sourceIndex == runtime.SourceIndex && c.options.OmitRuntimeForTests {
 			continue
 		}
-
-		// Each file may optionally contain additional files to be copied to the
-		// output directory. This is used by the "file" loader.
-		results = append(results, c.files[sourceIndex].additionalFiles...)
 
 		// Create a goroutine for this file
 		compileResults = append(compileResults, compileResultJS{})
@@ -3155,12 +3209,18 @@ func (repr *chunkReprJS) generate(c *linkerContext, chunk *chunkInfo) func([]ast
 		go c.generateCodeForFileInChunkJS(
 			r,
 			&waitGroup,
-			sourceIndex,
+			partRange,
 			chunk.entryBits,
 			commonJSRef,
 			toModuleRef,
 			compileResult,
 		)
+	}
+
+	// Each file may optionally contain additional files to be copied to the
+	// output directory. This is used by the "file" loader.
+	for _, sourceIndex := range chunk.filesInChunkInOrder {
+		results = append(results, c.files[sourceIndex].additionalFiles...)
 	}
 
 	// Wait for cross-chunk import records before continuing
@@ -3230,7 +3290,7 @@ func (repr *chunkReprJS) generate(c *linkerContext, chunk *chunkInfo) func([]ast
 		if c.options.OutputFormat == config.FormatIIFE {
 			var text string
 			indent = "  "
-			if c.options.UnsupportedFeatures.Has(compat.Arrow) {
+			if c.options.UnsupportedJSFeatures.Has(compat.Arrow) {
 				text = "(function()" + space + "{" + newline
 			} else {
 				text = "(()" + space + "=>" + space + "{" + newline
@@ -3277,6 +3337,7 @@ func (repr *chunkReprJS) generate(c *linkerContext, chunk *chunkInfo) func([]ast
 		var entryPointTail *js_printer.PrintResult
 		var commentList []string
 		commentSet := make(map[string]bool)
+		prevComment := uint32(0)
 		for _, compileResult := range compileResults {
 			isRuntime := compileResult.sourceIndex == runtime.SourceIndex
 			for text := range compileResult.ExtractedComments {
@@ -3292,8 +3353,8 @@ func (repr *chunkReprJS) generate(c *linkerContext, chunk *chunkInfo) func([]ast
 				entryPointTail = compileResult.entryPointTail
 			}
 
-			// Don't add a file name comment for the runtime
-			if c.options.Mode == config.ModeBundle && !c.options.RemoveWhitespace && !isRuntime {
+			// Add a comment with the file path before the file contents
+			if c.options.Mode == config.ModeBundle && !c.options.RemoveWhitespace && prevComment != compileResult.sourceIndex && len(compileResult.JS) > 0 {
 				if newlineBeforeComment {
 					prevOffset.advanceString("\n")
 					j.AddString("\n")
@@ -3302,11 +3363,7 @@ func (repr *chunkReprJS) generate(c *linkerContext, chunk *chunkInfo) func([]ast
 				text := fmt.Sprintf("%s// %s\n", indent, c.files[compileResult.sourceIndex].source.PrettyPath)
 				prevOffset.advanceString(text)
 				j.AddString(text)
-			}
-
-			// Omit the trailing semicolon when minifying the last file in IIFE mode
-			if !isRuntime || len(compileResult.JS) > 0 {
-				newlineBeforeComment = true
+				prevComment = compileResult.sourceIndex
 			}
 
 			// Don't include the runtime in source maps
@@ -3341,6 +3398,11 @@ func (repr *chunkReprJS) generate(c *linkerContext, chunk *chunkInfo) func([]ast
 						js_printer.QuoteForJSON(c.files[compileResult.sourceIndex].source.PrettyPath),
 						len(compileResult.JS)))
 				}
+			}
+
+			// Put a newline before the next file path comment
+			if len(compileResult.JS) > 0 {
+				newlineBeforeComment = true
 			}
 		}
 
@@ -3642,21 +3704,21 @@ func (offset *lineColumnOffset) advanceString(text string) {
 	}
 }
 
-func markBindingAsUnbound(binding js_ast.Binding, symbols js_ast.SymbolMap) {
+func preventBindingsFromBeingRenamed(binding js_ast.Binding, symbols js_ast.SymbolMap) {
 	switch b := binding.Data.(type) {
 	case *js_ast.BMissing:
 
 	case *js_ast.BIdentifier:
-		symbols.Get(b.Ref).Kind = js_ast.SymbolUnbound
+		symbols.Get(b.Ref).MustNotBeRenamed = true
 
 	case *js_ast.BArray:
 		for _, i := range b.Items {
-			markBindingAsUnbound(i.Binding, symbols)
+			preventBindingsFromBeingRenamed(i.Binding, symbols)
 		}
 
 	case *js_ast.BObject:
 		for _, p := range b.Properties {
-			markBindingAsUnbound(p.Value, symbols)
+			preventBindingsFromBeingRenamed(p.Value, symbols)
 		}
 
 	default:
@@ -3667,7 +3729,7 @@ func markBindingAsUnbound(binding js_ast.Binding, symbols js_ast.SymbolMap) {
 // Marking a symbol as unbound prevents it from being renamed or minified.
 // This is only used when a module is compiled independently. We use a very
 // different way of handling exports and renaming/minifying when bundling.
-func (c *linkerContext) markExportsAsUnbound(sourceIndex uint32) {
+func (c *linkerContext) preventExportsFromBeingRenamed(sourceIndex uint32) {
 	repr, ok := c.files[sourceIndex].repr.(*reprJS)
 	if !ok {
 		return
@@ -3692,7 +3754,7 @@ func (c *linkerContext) markExportsAsUnbound(sourceIndex uint32) {
 			case *js_ast.SLocal:
 				if s.IsExport {
 					for _, decl := range s.Decls {
-						markBindingAsUnbound(decl.Binding, c.symbols)
+						preventBindingsFromBeingRenamed(decl.Binding, c.symbols)
 					}
 					hasImportOrExport = true
 				}
@@ -3728,7 +3790,7 @@ func (c *linkerContext) markExportsAsUnbound(sourceIndex uint32) {
 	// <script> tag). All symbols in nested scopes are still minified.
 	if !hasImportOrExport {
 		for _, member := range repr.ast.ModuleScope.Members {
-			c.symbols.Get(member.Ref).Kind = js_ast.SymbolUnbound
+			c.symbols.Get(member.Ref).MustNotBeRenamed = true
 		}
 	}
 }

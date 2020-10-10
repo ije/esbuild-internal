@@ -1,3 +1,17 @@
+TestPackageJsonBadMain
+---------- /Users/user/project/out.js ----------
+// /Users/user/project/node_modules/demo-pkg/index.js
+var require_demo_pkg = __commonJS((exports, module) => {
+  module.exports = function() {
+    return 123;
+  };
+});
+
+// /Users/user/project/src/entry.js
+const demo_pkg = __toModule(require_demo_pkg());
+console.log(demo_pkg.default());
+
+================================================================================
 TestPackageJsonBrowserMapAvoidMissing
 ---------- /Users/user/project/out.js ----------
 // /Users/user/project/node_modules/component-indexof/index.js
@@ -13,8 +27,6 @@ try {
 } catch (err) {
   var index = require_component_indexof();
 }
-
-// /Users/user/project/src/entry.js
 
 ================================================================================
 TestPackageJsonBrowserMapModuleDisabled
@@ -239,8 +251,6 @@ console.log(require_main_browser());
 const demo_pkg = __toModule(require_main_browser());
 console.log(demo_pkg.default);
 
-// /Users/user/project/src/entry.js
-
 ================================================================================
 TestPackageJsonDualPackageHazardImportAndRequireForceModuleBeforeMain
 ---------- /Users/user/project/out.js ----------
@@ -258,8 +268,6 @@ console.log(require_module());
 // /Users/user/project/src/test-module.js
 const demo_pkg = __toModule(require_module());
 console.log(demo_pkg.default);
-
-// /Users/user/project/src/entry.js
 
 ================================================================================
 TestPackageJsonDualPackageHazardImportAndRequireSameFile
@@ -287,8 +295,6 @@ console.log(require_main());
 // /Users/user/project/src/test-module.js
 const demo_pkg = __toModule(require_main());
 console.log(demo_pkg.default);
-
-// /Users/user/project/src/entry.js
 
 ================================================================================
 TestPackageJsonDualPackageHazardImportOnly

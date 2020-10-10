@@ -178,6 +178,7 @@ func (p *parser) parseListOfDeclarations() (list []css_ast.R) {
 			p.advance()
 
 		case css_lexer.TEndOfFile, css_lexer.TCloseBrace:
+			p.processDeclarations(list)
 			return
 
 		case css_lexer.TAtKeyword:
@@ -510,6 +511,30 @@ loop:
 			// automatically omitted by the printer if we're minifying)
 			token.HasWhitespaceAfter = true
 
+		case css_lexer.TNumber:
+			if p.options.MangleSyntax {
+				if text, ok := mangleNumber(token.Text); ok {
+					token.Text = text
+				}
+			}
+
+		case css_lexer.TPercentage:
+			if p.options.MangleSyntax {
+				if text, ok := mangleNumber(token.PercentValue()); ok {
+					token.Text = text + "%"
+				}
+			}
+
+		case css_lexer.TDimension:
+			token.UnitOffset = t.UnitOffset
+
+			if p.options.MangleSyntax {
+				if text, ok := mangleNumber(token.DimensionValue()); ok {
+					token.Text = text + token.DimensionUnit()
+					token.UnitOffset = uint16(len(text))
+				}
+			}
+
 		case css_lexer.TString:
 			token.Text = css_lexer.ContentsOfStringToken(token.Text)
 
@@ -574,6 +599,31 @@ loop:
 		result = append(result, token)
 	}
 	return result, tokens
+}
+
+func mangleNumber(t string) (string, bool) {
+	original := t
+
+	if dot := strings.IndexByte(t, '.'); dot != -1 {
+		// Remove trailing zeros
+		for len(t) > 0 && t[len(t)-1] == '0' {
+			t = t[:len(t)-1]
+		}
+
+		// Remove the decimal point if it's unnecessary
+		if dot+1 == len(t) {
+			t = t[:dot]
+		} else {
+			// Remove a leading zero
+			if len(t) >= 3 && t[0] == '0' && t[1] == '.' && t[2] >= '0' && t[2] <= '9' {
+				t = t[1:]
+			} else if len(t) >= 4 && (t[0] == '+' || t[0] == '-') && t[1] == '0' && t[2] == '.' && t[3] >= '0' && t[3] <= '9' {
+				t = t[0:1] + t[2:]
+			}
+		}
+	}
+
+	return t, t != original
 }
 
 func (p *parser) parseSelectorRule() css_ast.R {
@@ -691,8 +741,12 @@ stop:
 		}
 	}
 
+	keyToken := p.tokens[keyStart]
+	keyText := keyToken.Raw(p.source.Contents)
 	return &css_ast.RDeclaration{
-		Key:       p.tokens[keyStart].Raw(p.source.Contents),
+		Key:       css_ast.KnownDeclarations[keyText],
+		KeyText:   keyText,
+		KeyRange:  keyToken.Range,
 		Value:     p.convertTokensWithImports(value),
 		Important: important,
 	}

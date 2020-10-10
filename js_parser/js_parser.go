@@ -1507,7 +1507,7 @@ func (p *parser) parseProperty(kind js_ast.PropertyKind, opts propertyOpts, erro
 				p.log.AddRangeError(&p.source, keyRange, fmt.Sprintf("Invalid method name %q", name))
 			}
 			private.Ref = p.declareSymbol(declare, key.Loc, name)
-			if p.UnsupportedFeatures.Has(declare.Feature()) {
+			if p.UnsupportedJSFeatures.Has(declare.Feature()) {
 				methodRef := p.newSymbol(js_ast.SymbolOther, name[1:]+suffix)
 				if kind == js_ast.PropertySet {
 					p.privateSetters[private.Ref] = methodRef
@@ -2213,7 +2213,7 @@ func (p *parser) parsePrefix(level js_ast.L, errors *deferredErrors, flags exprF
 	case js_lexer.TTemplateHead:
 		head := p.lexer.StringLiteral
 		parts := p.parseTemplateParts(false /* includeRaw */)
-		if p.UnsupportedFeatures.Has(compat.TemplateLiteral) {
+		if p.UnsupportedJSFeatures.Has(compat.TemplateLiteral) {
 			var value js_ast.Expr
 			if len(head) == 0 {
 				// "`${x}y`" => "x + 'y'"
@@ -2690,7 +2690,7 @@ func (p *parser) parseImportExpr(loc logger.Loc, level js_ast.L) js_ast.Expr {
 			r := p.lexer.Range()
 			p.lexer.Next()
 			p.hasImportMeta = true
-			if p.UnsupportedFeatures.Has(compat.ImportMeta) {
+			if p.UnsupportedJSFeatures.Has(compat.ImportMeta) {
 				r = logger.Range{Loc: loc, Len: r.End() - loc.Start}
 				p.markSyntaxFeature(compat.ImportMeta, r)
 			}
@@ -4945,7 +4945,7 @@ func (p *parser) parseStmt(opts parseStmtOpts) js_ast.Stmt {
 
 			// The catch binding is optional, and can be omitted
 			if p.lexer.Token == js_lexer.TOpenBrace {
-				if p.UnsupportedFeatures.Has(compat.OptionalCatchBinding) {
+				if p.UnsupportedJSFeatures.Has(compat.OptionalCatchBinding) {
 					// Generate a new symbol for the catch binding for older browsers
 					ref := p.newSymbol(js_ast.SymbolOther, "e")
 					p.currentScope.Generated = append(p.currentScope.Generated, ref)
@@ -4954,6 +4954,13 @@ func (p *parser) parseStmt(opts parseStmtOpts) js_ast.Stmt {
 			} else {
 				p.lexer.Expect(js_lexer.TOpenParen)
 				value := p.parseBinding()
+
+				// Skip over types
+				if p.TS.Parse && p.lexer.Token == js_lexer.TColon {
+					p.lexer.Expect(js_lexer.TColon)
+					p.skipTypeScriptType(js_ast.LLowest)
+				}
+
 				p.lexer.Expect(js_lexer.TCloseParen)
 
 				// Bare identifiers are a special case
@@ -5286,7 +5293,6 @@ func (p *parser) parseStmt(opts parseStmtOpts) js_ast.Stmt {
 			ref := p.declareSymbol(js_ast.SymbolImport, stmt.DefaultName.Loc, name)
 			p.isImportItem[ref] = true
 			stmt.DefaultName.Ref = ref
-			itemRefs["default"] = *stmt.DefaultName
 		}
 
 		// Link each import item to the namespace
@@ -6607,7 +6613,7 @@ func (p *parser) mangleIfExpr(loc logger.Loc, e *js_ast.EIf) js_ast.Expr {
 	}
 
 	// Try using the "??" operator, but only if it's supported
-	if !p.UnsupportedFeatures.Has(compat.NullishCoalescing) {
+	if !p.UnsupportedJSFeatures.Has(compat.NullishCoalescing) {
 		if binary, ok := e.Test.Data.(*js_ast.EBinary); ok {
 			switch binary.Op {
 			case js_ast.BinOpLooseEq:
@@ -7984,7 +7990,7 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 
 		// Capture "this" inside arrow functions that will be lowered into normal
 		// function expressions for older language environments
-		if p.fnOrArrowDataVisit.isArrow && p.UnsupportedFeatures.Has(compat.Arrow) && p.fnOnlyDataVisit.isThisNested {
+		if p.fnOrArrowDataVisit.isArrow && p.UnsupportedJSFeatures.Has(compat.Arrow) && p.fnOnlyDataVisit.isThisNested {
 			return js_ast.Expr{Loc: expr.Loc, Data: &js_ast.EIdentifier{Ref: p.captureThis()}}, exprOut{}
 		}
 
@@ -8237,7 +8243,7 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 				return e.Right, exprOut{}
 
 			default:
-				if p.UnsupportedFeatures.Has(compat.NullishCoalescing) {
+				if p.UnsupportedJSFeatures.Has(compat.NullishCoalescing) {
 					return p.lowerNullishCoalescing(expr.Loc, e.Left, e.Right), exprOut{}
 				}
 			}
@@ -8357,7 +8363,7 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 			}
 
 			// Lower the exponentiation operator for browsers that don't support it
-			if p.UnsupportedFeatures.Has(compat.ExponentOperator) {
+			if p.UnsupportedJSFeatures.Has(compat.ExponentOperator) {
 				return p.callRuntime(expr.Loc, "__pow", []js_ast.Expr{e.Left, e.Right}), exprOut{}
 			}
 
@@ -8448,7 +8454,7 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 
 		case js_ast.BinOpPowAssign:
 			// Lower the exponentiation operator for browsers that don't support it
-			if p.UnsupportedFeatures.Has(compat.ExponentOperator) {
+			if p.UnsupportedJSFeatures.Has(compat.ExponentOperator) {
 				return p.lowerExponentiationAssignmentOperator(expr.Loc, e), exprOut{}
 			}
 
@@ -8487,17 +8493,17 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 			}
 
 		case js_ast.BinOpNullishCoalescingAssign:
-			if p.UnsupportedFeatures.Has(compat.LogicalAssignment) {
+			if p.UnsupportedJSFeatures.Has(compat.LogicalAssignment) {
 				return p.lowerNullishCoalescingAssignmentOperator(expr.Loc, e), exprOut{}
 			}
 
 		case js_ast.BinOpLogicalAndAssign:
-			if p.UnsupportedFeatures.Has(compat.LogicalAssignment) {
+			if p.UnsupportedJSFeatures.Has(compat.LogicalAssignment) {
 				return p.lowerLogicalAssignmentOperator(expr.Loc, e, js_ast.BinOpLogicalAnd), exprOut{}
 			}
 
 		case js_ast.BinOpLogicalOrAssign:
-			if p.UnsupportedFeatures.Has(compat.LogicalAssignment) {
+			if p.UnsupportedJSFeatures.Has(compat.LogicalAssignment) {
 				return p.lowerLogicalAssignmentOperator(expr.Loc, e, js_ast.BinOpLogicalOr), exprOut{}
 			}
 		}
@@ -8545,7 +8551,7 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 			// Lower private member access only if we're sure the target isn't needed
 			// for the value of "this" for a call expression. All other cases will be
 			// taken care of by the enclosing call expression.
-			if p.UnsupportedFeatures.Has(kind.Feature()) && e.OptionalChain == js_ast.OptionalChainNone &&
+			if p.UnsupportedJSFeatures.Has(kind.Feature()) && e.OptionalChain == js_ast.OptionalChainNone &&
 				in.assignTarget == js_ast.AssignTargetNone && !isCallTarget {
 				// "foo.#bar" => "__privateGet(foo, #bar)"
 				return p.lowerPrivateGet(e.Target, e.Index.Loc, private), exprOut{}
@@ -8806,7 +8812,7 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 		e.Value = p.visitExpr(e.Value)
 
 		// "await" expressions turn into "yield" expressions when lowering
-		if p.UnsupportedFeatures.Has(compat.AsyncAwait) {
+		if p.UnsupportedJSFeatures.Has(compat.AsyncAwait) {
 			return js_ast.Expr{Loc: expr.Loc, Data: &js_ast.EYield{Value: &e.Value}}, exprOut{}
 		}
 
@@ -9166,7 +9172,7 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 		p.fnOrArrowDataVisit = oldFnOrArrowData
 
 		// Convert arrow functions to function expressions when lowering
-		if p.UnsupportedFeatures.Has(compat.Arrow) {
+		if p.UnsupportedJSFeatures.Has(compat.Arrow) {
 			return js_ast.Expr{Loc: expr.Loc, Data: &js_ast.EFunction{Fn: js_ast.Fn{
 				Args:         e.Args,
 				Body:         e.Body,
@@ -9221,8 +9227,8 @@ func (p *parser) handleIdentifier(loc logger.Loc, assignTarget js_ast.AssignTarg
 
 	// Capture the "arguments" variable if necessary
 	if p.fnOnlyDataVisit.argumentsRef != nil && ref == *p.fnOnlyDataVisit.argumentsRef {
-		isInsideUnsupportedArrow := p.fnOrArrowDataVisit.isArrow && p.UnsupportedFeatures.Has(compat.Arrow)
-		isInsideUnsupportedAsyncArrow := p.fnOnlyDataVisit.isInsideAsyncArrowFn && p.UnsupportedFeatures.Has(compat.AsyncAwait)
+		isInsideUnsupportedArrow := p.fnOrArrowDataVisit.isArrow && p.UnsupportedJSFeatures.Has(compat.Arrow)
+		isInsideUnsupportedAsyncArrow := p.fnOnlyDataVisit.isInsideAsyncArrowFn && p.UnsupportedJSFeatures.Has(compat.AsyncAwait)
 		if isInsideUnsupportedArrow || isInsideUnsupportedAsyncArrow {
 			return js_ast.Expr{Loc: loc, Data: &js_ast.EIdentifier{Ref: p.captureArguments()}}
 		}
@@ -9420,16 +9426,38 @@ func (p *parser) scanForImportsAndExports(stmts []js_ast.Stmt) []js_ast.Stmt {
 
 			if p.Mode != config.ModePassThrough {
 				if s.StarNameLoc != nil {
-					// If we're bundling a star import, add any import items we generated
-					// for this namespace while parsing as explicit import items instead.
+					// If we're bundling a star import and the namespace is only ever
+					// used for property accesses, then convert each unique property to
+					// a clause item in the import statement and remove the star import.
 					// That will cause the bundler to bundle them more efficiently when
 					// both this module and the imported module are in the same group.
-					if importItems, ok := p.importItemsForNamespace[s.NamespaceRef]; ok && len(importItems) > 0 {
-						items := s.Items
-						if items == nil {
-							items = &[]js_ast.ClauseItem{}
-						}
+					//
+					// Before:
+					//
+					//   import * as ns from 'foo'
+					//   console.log(ns.a, ns.b)
+					//
+					// After:
+					//
+					//   import {a, b} from 'foo'
+					//   console.log(a, b)
+					//
+					// This is not done if the namespace itself is used, because in that
+					// case the code for the namespace will have to be generated. This is
+					// determined by the symbol count because the parser only counts the
+					// star import as used if it was used for something other than a
+					// property access:
+					//
+					//   import * as ns from 'foo'
+					//   console.log(ns, ns.a, ns.b)
+					//
+					convertStarToClause := p.symbols[s.NamespaceRef.InnerIndex].UseCountEstimate == 0
+					if convertStarToClause {
+						s.StarNameLoc = nil
+					}
 
+					// "importItemsForNamespace" has property accesses off the namespace
+					if importItems, ok := p.importItemsForNamespace[s.NamespaceRef]; ok && len(importItems) > 0 {
 						// Sort keys for determinism
 						sorted := make([]string, 0, len(importItems))
 						for alias := range importItems {
@@ -9437,33 +9465,53 @@ func (p *parser) scanForImportsAndExports(stmts []js_ast.Stmt) []js_ast.Stmt {
 						}
 						sort.Strings(sorted)
 
-						for _, alias := range sorted {
-							name := importItems[alias]
-							originalName := p.symbols[name.Ref.InnerIndex].OriginalName
-							*items = append(*items, js_ast.ClauseItem{
-								Alias:        alias,
-								AliasLoc:     name.Loc,
-								Name:         name,
-								OriginalName: originalName,
-							})
-							p.declaredSymbols = append(p.declaredSymbols, js_ast.DeclaredSymbol{
-								Ref:        name.Ref,
-								IsTopLevel: true,
-							})
-						}
-						s.Items = items
-					}
+						if convertStarToClause {
+							// Create an import clause for these items. Named imports will be
+							// automatically created later on since there is now a clause.
+							items := make([]js_ast.ClauseItem, 0, len(importItems))
+							for _, alias := range sorted {
+								name := importItems[alias]
+								originalName := p.symbols[name.Ref.InnerIndex].OriginalName
+								items = append(items, js_ast.ClauseItem{
+									Alias:        alias,
+									AliasLoc:     name.Loc,
+									Name:         name,
+									OriginalName: originalName,
+								})
+								p.declaredSymbols = append(p.declaredSymbols, js_ast.DeclaredSymbol{
+									Ref:        name.Ref,
+									IsTopLevel: true,
+								})
+							}
+							if s.Items != nil {
+								// The syntax "import {x}, * as y from 'path'" isn't valid
+								panic("Internal error")
+							}
+							s.Items = &items
+						} else {
+							// If we aren't converting this star import to a clause, still
+							// create named imports for these property accesses. This will
+							// cause missing imports to generate useful warnings.
+							//
+							// It will also improve bundling efficiency for internal imports
+							// by still converting property accesses off the namespace into
+							// bare identifiers even if the namespace is still needed.
+							for _, alias := range sorted {
+								name := importItems[alias]
+								p.namedImports[name.Ref] = js_ast.NamedImport{
+									Alias:             alias,
+									AliasLoc:          name.Loc,
+									NamespaceRef:      s.NamespaceRef,
+									ImportRecordIndex: s.ImportRecordIndex,
+								}
 
-					// Remove the star import if it's not actually used. The parser only
-					// counts the star import as used if it was used for something other
-					// than a property access.
-					//
-					// That way if it's only used for property accesses, we can omit the
-					// code for the star import entirely and just merge the property
-					// accesses directly with the appropriate symbols instead (since both
-					// this module and the imported module are in the same group).
-					if p.symbols[s.NamespaceRef.InnerIndex].UseCountEstimate == 0 {
-						s.StarNameLoc = nil
+								// Make sure the printer prints this as a property access
+								p.symbols[name.Ref.InnerIndex].NamespaceAlias = &js_ast.NamespaceAlias{
+									NamespaceRef: s.NamespaceRef,
+									Alias:        alias,
+								}
+							}
+						}
 					}
 				}
 
@@ -10073,6 +10121,7 @@ func Parse(log logger.Log, source logger.Source, options config.Options) (result
 		parts = p.appendPart(parts, stmts)
 	} else {
 		// When bundling, each top-level statement is potentially a separate part
+		var before []js_ast.Part
 		var after []js_ast.Part
 		for _, stmt := range stmts {
 			switch s := stmt.Data.(type) {
@@ -10084,6 +10133,12 @@ func Parse(log logger.Log, source logger.Source, options config.Options) (result
 					parts = p.appendPart(parts, []js_ast.Stmt{{Loc: stmt.Loc, Data: &clone}})
 				}
 
+			case *js_ast.SImport, *js_ast.SExportFrom, *js_ast.SExportStar:
+				// Move imports (and import-like exports) to the top of the file to
+				// ensure that if they are converted to a require() call, the effects
+				// will take place before any other statements are evaluated.
+				before = p.appendPart(before, []js_ast.Stmt{stmt})
+
 			case *js_ast.SExportEquals:
 				// TypeScript "export = value;" becomes "module.exports = value;". This
 				// must happen at the end after everything is parsed because TypeScript
@@ -10094,7 +10149,7 @@ func Parse(log logger.Log, source logger.Source, options config.Options) (result
 				parts = p.appendPart(parts, []js_ast.Stmt{stmt})
 			}
 		}
-		parts = append(parts, after...)
+		parts = append(append(before, parts...), after...)
 	}
 
 	result = p.toAST(source, parts, hashbang, directive)
@@ -10157,7 +10212,7 @@ func (p *parser) prepareForVisitPass(options *config.Options) {
 	}
 
 	// Convert "import.meta" to a variable if it's not supported in the output format
-	if p.hasImportMeta && (p.UnsupportedFeatures.Has(compat.ImportMeta) || (p.Mode != config.ModePassThrough && !p.OutputFormat.KeepES6ImportExportSyntax())) {
+	if p.hasImportMeta && (p.UnsupportedJSFeatures.Has(compat.ImportMeta) || (p.Mode != config.ModePassThrough && !p.OutputFormat.KeepES6ImportExportSyntax())) {
 		p.importMetaRef = p.newSymbol(js_ast.SymbolOther, "import_meta")
 		p.moduleScope.Generated = append(p.moduleScope.Generated, p.importMetaRef)
 	} else {
