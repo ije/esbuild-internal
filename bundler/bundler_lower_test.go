@@ -99,7 +99,8 @@ func TestLowerExponentiationOperatorNoBundle(t *testing.T) {
 			UnsupportedJSFeatures: es(2015),
 			AbsOutputFile:         "/out.js",
 		},
-		expectedScanLog: "/entry.js: error: Big integer literals are not available in the configured target environment\n",
+		expectedScanLog: `entry.js: error: Big integer literals are not available in the configured target environment
+`,
 	})
 }
 
@@ -899,14 +900,14 @@ func TestLowerAsyncES5(t *testing.T) {
 			UnsupportedJSFeatures: es(5),
 			AbsOutputFile:         "/out.js",
 		},
-		expectedScanLog: `/arrow-1.js: error: Transforming async functions to the configured target environment is not supported yet
-/arrow-2.js: error: Transforming async functions to the configured target environment is not supported yet
-/export-def-1.js: error: Transforming async functions to the configured target environment is not supported yet
-/export-def-2.js: error: Transforming async functions to the configured target environment is not supported yet
-/fn-expr.js: error: Transforming async functions to the configured target environment is not supported yet
-/fn-stmt.js: error: Transforming async functions to the configured target environment is not supported yet
-/obj-method.js: error: Transforming async functions to the configured target environment is not supported yet
-/obj-method.js: error: Transforming object literal extensions to the configured target environment is not supported yet
+		expectedScanLog: `arrow-1.js: error: Transforming async functions to the configured target environment is not supported yet
+arrow-2.js: error: Transforming async functions to the configured target environment is not supported yet
+export-def-1.js: error: Transforming async functions to the configured target environment is not supported yet
+export-def-2.js: error: Transforming async functions to the configured target environment is not supported yet
+fn-expr.js: error: Transforming async functions to the configured target environment is not supported yet
+fn-stmt.js: error: Transforming async functions to the configured target environment is not supported yet
+obj-method.js: error: Transforming async functions to the configured target environment is not supported yet
+obj-method.js: error: Transforming object literal extensions to the configured target environment is not supported yet
 `,
 	})
 }
@@ -943,33 +944,6 @@ func TestLowerAsyncSuperES2016NoBundle(t *testing.T) {
 	})
 }
 
-func TestLowerClassFieldStrict2020NoBundle(t *testing.T) {
-	lower_suite.expectBundled(t, bundled{
-		files: map[string]string{
-			"/entry.js": `
-				class Foo {
-					#foo = 123
-					#bar
-					foo = 123
-					bar
-					static #s_foo = 123
-					static #s_bar
-					static s_foo = 123
-					static s_bar
-				}
-			`,
-		},
-		entryPaths: []string{"/entry.js"},
-		options: config.Options{
-			UnsupportedJSFeatures: es(2020),
-			Strict: config.StrictOptions{
-				ClassFields: true,
-			},
-			AbsOutputFile: "/out.js",
-		},
-	})
-}
-
 func TestLowerClassField2020NoBundle(t *testing.T) {
 	lower_suite.expectBundled(t, bundled{
 		files: map[string]string{
@@ -990,32 +964,6 @@ func TestLowerClassField2020NoBundle(t *testing.T) {
 		options: config.Options{
 			UnsupportedJSFeatures: es(2020),
 			AbsOutputFile:         "/out.js",
-		},
-	})
-}
-
-func TestLowerClassFieldStrictNextNoBundle(t *testing.T) {
-	lower_suite.expectBundled(t, bundled{
-		files: map[string]string{
-			"/entry.js": `
-				class Foo {
-					#foo = 123
-					#bar
-					foo = 123
-					bar
-					static #s_foo = 123
-					static #s_bar
-					static s_foo = 123
-					static s_bar
-				}
-			`,
-		},
-		entryPaths: []string{"/entry.js"},
-		options: config.Options{
-			Strict: config.StrictOptions{
-				ClassFields: true,
-			},
-			AbsOutputFile: "/out.js",
 		},
 	})
 }
@@ -1043,33 +991,6 @@ func TestLowerClassFieldNextNoBundle(t *testing.T) {
 	})
 }
 
-func TestTSLowerClassFieldStrict2020NoBundle(t *testing.T) {
-	lower_suite.expectBundled(t, bundled{
-		files: map[string]string{
-			"/entry.ts": `
-				class Foo {
-					#foo = 123
-					#bar
-					foo = 123
-					bar
-					static #s_foo = 123
-					static #s_bar
-					static s_foo = 123
-					static s_bar
-				}
-			`,
-		},
-		entryPaths: []string{"/entry.ts"},
-		options: config.Options{
-			UnsupportedJSFeatures: es(2020),
-			Strict: config.StrictOptions{
-				ClassFields: true,
-			},
-			AbsOutputFile: "/out.js",
-		},
-	})
-}
-
 func TestTSLowerClassField2020NoBundle(t *testing.T) {
 	lower_suite.expectBundled(t, bundled{
 		files: map[string]string{
@@ -1090,32 +1011,6 @@ func TestTSLowerClassField2020NoBundle(t *testing.T) {
 		options: config.Options{
 			UnsupportedJSFeatures: es(2020),
 			AbsOutputFile:         "/out.js",
-		},
-	})
-}
-
-func TestTSLowerClassPrivateFieldStrictNextNoBundle(t *testing.T) {
-	lower_suite.expectBundled(t, bundled{
-		files: map[string]string{
-			"/entry.ts": `
-				class Foo {
-					#foo = 123
-					#bar
-					foo = 123
-					bar
-					static #s_foo = 123
-					static #s_bar
-					static s_foo = 123
-					static s_bar
-				}
-			`,
-		},
-		entryPaths: []string{"/entry.ts"},
-		options: config.Options{
-			Strict: config.StrictOptions{
-				ClassFields: true,
-			},
-			AbsOutputFile: "/out.js",
 		},
 	})
 }
@@ -1185,6 +1080,48 @@ func TestLowerClassFieldStrictTsconfigJson2020(t *testing.T) {
 	})
 }
 
+func TestTSLowerClassFieldStrictTsconfigJson2020(t *testing.T) {
+	lower_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import loose from './loose'
+				import strict from './strict'
+				console.log(loose, strict)
+			`,
+			"/loose/index.ts": `
+				export default class {
+					foo
+				}
+			`,
+			"/loose/tsconfig.json": `
+				{
+					"compilerOptions": {
+						"useDefineForClassFields": false
+					}
+				}
+			`,
+			"/strict/index.ts": `
+				export default class {
+					foo
+				}
+			`,
+			"/strict/tsconfig.json": `
+				{
+					"compilerOptions": {
+						"useDefineForClassFields": true
+					}
+				}
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:                  config.ModeBundle,
+			UnsupportedJSFeatures: es(2020),
+			AbsOutputFile:         "/out.js",
+		},
+	})
+}
+
 func TestTSLowerObjectRest2017NoBundle(t *testing.T) {
 	lower_suite.expectBundled(t, bundled{
 		files: map[string]string{
@@ -1216,6 +1153,13 @@ func TestTSLowerObjectRest2017NoBundle(t *testing.T) {
 
 				({ ...assign } = {});
 				({ obj_method({ ...x }) {} });
+
+				// Check for used return values
+				({ ...x } = x);
+				for ({ ...x } = x; 0; ) ;
+				console.log({ ...x } = x);
+				console.log({ x, ...xx } = { x });
+				console.log({ x: { ...xx } } = { x });
 			`,
 		},
 		entryPaths: []string{"/entry.ts"},
@@ -1257,6 +1201,13 @@ func TestTSLowerObjectRest2018NoBundle(t *testing.T) {
 
 				({ ...assign } = {});
 				({ obj_method({ ...x }) {} });
+
+				// Check for used return values
+				({ ...x } = x);
+				for ({ ...x } = x; 0; ) ;
+				console.log({ ...x } = x);
+				console.log({ x, ...xx } = { x });
+				console.log({ x: { ...xx } } = { x });
 			`,
 		},
 		entryPaths: []string{"/entry.ts"},
@@ -1290,5 +1241,109 @@ func TestClassSuperThisIssue242NoBundle(t *testing.T) {
 			UnsupportedJSFeatures: es(2019),
 			AbsOutputFile:         "/out.js",
 		},
+	})
+}
+
+func TestLowerExportStarAsNameCollisionNoBundle(t *testing.T) {
+	lower_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				export * as ns from 'path'
+				let ns = 123
+				export {ns as sn}
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			UnsupportedJSFeatures: es(2019),
+			AbsOutputFile:         "/out.js",
+		},
+	})
+}
+
+func TestLowerExportStarAsNameCollision(t *testing.T) {
+	lower_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import * as test from './nested'
+				console.log(test.foo, test.oof)
+				export * as ns from 'path1'
+				let ns = 123
+				export {ns as sn}
+			`,
+			"/nested.js": `
+				export * as foo from 'path2'
+				let foo = 123
+				export {foo as oof}
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:                  config.ModeBundle,
+			UnsupportedJSFeatures: es(2019),
+			AbsOutputFile:         "/out.js",
+			ExternalModules: config.ExternalModules{
+				NodeModules: map[string]bool{
+					"path1": true,
+					"path2": true,
+				},
+			},
+		},
+	})
+}
+
+func TestLowerStrictModeSyntax(t *testing.T) {
+	lower_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import './for-in'
+			`,
+			"/for-in.js": `
+				if (test)
+					for (var a = b in {}) ;
+				for (var x = y in {}) ;
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			OutputFormat:  config.FormatESModule,
+			AbsOutputFile: "/out.js",
+		},
+	})
+}
+
+func TestLowerForbidStrictModeSyntax(t *testing.T) {
+	lower_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import './with'
+				import './delete-1'
+				import './delete-2'
+				import './delete-3'
+			`,
+			"/with.js": `
+				with (x) y
+			`,
+			"/delete-1.js": `
+				delete x
+			`,
+			"/delete-2.js": `
+				delete (y)
+			`,
+			"/delete-3.js": `
+				delete (1 ? z : z)
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			OutputFormat:  config.FormatESModule,
+			AbsOutputFile: "/out.js",
+		},
+		expectedScanLog: `delete-1.js: error: Delete of a bare identifier cannot be used with the "esm" output format due to strict mode
+delete-2.js: error: Delete of a bare identifier cannot be used with the "esm" output format due to strict mode
+with.js: error: With statements cannot be used with the "esm" output format due to strict mode
+`,
 	})
 }

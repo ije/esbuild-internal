@@ -22,11 +22,11 @@ func expectParseError(t *testing.T, contents string, expected string) {
 	t.Run(contents, func(t *testing.T) {
 		t.Helper()
 		log := logger.NewDeferLog()
-		Parse(log, test.SourceForTest(contents), config.Options{})
+		Parse(log, test.SourceForTest(contents), Options{})
 		msgs := log.Done()
 		text := ""
 		for _, msg := range msgs {
-			text += msg.String(logger.StderrOptions{}, logger.TerminalInfo{})
+			text += msg.String(logger.OutputOptions{}, logger.TerminalInfo{})
 		}
 		test.AssertEqual(t, text, expected)
 	})
@@ -37,16 +37,22 @@ func expectPrintedCommon(t *testing.T, name string, contents string, expected st
 	t.Run(name, func(t *testing.T) {
 		t.Helper()
 		log := logger.NewDeferLog()
-		tree := Parse(log, test.SourceForTest(contents), options)
+		tree := Parse(log, test.SourceForTest(contents), Options{
+			MangleSyntax:           options.MangleSyntax,
+			RemoveWhitespace:       options.RemoveWhitespace,
+			UnsupportedCSSFeatures: options.UnsupportedCSSFeatures,
+		})
 		msgs := log.Done()
 		text := ""
 		for _, msg := range msgs {
 			if msg.Kind == logger.Error {
-				text += msg.String(logger.StderrOptions{}, logger.TerminalInfo{})
+				text += msg.String(logger.OutputOptions{}, logger.TerminalInfo{})
 			}
 		}
 		assertEqual(t, text, "")
-		css := css_printer.Print(tree, css_printer.Options{})
+		css := css_printer.Print(tree, css_printer.Options{
+			RemoveWhitespace: options.RemoveWhitespace,
+		})
 		assertEqual(t, string(css), expected)
 	})
 }
@@ -68,6 +74,170 @@ func expectPrintedMangle(t *testing.T, contents string, expected string) {
 	expectPrintedCommon(t, contents+" [mangle]", contents, expected, config.Options{
 		MangleSyntax: true,
 	})
+}
+
+func expectPrintedLowerMangle(t *testing.T, contents string, expected string) {
+	t.Helper()
+	expectPrintedCommon(t, contents+" [mangle]", contents, expected, config.Options{
+		UnsupportedCSSFeatures: ^compat.CSSFeature(0),
+		MangleSyntax:           true,
+	})
+}
+
+func expectPrintedMangleMinify(t *testing.T, contents string, expected string) {
+	t.Helper()
+	expectPrintedCommon(t, contents+" [mangle, minify]", contents, expected, config.Options{
+		MangleSyntax:     true,
+		RemoveWhitespace: true,
+	})
+}
+
+func TestEscapes(t *testing.T) {
+	// TIdent
+	expectPrinted(t, "a { value: id\\65nt }", "a {\n  value: ident;\n}\n")
+	expectPrinted(t, "a { value: \\69 dent }", "a {\n  value: ident;\n}\n")
+	expectPrinted(t, "a { value: \\69dent }", "a {\n  value: \u69DEnt;\n}\n")
+	expectPrinted(t, "a { value: \\2cx }", "a {\n  value: \\,x;\n}\n")
+	expectPrinted(t, "a { value: \\,x }", "a {\n  value: \\,x;\n}\n")
+	expectPrinted(t, "a { value: x\\2c }", "a {\n  value: x\\,;\n}\n")
+	expectPrinted(t, "a { value: x\\, }", "a {\n  value: x\\,;\n}\n")
+
+	// THash
+	expectPrinted(t, "a { value: #0h\\61sh }", "a {\n  value: #0hash;\n}\n")
+	expectPrinted(t, "a { value: #\\30hash }", "a {\n  value: #0hash;\n}\n")
+	expectPrinted(t, "a { value: #\\2cx }", "a {\n  value: #\\,x;\n}\n")
+	expectPrinted(t, "a { value: #\\,x }", "a {\n  value: #\\,x;\n}\n")
+
+	// THashID
+	expectPrinted(t, "a { value: #h\\61sh }", "a {\n  value: #hash;\n}\n")
+	expectPrinted(t, "a { value: #\\68 ash }", "a {\n  value: #hash;\n}\n")
+	expectPrinted(t, "a { value: #\\68ash }", "a {\n  value: #\u068Ash;\n}\n")
+	expectPrinted(t, "a { value: #x\\2c }", "a {\n  value: #x\\,;\n}\n")
+	expectPrinted(t, "a { value: #x\\, }", "a {\n  value: #x\\,;\n}\n")
+
+	// TFunction
+	expectPrinted(t, "a { value: f\\6e() }", "a {\n  value: fn();\n}\n")
+	expectPrinted(t, "a { value: \\66n() }", "a {\n  value: fn();\n}\n")
+	expectPrinted(t, "a { value: \\2cx() }", "a {\n  value: \\,x();\n}\n")
+	expectPrinted(t, "a { value: \\,x() }", "a {\n  value: \\,x();\n}\n")
+	expectPrinted(t, "a { value: x\\2c() }", "a {\n  value: x\\,();\n}\n")
+	expectPrinted(t, "a { value: x\\,() }", "a {\n  value: x\\,();\n}\n")
+
+	// TString
+	expectPrinted(t, "a { value: 'a\\62 c' }", "a {\n  value: \"abc\";\n}\n")
+	expectPrinted(t, "a { value: 'a\\62c' }", "a {\n  value: \"a\u062C\";\n}\n")
+	expectPrinted(t, "a { value: '\\61 bc' }", "a {\n  value: \"abc\";\n}\n")
+	expectPrinted(t, "a { value: '\\61bc' }", "a {\n  value: \"\u61BC\";\n}\n")
+	expectPrinted(t, "a { value: '\\2c' }", "a {\n  value: \",\";\n}\n")
+	expectPrinted(t, "a { value: '\\,' }", "a {\n  value: \",\";\n}\n")
+
+	// TURL
+	expectPrinted(t, "a { value: url(a\\62 c) }", "a {\n  value: url(abc);\n}\n")
+	expectPrinted(t, "a { value: url(a\\62c) }", "a {\n  value: url(a\u062C);\n}\n")
+	expectPrinted(t, "a { value: url(\\61 bc) }", "a {\n  value: url(abc);\n}\n")
+	expectPrinted(t, "a { value: url(\\61bc) }", "a {\n  value: url(\u61BC);\n}\n")
+	expectPrinted(t, "a { value: url(\\2c) }", "a {\n  value: url(,);\n}\n")
+	expectPrinted(t, "a { value: url(\\,) }", "a {\n  value: url(,);\n}\n")
+
+	// TAtKeyword
+	expectPrinted(t, "a { value: @k\\65yword }", "a {\n  value: @keyword;\n}\n")
+	expectPrinted(t, "a { value: @\\6b eyword }", "a {\n  value: @keyword;\n}\n")
+	expectPrinted(t, "a { value: @\\6beyword }", "a {\n  value: @\u06BEyword;\n}\n")
+	expectPrinted(t, "a { value: @\\2cx }", "a {\n  value: @\\,x;\n}\n")
+	expectPrinted(t, "a { value: @\\,x }", "a {\n  value: @\\,x;\n}\n")
+	expectPrinted(t, "a { value: @x\\2c }", "a {\n  value: @x\\,;\n}\n")
+	expectPrinted(t, "a { value: @x\\, }", "a {\n  value: @x\\,;\n}\n")
+
+	// TDimension
+	expectPrinted(t, "a { value: 10\\65m }", "a {\n  value: 10em;\n}\n")
+	expectPrinted(t, "a { value: 10p\\32x }", "a {\n  value: 10p2x;\n}\n")
+	expectPrinted(t, "a { value: 10e\\32x }", "a {\n  value: 10\\65 2x;\n}\n")
+	expectPrinted(t, "a { value: 10\\32x }", "a {\n  value: 10\\32x;\n}\n")
+	expectPrinted(t, "a { value: 10\\2cx }", "a {\n  value: 10\\,x;\n}\n")
+	expectPrinted(t, "a { value: 10\\,x }", "a {\n  value: 10\\,x;\n}\n")
+	expectPrinted(t, "a { value: 10x\\2c }", "a {\n  value: 10x\\,;\n}\n")
+	expectPrinted(t, "a { value: 10x\\, }", "a {\n  value: 10x\\,;\n}\n")
+
+	// RDeclaration
+	expectPrintedMangle(t, "a { c\\6flor: #f00 }", "a {\n  color: red;\n}\n")
+	expectPrintedMangle(t, "a { \\63olor: #f00 }", "a {\n  color: red;\n}\n")
+	expectPrintedMangle(t, "a { \\2color: #f00 }", "a {\n  \\,olor: #f00;\n}\n")
+	expectPrintedMangle(t, "a { \\,olor: #f00 }", "a {\n  \\,olor: #f00;\n}\n")
+
+	// RUnknownAt
+	expectPrinted(t, "@unknown;", "@unknown;\n")
+	expectPrinted(t, "@u\\6eknown;", "@unknown;\n")
+	expectPrinted(t, "@\\75nknown;", "@unknown;\n")
+	expectPrinted(t, "@u\\2cnknown;", "@u\\,nknown;\n")
+	expectPrinted(t, "@u\\,nknown;", "@u\\,nknown;\n")
+	expectPrinted(t, "@\\2cunknown;", "@\\,unknown;\n")
+	expectPrinted(t, "@\\,unknown;", "@\\,unknown;\n")
+
+	// RAtKeyframes
+	expectPrinted(t, "@k\\65yframes abc { from {} }", "@keyframes abc {\n  from {\n  }\n}\n")
+	expectPrinted(t, "@keyframes \\61 bc { from {} }", "@keyframes abc {\n  from {\n  }\n}\n")
+	expectPrinted(t, "@keyframes a\\62 c { from {} }", "@keyframes abc {\n  from {\n  }\n}\n")
+	expectPrinted(t, "@keyframes abc { \\66rom {} }", "@keyframes abc {\n  from {\n  }\n}\n")
+	expectPrinted(t, "@keyframes a\\2c c { \\66rom {} }", "@keyframes a\\,c {\n  from {\n  }\n}\n")
+	expectPrinted(t, "@keyframes a\\,c { \\66rom {} }", "@keyframes a\\,c {\n  from {\n  }\n}\n")
+
+	// RAtNamespace
+	expectPrinted(t, "@n\\61mespace ns 'path';", "@namespace ns \"path\";\n")
+	expectPrinted(t, "@namespace \\6es 'path';", "@namespace ns \"path\";\n")
+	expectPrinted(t, "@namespace ns 'p\\61th';", "@namespace ns \"path\";\n")
+	expectPrinted(t, "@namespace \\2cs 'p\\61th';", "@namespace \\,s \"path\";\n")
+	expectPrinted(t, "@namespace \\,s 'p\\61th';", "@namespace \\,s \"path\";\n")
+
+	// CompoundSelector
+	expectPrinted(t, "* {}", "* {\n}\n")
+	expectPrinted(t, "*|div {}", "*|div {\n}\n")
+	expectPrinted(t, "\\2a {}", "\\* {\n}\n")
+	expectPrinted(t, "\\2a|div {}", "\\*|div {\n}\n")
+	expectPrinted(t, "\\2d {}", "- {\n}\n")
+	expectPrinted(t, "\\2d- {}", "-- {\n}\n")
+	expectPrinted(t, "-\\2d {}", "-- {\n}\n")
+	expectPrinted(t, "\\2d 123 {}", "\\-123 {\n}\n")
+
+	// SSHash
+	expectPrinted(t, "#h\\61sh {}", "#hash {\n}\n")
+	expectPrinted(t, "#\\2chash {}", "#\\,hash {\n}\n")
+	expectPrinted(t, "#\\,hash {}", "#\\,hash {\n}\n")
+	expectPrinted(t, "#\\2d {}", "#- {\n}\n")
+	expectPrinted(t, "#\\2d- {}", "#-- {\n}\n")
+	expectPrinted(t, "#-\\2d {}", "#-- {\n}\n")
+	expectPrinted(t, "#\\2d 123 {}", "#\\-123 {\n}\n")
+	expectPrinted(t, "#\\61hash {}", "#ahash {\n}\n")
+	expectPrinted(t, "#\\30hash {}", "#\\30hash {\n}\n")
+	expectPrinted(t, "#0\\2chash {}", "#0\\,hash {\n}\n")
+	expectPrinted(t, "#0\\,hash {}", "#0\\,hash {\n}\n")
+
+	// SSClass
+	expectPrinted(t, ".cl\\61ss {}", ".class {\n}\n")
+	expectPrinted(t, ".\\2c class {}", ".\\,class {\n}\n")
+	expectPrinted(t, ".\\,class {}", ".\\,class {\n}\n")
+
+	// SSPseudoClass
+	expectPrinted(t, ":pseudocl\\61ss {}", ":pseudoclass {\n}\n")
+	expectPrinted(t, ":pseudo\\2c class {}", ":pseudo\\,class {\n}\n")
+	expectPrinted(t, ":pseudo\\,class {}", ":pseudo\\,class {\n}\n")
+	expectPrinted(t, ":pseudo(cl\\61ss) {}", ":pseudo(class) {\n}\n")
+	expectPrinted(t, ":pseudo(cl\\2css) {}", ":pseudo(cl\\,ss) {\n}\n")
+	expectPrinted(t, ":pseudo(cl\\,ss) {}", ":pseudo(cl\\,ss) {\n}\n")
+
+	// SSAttribute
+	expectPrinted(t, "[\\61ttr] {}", "[attr] {\n}\n")
+	expectPrinted(t, "[\\2c attr] {}", "[\\,attr] {\n}\n")
+	expectPrinted(t, "[\\,attr] {}", "[\\,attr] {\n}\n")
+	expectPrinted(t, "[attr\\7e=x] {}", "[attr\\~=x] {\n}\n")
+	expectPrinted(t, "[attr\\~=x] {}", "[attr\\~=x] {\n}\n")
+	expectPrinted(t, "[attr=\\2c] {}", "[attr=\",\"] {\n}\n")
+	expectPrinted(t, "[attr=\\,] {}", "[attr=\",\"] {\n}\n")
+	expectPrinted(t, "[\\6es|attr] {}", "[ns|attr] {\n}\n")
+	expectPrinted(t, "[ns|\\61ttr] {}", "[ns|attr] {\n}\n")
+	expectPrinted(t, "[\\2cns|attr] {}", "[\\,ns|attr] {\n}\n")
+	expectPrinted(t, "[ns|\\2c attr] {}", "[ns|\\,attr] {\n}\n")
+	expectPrinted(t, "[*|attr] {}", "[*|attr] {\n}\n")
+	expectPrinted(t, "[\\2a|attr] {}", "[\\*|attr] {\n}\n")
 }
 
 func TestString(t *testing.T) {
@@ -104,18 +274,46 @@ func TestString(t *testing.T) {
 
 func TestNumber(t *testing.T) {
 	for _, ext := range []string{"", "%", "px+"} {
+		expectPrinted(t, "a { width: .0"+ext+"; }", "a {\n  width: .0"+ext+";\n}\n")
+		expectPrinted(t, "a { width: .00"+ext+"; }", "a {\n  width: .00"+ext+";\n}\n")
+		expectPrinted(t, "a { width: .10"+ext+"; }", "a {\n  width: .10"+ext+";\n}\n")
 		expectPrinted(t, "a { width: 0."+ext+"; }", "a {\n  width: 0."+ext+";\n}\n")
+		expectPrinted(t, "a { width: 0.0"+ext+"; }", "a {\n  width: 0.0"+ext+";\n}\n")
 		expectPrinted(t, "a { width: 0.1"+ext+"; }", "a {\n  width: 0.1"+ext+";\n}\n")
+
+		expectPrinted(t, "a { width: +.0"+ext+"; }", "a {\n  width: +.0"+ext+";\n}\n")
+		expectPrinted(t, "a { width: +.00"+ext+"; }", "a {\n  width: +.00"+ext+";\n}\n")
+		expectPrinted(t, "a { width: +.10"+ext+"; }", "a {\n  width: +.10"+ext+";\n}\n")
 		expectPrinted(t, "a { width: +0."+ext+"; }", "a {\n  width: +0."+ext+";\n}\n")
+		expectPrinted(t, "a { width: +0.0"+ext+"; }", "a {\n  width: +0.0"+ext+";\n}\n")
 		expectPrinted(t, "a { width: +0.1"+ext+"; }", "a {\n  width: +0.1"+ext+";\n}\n")
+
+		expectPrinted(t, "a { width: -.0"+ext+"; }", "a {\n  width: -.0"+ext+";\n}\n")
+		expectPrinted(t, "a { width: -.00"+ext+"; }", "a {\n  width: -.00"+ext+";\n}\n")
+		expectPrinted(t, "a { width: -.10"+ext+"; }", "a {\n  width: -.10"+ext+";\n}\n")
 		expectPrinted(t, "a { width: -0."+ext+"; }", "a {\n  width: -0."+ext+";\n}\n")
+		expectPrinted(t, "a { width: -0.0"+ext+"; }", "a {\n  width: -0.0"+ext+";\n}\n")
 		expectPrinted(t, "a { width: -0.1"+ext+"; }", "a {\n  width: -0.1"+ext+";\n}\n")
 
+		expectPrintedMangle(t, "a { width: .0"+ext+"; }", "a {\n  width: 0"+ext+";\n}\n")
+		expectPrintedMangle(t, "a { width: .00"+ext+"; }", "a {\n  width: 0"+ext+";\n}\n")
+		expectPrintedMangle(t, "a { width: .10"+ext+"; }", "a {\n  width: .1"+ext+";\n}\n")
 		expectPrintedMangle(t, "a { width: 0."+ext+"; }", "a {\n  width: 0"+ext+";\n}\n")
+		expectPrintedMangle(t, "a { width: 0.0"+ext+"; }", "a {\n  width: 0"+ext+";\n}\n")
 		expectPrintedMangle(t, "a { width: 0.1"+ext+"; }", "a {\n  width: .1"+ext+";\n}\n")
+
+		expectPrintedMangle(t, "a { width: +.0"+ext+"; }", "a {\n  width: +0"+ext+";\n}\n")
+		expectPrintedMangle(t, "a { width: +.00"+ext+"; }", "a {\n  width: +0"+ext+";\n}\n")
+		expectPrintedMangle(t, "a { width: +.10"+ext+"; }", "a {\n  width: +.1"+ext+";\n}\n")
 		expectPrintedMangle(t, "a { width: +0."+ext+"; }", "a {\n  width: +0"+ext+";\n}\n")
+		expectPrintedMangle(t, "a { width: +0.0"+ext+"; }", "a {\n  width: +0"+ext+";\n}\n")
 		expectPrintedMangle(t, "a { width: +0.1"+ext+"; }", "a {\n  width: +.1"+ext+";\n}\n")
+
+		expectPrintedMangle(t, "a { width: -.0"+ext+"; }", "a {\n  width: -0"+ext+";\n}\n")
+		expectPrintedMangle(t, "a { width: -.00"+ext+"; }", "a {\n  width: -0"+ext+";\n}\n")
+		expectPrintedMangle(t, "a { width: -.10"+ext+"; }", "a {\n  width: -.1"+ext+";\n}\n")
 		expectPrintedMangle(t, "a { width: -0."+ext+"; }", "a {\n  width: -0"+ext+";\n}\n")
+		expectPrintedMangle(t, "a { width: -0.0"+ext+"; }", "a {\n  width: -0"+ext+";\n}\n")
 		expectPrintedMangle(t, "a { width: -0.1"+ext+"; }", "a {\n  width: -.1"+ext+";\n}\n")
 	}
 }
@@ -278,6 +476,9 @@ func TestColorRGBA(t *testing.T) {
 	expectPrintedMangle(t, "a { color: rgba(1% 2% 3% / 50%) }", "a {\n  color: #0305087f;\n}\n")
 	expectPrintedMangle(t, "a { color: rgba(1%, 2%, 3%, 0.5) }", "a {\n  color: #03050880;\n}\n")
 	expectPrintedMangle(t, "a { color: rgba(1%, 2%, 3%, 50%) }", "a {\n  color: #0305087f;\n}\n")
+
+	expectPrintedLowerMangle(t, "a { color: rgb(1, 2, 3, 0.4) }", "a {\n  color: rgba(1, 2, 3, .4);\n}\n")
+	expectPrintedLowerMangle(t, "a { color: rgba(1, 2, 3, 40%) }", "a {\n  color: rgba(1, 2, 3, .4);\n}\n")
 }
 
 func TestColorHSLA(t *testing.T) {
@@ -292,6 +493,9 @@ func TestColorHSLA(t *testing.T) {
 
 	expectPrintedMangle(t, "a { color: hsl(30 25% 50% / 50%) }", "a {\n  color: #9f80607f;\n}\n")
 	expectPrintedMangle(t, "a { color: hsla(30 25% 50% / 50%) }", "a {\n  color: #9f80607f;\n}\n")
+
+	expectPrintedLowerMangle(t, "a { color: hsl(1, 2%, 3%, 0.4) }", "a {\n  color: rgba(8, 8, 7, .4);\n}\n")
+	expectPrintedLowerMangle(t, "a { color: hsla(1, 2%, 3%, 40%) }", "a {\n  color: rgba(8, 8, 7, .4);\n}\n")
 }
 
 func TestLowerColor(t *testing.T) {
@@ -337,12 +541,28 @@ func TestDeclaration(t *testing.T) {
 	expectPrinted(t, ".decl { a: b; c: d; }", ".decl {\n  a: b;\n  c: d;\n}\n")
 	expectParseError(t, ".decl { a { b: c; } }", "<stdin>: warning: Expected \":\" but found \"{\"\n")
 	expectPrinted(t, ".decl { & a { b: c; } }", ".decl {\n  & a {\n    b: c;\n  }\n}\n")
+
+	// See http://browserhacks.com/
+	expectPrinted(t, ".selector { (;property: value;); }", ".selector {\n  (;property: value;);\n}\n")
+	expectPrinted(t, ".selector { [;property: value;]; }", ".selector {\n  [;property: value;];\n}\n")
+	expectPrinted(t, ".selector, {}", ".selector, {\n}\n")
+	expectPrinted(t, ".selector\\ {}", ".selector\\  {\n}\n")
+	expectPrinted(t, ".selector { property: value\\9; }", ".selector {\n  property: value\\\t;\n}\n")
+	expectPrinted(t, "@media \\0screen\\,screen\\9 {}", "@media \uFFFDscreen\\,screen\\\t {\n}\n")
 }
 
 func TestSelector(t *testing.T) {
 	expectPrinted(t, "a{}", "a {\n}\n")
 	expectPrinted(t, "a {}", "a {\n}\n")
 	expectPrinted(t, "a b {}", "a b {\n}\n")
+
+	expectPrinted(t, "a/**/b {}", "a b {\n}\n")
+	expectPrinted(t, "a/**/.b {}", "a.b {\n}\n")
+	expectPrinted(t, "a/**/:b {}", "a:b {\n}\n")
+	expectPrinted(t, "a/**/[b] {}", "a[b] {\n}\n")
+	expectPrinted(t, "a>/**/b {}", "a > b {\n}\n")
+	expectPrinted(t, "a+/**/b {}", "a + b {\n}\n")
+	expectPrinted(t, "a~/**/b {}", "a ~ b {\n}\n")
 
 	expectPrinted(t, "[b]{}", "[b] {\n}\n")
 	expectPrinted(t, "[b] {}", "[b] {\n}\n")
@@ -357,30 +577,32 @@ func TestSelector(t *testing.T) {
 	expectPrinted(t, "[|b]{}", "[b] {\n}\n") // "[|b]" is equivalent to "[b]"
 	expectPrinted(t, "[*|b]{}", "[*|b] {\n}\n")
 	expectPrinted(t, "[a|b]{}", "[a|b] {\n}\n")
-	expectPrinted(t, "[a|b|=\"c\"]{}", "[a|b|=\"c\"] {\n}\n")
-	expectPrinted(t, "[a|b |= \"c\"]{}", "[a|b|=\"c\"] {\n}\n")
+	expectPrinted(t, "[a|b|=\"c\"]{}", "[a|b|=c] {\n}\n")
+	expectPrinted(t, "[a|b |= \"c\"]{}", "[a|b|=c] {\n}\n")
 	expectParseError(t, "[a||b] {}", "<stdin>: warning: Expected identifier but found \"|\"\n")
 	expectParseError(t, "[* | b] {}", "<stdin>: warning: Expected \"|\" but found whitespace\n")
 	expectParseError(t, "[a | b] {}", "<stdin>: warning: Expected \"=\" but found whitespace\n")
 
-	expectPrinted(t, "[b=\"c\"] {}", "[b=\"c\"] {\n}\n")
-	expectPrinted(t, "[b~=\"c\"] {}", "[b~=\"c\"] {\n}\n")
-	expectPrinted(t, "[b^=\"c\"] {}", "[b^=\"c\"] {\n}\n")
-	expectPrinted(t, "[b$=\"c\"] {}", "[b$=\"c\"] {\n}\n")
-	expectPrinted(t, "[b*=\"c\"] {}", "[b*=\"c\"] {\n}\n")
-	expectPrinted(t, "[b|=\"c\"] {}", "[b|=\"c\"] {\n}\n")
+	expectPrinted(t, "[b=\"c\"] {}", "[b=c] {\n}\n")
+	expectPrinted(t, "[b=\"c d\"] {}", "[b=\"c d\"] {\n}\n")
+	expectPrinted(t, "[b=\"0c\"] {}", "[b=\"0c\"] {\n}\n")
+	expectPrinted(t, "[b~=\"c\"] {}", "[b~=c] {\n}\n")
+	expectPrinted(t, "[b^=\"c\"] {}", "[b^=c] {\n}\n")
+	expectPrinted(t, "[b$=\"c\"] {}", "[b$=c] {\n}\n")
+	expectPrinted(t, "[b*=\"c\"] {}", "[b*=c] {\n}\n")
+	expectPrinted(t, "[b|=\"c\"] {}", "[b|=c] {\n}\n")
 	expectParseError(t, "[b?=\"c\"] {}", "<stdin>: warning: Expected \"]\" but found \"?\"\n")
 
-	expectPrinted(t, "[b = \"c\"] {}", "[b=\"c\"] {\n}\n")
-	expectPrinted(t, "[b ~= \"c\"] {}", "[b~=\"c\"] {\n}\n")
-	expectPrinted(t, "[b ^= \"c\"] {}", "[b^=\"c\"] {\n}\n")
-	expectPrinted(t, "[b $= \"c\"] {}", "[b$=\"c\"] {\n}\n")
-	expectPrinted(t, "[b *= \"c\"] {}", "[b*=\"c\"] {\n}\n")
-	expectPrinted(t, "[b |= \"c\"] {}", "[b|=\"c\"] {\n}\n")
+	expectPrinted(t, "[b = \"c\"] {}", "[b=c] {\n}\n")
+	expectPrinted(t, "[b ~= \"c\"] {}", "[b~=c] {\n}\n")
+	expectPrinted(t, "[b ^= \"c\"] {}", "[b^=c] {\n}\n")
+	expectPrinted(t, "[b $= \"c\"] {}", "[b$=c] {\n}\n")
+	expectPrinted(t, "[b *= \"c\"] {}", "[b*=c] {\n}\n")
+	expectPrinted(t, "[b |= \"c\"] {}", "[b|=c] {\n}\n")
 	expectParseError(t, "[b ?= \"c\"] {}", "<stdin>: warning: Expected \"]\" but found \"?\"\n")
 
-	expectPrinted(t, "[b = \"c\" i] {}", "[b=\"c\" i] {\n}\n")
-	expectPrinted(t, "[b = \"c\" I] {}", "[b=\"c\" I] {\n}\n")
+	expectPrinted(t, "[b = \"c\" i] {}", "[b=c i] {\n}\n")
+	expectPrinted(t, "[b = \"c\" I] {}", "[b=c I] {\n}\n")
 	expectParseError(t, "[b i] {}", "<stdin>: warning: Expected \"]\" but found \"i\"\n<stdin>: warning: Unexpected \"]\"\n")
 	expectParseError(t, "[b I] {}", "<stdin>: warning: Expected \"]\" but found \"I\"\n<stdin>: warning: Unexpected \"]\"\n")
 
@@ -410,6 +632,20 @@ func TestSelector(t *testing.T) {
 	expectPrinted(t, "a::b(c) {}", "a::b(c) {\n}\n")
 	expectPrinted(t, "a:b:c {}", "a:b:c {\n}\n")
 	expectPrinted(t, "a:b(:c) {}", "a:b(:c) {\n}\n")
+	expectPrinted(t, "a: b {}", "a: b {\n}\n")
+
+	expectPrinted(t, "#id {}", "#id {\n}\n")
+	expectPrinted(t, "#--0 {}", "#--0 {\n}\n")
+	expectPrinted(t, "#\\-0 {}", "#\\-0 {\n}\n")
+	expectPrinted(t, "#\\30 {}", "#\\30  {\n}\n")
+	expectPrinted(t, "div#id {}", "div#id {\n}\n")
+	expectPrinted(t, "div#--0 {}", "div#--0 {\n}\n")
+	expectPrinted(t, "div#\\-0 {}", "div#\\-0 {\n}\n")
+	expectPrinted(t, "div#\\30 {}", "div#\\30  {\n}\n")
+	expectParseError(t, "#0 {}", "<stdin>: warning: Unexpected \"#0\"\n")
+	expectParseError(t, "#-0 {}", "<stdin>: warning: Unexpected \"#-0\"\n")
+	expectParseError(t, "div#0 {}", "<stdin>: warning: Unexpected \"#0\"\n")
+	expectParseError(t, "div#-0 {}", "<stdin>: warning: Unexpected \"#-0\"\n")
 }
 
 func TestNestedSelector(t *testing.T) {
@@ -451,6 +687,82 @@ func TestAtRule(t *testing.T) {
 	expectParseError(t, "@", "<stdin>: warning: Unexpected \"@\"\n")
 	expectParseError(t, "@;", "<stdin>: warning: Unexpected \"@\"\n")
 	expectParseError(t, "@{}", "<stdin>: warning: Unexpected \"@\"\n")
+
+	// https://www.w3.org/TR/css-page-3/#syntax-page-selector
+	expectPrinted(t, `
+		@page :first { margin: 0 }
+		@page {
+			@top-left-corner { content: 'tlc' }
+			@top-left { content: 'tl' }
+			@top-center { content: 'tc' }
+			@top-right { content: 'tr' }
+			@top-right-corner { content: 'trc' }
+			@bottom-left-corner { content: 'blc' }
+			@bottom-left { content: 'bl' }
+			@bottom-center { content: 'bc' }
+			@bottom-right { content: 'br' }
+			@bottom-right-corner { content: 'brc' }
+			@left-top { content: 'lt' }
+			@left-middle { content: 'lm' }
+			@left-bottom { content: 'lb' }
+			@right-top { content: 'rt' }
+			@right-middle { content: 'rm' }
+			@right-bottom { content: 'rb' }
+		}
+	`, `@page :first {
+  margin: 0;
+}
+@page {
+  @top-left-corner {
+    content: "tlc";
+  }
+  @top-left {
+    content: "tl";
+  }
+  @top-center {
+    content: "tc";
+  }
+  @top-right {
+    content: "tr";
+  }
+  @top-right-corner {
+    content: "trc";
+  }
+  @bottom-left-corner {
+    content: "blc";
+  }
+  @bottom-left {
+    content: "bl";
+  }
+  @bottom-center {
+    content: "bc";
+  }
+  @bottom-right {
+    content: "br";
+  }
+  @bottom-right-corner {
+    content: "brc";
+  }
+  @left-top {
+    content: "lt";
+  }
+  @left-middle {
+    content: "lm";
+  }
+  @left-bottom {
+    content: "lb";
+  }
+  @right-top {
+    content: "rt";
+  }
+  @right-middle {
+    content: "rm";
+  }
+  @right-bottom {
+    content: "rb";
+  }
+}
+`)
 }
 
 func TestAtCharset(t *testing.T) {
@@ -468,48 +780,6 @@ func TestAtCharset(t *testing.T) {
 	expectParseError(t, "@charset \"UTF-8\"{}", "<stdin>: warning: Expected \";\" but found \"{\"\n")
 }
 
-func TestAtNamespace(t *testing.T) {
-	expectPrinted(t, "@namespace\"http://www.com\";", "@namespace \"http://www.com\";\n")
-	expectPrinted(t, "@namespace \"http://www.com\";", "@namespace \"http://www.com\";\n")
-	expectPrinted(t, "@namespace \"http://www.com\" ;", "@namespace \"http://www.com\";\n")
-	expectPrinted(t, "@namespace url();", "@namespace \"\";\n")
-	expectPrinted(t, "@namespace url(http://www.com);", "@namespace \"http://www.com\";\n")
-	expectPrinted(t, "@namespace url(http://www.com) ;", "@namespace \"http://www.com\";\n")
-	expectPrinted(t, "@namespace url(\"http://www.com\");", "@namespace \"http://www.com\";\n")
-	expectPrinted(t, "@namespace url(\"http://www.com\") ;", "@namespace \"http://www.com\";\n")
-
-	expectPrinted(t, "@namespace ns\"http://www.com\";", "@namespace ns \"http://www.com\";\n")
-	expectPrinted(t, "@namespace ns \"http://www.com\";", "@namespace ns \"http://www.com\";\n")
-	expectPrinted(t, "@namespace ns \"http://www.com\" ;", "@namespace ns \"http://www.com\";\n")
-	expectPrinted(t, "@namespace ns url();", "@namespace ns \"\";\n")
-	expectPrinted(t, "@namespace ns url(http://www.com);", "@namespace ns \"http://www.com\";\n")
-	expectPrinted(t, "@namespace ns url(http://www.com) ;", "@namespace ns \"http://www.com\";\n")
-	expectPrinted(t, "@namespace ns url(\"http://www.com\");", "@namespace ns \"http://www.com\";\n")
-	expectPrinted(t, "@namespace ns url(\"http://www.com\") ;", "@namespace ns \"http://www.com\";\n")
-
-	expectParseError(t, "@namespace;", "<stdin>: warning: Expected URL token but found \";\"\n")
-	expectParseError(t, "@namespace \"http://www.com\"", "<stdin>: warning: Expected \";\" but found end of file\n")
-	expectParseError(t, "@namespace url(\"http://www.com\";", "<stdin>: warning: Expected \")\" but found \";\"\n")
-	expectParseError(t, "@namespace noturl(\"http://www.com\");", "<stdin>: warning: Expected URL token but found \"noturl(\"\n")
-	expectParseError(t, "@namespace url(", `<stdin>: warning: Expected URL token but found bad URL token
-<stdin>: error: Expected ")" to end URL token
-<stdin>: warning: Expected ";" but found end of file
-`)
-
-	expectParseError(t, "@namespace ns;", "<stdin>: warning: Expected URL token but found \";\"\n")
-	expectParseError(t, "@namespace ns \"http://www.com\"", "<stdin>: warning: Expected \";\" but found end of file\n")
-	expectParseError(t, "@namespace ns url(\"http://www.com\";", "<stdin>: warning: Expected \")\" but found \";\"\n")
-	expectParseError(t, "@namespace ns noturl(\"http://www.com\");", "<stdin>: warning: Expected URL token but found \"noturl(\"\n")
-	expectParseError(t, "@namespace ns url(", `<stdin>: warning: Expected URL token but found bad URL token
-<stdin>: error: Expected ")" to end URL token
-<stdin>: warning: Expected ";" but found end of file
-`)
-
-	expectParseError(t, "@namespace \"http://www.com\" {}", `<stdin>: warning: Expected ";"
-<stdin>: warning: Unexpected "{"
-`)
-}
-
 func TestAtImport(t *testing.T) {
 	expectPrinted(t, "@import\"foo.css\";", "@import \"foo.css\";\n")
 	expectPrinted(t, "@import \"foo.css\";", "@import \"foo.css\";\n")
@@ -519,6 +789,8 @@ func TestAtImport(t *testing.T) {
 	expectPrinted(t, "@import url(foo.css) ;", "@import \"foo.css\";\n")
 	expectPrinted(t, "@import url(\"foo.css\");", "@import \"foo.css\";\n")
 	expectPrinted(t, "@import url(\"foo.css\") ;", "@import \"foo.css\";\n")
+	expectPrinted(t, "@import url(\"foo.css\") print;", "@import \"foo.css\" print;\n")
+	expectPrinted(t, "@import url(\"foo.css\") screen and (orientation:landscape);", "@import \"foo.css\" screen and (orientation:landscape);\n")
 
 	expectParseError(t, "@import;", "<stdin>: warning: Expected URL token but found \";\"\n")
 	expectParseError(t, "@import ;", "<stdin>: warning: Expected URL token but found \";\"\n")
@@ -530,12 +802,11 @@ func TestAtImport(t *testing.T) {
 <stdin>: warning: Expected ";" but found end of file
 `)
 
-	expectParseError(t, "@import \"foo.css\" {}", `<stdin>: warning: Expected ";"
-<stdin>: warning: Unexpected "{"
-`)
+	expectParseError(t, "@import \"foo.css\" {}", "<stdin>: warning: Expected \";\" but found end of file\n")
 }
 
 func TestAtKeyframes(t *testing.T) {
+	expectPrinted(t, "@keyframes {}", "@keyframes \"\" {\n}\n")
 	expectPrinted(t, "@keyframes name{}", "@keyframes name {\n}\n")
 	expectPrinted(t, "@keyframes name {}", "@keyframes name {\n}\n")
 	expectPrinted(t, "@keyframes name{0%,50%{color:red}25%,75%{color:blue}}",
@@ -567,4 +838,41 @@ func TestAtKeyframes(t *testing.T) {
 	expectParseError(t, "@keyframes name { 1, 2 {} }", "<stdin>: warning: Expected percentage but found \"1\"\n<stdin>: warning: Expected percentage but found \"2\"\n")
 	expectParseError(t, "@keyframes name { 1 ,2 {} }", "<stdin>: warning: Expected percentage but found \"1\"\n<stdin>: warning: Expected percentage but found \"2\"\n")
 	expectParseError(t, "@keyframes name { 1%,,2% {} }", "<stdin>: warning: Expected percentage but found \",\"\n")
+}
+
+func TestAtRuleValidation(t *testing.T) {
+	expectParseError(t, "a {} @charset \"UTF-8\";",
+		"<stdin>: warning: \"@charset\" must be the first rule in the file\n"+
+			"<stdin>: note: This rule cannot come before a \"@charset\" rule\n")
+
+	expectParseError(t, "a {} @import \"foo\";",
+		"<stdin>: warning: All \"@import\" rules must come first\n"+
+			"<stdin>: note: This rule cannot come before an \"@import\" rule\n")
+}
+
+func TestEmptyRule(t *testing.T) {
+	expectPrinted(t, "div {}", "div {\n}\n")
+	expectPrinted(t, "@media screen {}", "@media screen {\n}\n")
+	expectPrinted(t, "@page { @top-left {} }", "@page {\n  @top-left {\n  }\n}\n")
+	expectPrinted(t, "@keyframes test { from {} to {} }", "@keyframes test {\n  from {\n  }\n  to {\n  }\n}\n")
+
+	expectPrintedMangle(t, "div {}", "")
+	expectPrintedMangle(t, "@media screen {}", "")
+	expectPrintedMangle(t, "@page { @top-left {} }", "")
+	expectPrintedMangle(t, "@keyframes test { from {} to {} }", "")
+
+	expectPrinted(t, "$invalid {}", "$invalid {\n}\n")
+	expectPrinted(t, "@page { color: red; @top-left {} }", "@page {\n  color: red;\n  @top-left {\n  }\n}\n")
+	expectPrinted(t, "@keyframes test { from {} to { color: red } }", "@keyframes test {\n  from {\n  }\n  to {\n    color: red;\n  }\n}\n")
+	expectPrinted(t, "@keyframes test { from { color: red } to {} }", "@keyframes test {\n  from {\n    color: red;\n  }\n  to {\n  }\n}\n")
+
+	expectPrintedMangle(t, "$invalid {}", "$invalid {\n}\n")
+	expectPrintedMangle(t, "@page { color: red; @top-left {} }", "@page {\n  color: red;\n}\n")
+	expectPrintedMangle(t, "@keyframes test { from {} to { color: red } }", "@keyframes test {\n  to {\n    color: red;\n  }\n}\n")
+	expectPrintedMangle(t, "@keyframes test { from { color: red } to {} }", "@keyframes test {\n  0% {\n    color: red;\n  }\n}\n")
+
+	expectPrintedMangleMinify(t, "$invalid {}", "$invalid{}")
+	expectPrintedMangleMinify(t, "@page { color: red; @top-left {} }", "@page{color:red}")
+	expectPrintedMangleMinify(t, "@keyframes test { from {} to { color: red } }", "@keyframes test{to{color:red}}")
+	expectPrintedMangleMinify(t, "@keyframes test { from { color: red } to {} }", "@keyframes test{0%{color:red}}")
 }

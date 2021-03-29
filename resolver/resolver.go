@@ -3,22 +3,19 @@ package resolver
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
 
 	"github.com/ije/esbuild-internal/ast"
+	"github.com/ije/esbuild-internal/cache"
 	"github.com/ije/esbuild-internal/config"
 	"github.com/ije/esbuild-internal/fs"
 	"github.com/ije/esbuild-internal/js_ast"
 	"github.com/ije/esbuild-internal/js_lexer"
-	"github.com/ije/esbuild-internal/js_parser"
 	"github.com/ije/esbuild-internal/logger"
 )
-
-// This namespace is used when a module has been disabled by being mapped to
-// "false" using the "browser" field of "package.json".
-const BrowserFalseNamespace = "empty"
 
 var defaultMainFields = map[config.Platform][]string{
 	// Note that this means if a package specifies "main", "module", and
@@ -28,7 +25,7 @@ var defaultMainFields = map[config.Platform][]string{
 	// This is deliberate because the presence of the "browser" field is a
 	// good signal that the "module" field may have non-browser stuff in it,
 	// which will crash or fail to be bundled when targeting the browser.
-	config.PlatformBrowser: []string{"browser", "module", "main"},
+	config.PlatformBrowser: {"browser", "module", "main"},
 
 	// Note that this means if a package specifies "module" and "main", the ES6
 	// module will not be selected. This means tree shaking will not work when
@@ -46,7 +43,12 @@ var defaultMainFields = map[config.Platform][]string{
 	// If you want to enable tree shaking when targeting node, you will have to
 	// configure the main fields to be "module" and then "main". Keep in mind
 	// that some packages may break if you do this.
-	config.PlatformNode: []string{"main", "module"},
+	config.PlatformNode: {"main", "module"},
+
+	// The neutral platform is for people that don't want esbuild to try to
+	// pick good defaults for their platform. In that case, the list of main
+	// fields is empty by default. You must explicitly configure it yourself.
+	config.PlatformNeutral: {},
 }
 
 // Path resolution is a mess. One tricky issue is the "module" override for the
@@ -74,43 +76,133 @@ func (pp *PathPair) HasSecondary() bool {
 	return pp.Secondary.Text != ""
 }
 
+type IgnoreIfUnusedData struct {
+	Source *logger.Source
+	Range  logger.Range
+
+	// If true, "sideEffects" was an array. If false, "sideEffects" was false.
+	IsSideEffectsArrayInJSON bool
+}
+
 type ResolveResult struct {
-	PathPair   PathPair
-	IsExternal bool
+	PathPair PathPair
+
+	// If this was resolved by a plugin, the plugin gets to store its data here
+	PluginData interface{}
 
 	// If not empty, these should override the default values
 	JSXFactory  []string // Default if empty: "React.createElement"
 	JSXFragment []string // Default if empty: "React.Fragment"
 
+	DifferentCase *fs.DifferentCase
+
 	// If true, any ES6 imports to this file can be considered to have no side
 	// effects. This means they should be removed if unused.
-	IgnoreIfUnused bool
+	IgnorePrimaryIfUnused *IgnoreIfUnusedData
+
+	IsExternal bool
 
 	// If true, the class field transform should use Object.defineProperty().
-	StrictClassFields bool
+	UseDefineForClassFieldsTS bool
 
-	// This is true if the file is inside a "node_modules" directory
-	SuppressWarningsAboutWeirdCode bool
+	// If true, unused imports are retained in TypeScript code. This matches the
+	// behavior of the "importsNotUsedAsValues" field in "tsconfig.json" when the
+	// value is not "remove".
+	PreserveUnusedImportsTS bool
+
+	// This is the "type" field from "package.json"
+	ModuleType config.ModuleType
+}
+
+type AlternativeApproach uint8
+
+const (
+	AlternativeApproachNone AlternativeApproach = iota
+	AlternativeApproachImport
+	AlternativeApproachRequire
+)
+
+type DebugMeta struct {
+	notes    []logger.MsgData
+	approach AlternativeApproach
+}
+
+func (dm DebugMeta) Notes(importSource *logger.Source, importRange logger.Range) []logger.MsgData {
+	if importSource != nil {
+		switch dm.approach {
+		case AlternativeApproachImport:
+			return append(append([]logger.MsgData{}, dm.notes...), logger.RangeData(importSource, importRange,
+				"Consider using an \"import\" statement to import this package"))
+		case AlternativeApproachRequire:
+			return append(append([]logger.MsgData{}, dm.notes...), logger.RangeData(importSource, importRange,
+				"Consider using a \"require()\" call to import this package"))
+		}
+	}
+	return dm.notes
 }
 
 type Resolver interface {
-	Resolve(sourceDir string, importPath string, kind ast.ImportKind) *ResolveResult
+	Resolve(sourceDir string, importPath string, kind ast.ImportKind) (result *ResolveResult, debug DebugMeta)
 	ResolveAbs(absPath string) *ResolveResult
 	PrettyPath(path logger.Path) string
+
+	// This tries to run "Resolve" on a package path as a relative path. If
+	// successful, the user just forgot a leading "./" in front of the path.
+	ProbeResolvePackageAsRelative(sourceDir string, importPath string, kind ast.ImportKind) *ResolveResult
 }
 
 type resolver struct {
 	fs      fs.FS
 	log     logger.Log
+	caches  *cache.CacheSet
 	options config.Options
-	mutex   sync.Mutex
+
+	// These are sets that represent various conditions for the "exports" field
+	// in package.json.
+	esmConditionsDefault map[string]bool
+	esmConditionsImport  map[string]bool
+	esmConditionsRequire map[string]bool
+
+	// A special filtered import order for CSS "@import" imports.
+	//
+	// The "resolve extensions" setting determines the order of implicit
+	// extensions to try when resolving imports with the extension omitted.
+	// Sometimes people create a JavaScript/TypeScript file and a CSS file with
+	// the same name when they create a component. At a high level, users expect
+	// implicit extensions to resolve to the JS file when being imported from JS
+	// and to resolve to the CSS file when being imported from CSS.
+	//
+	// Different bundlers handle this in different ways. Parcel handles this by
+	// having the resolver prefer the same extension as the importing file in
+	// front of the configured "resolve extensions" order. Webpack's "css-loader"
+	// plugin just explicitly configures a special "resolve extensions" order
+	// consisting of only ".css" for CSS files.
+	//
+	// It's unclear what behavior is best here. What we currently do is to create
+	// a special filtered version of the configured "resolve extensions" order
+	// for CSS files that filters out any extension that has been explicitly
+	// configured with a non-CSS loader. This still gives users control over the
+	// order but avoids the scenario where we match an import in a CSS file to a
+	// JavaScript-related file. It's probably not perfect with plugins in the
+	// picture but it's better than some alternatives and probably pretty good.
+	atImportExtensionOrder []string
+
+	// This mutex serves two purposes. First of all, it guards access to "dirCache"
+	// which is potentially mutated during path resolution. But this mutex is also
+	// necessary for performance. The "React admin" benchmark mysteriously runs
+	// twice as fast when this mutex is locked around the whole resolve operation
+	// instead of around individual accesses to "dirCache". For some reason,
+	// reducing parallelism in the resolver helps the rest of the bundler go
+	// faster. I'm not sure why this is but please don't change this unless you
+	// do a lot of testing with various benchmarks and there aren't any regressions.
+	mutex sync.Mutex
 
 	// This cache maps a directory path to information about that directory and
 	// all parent directories
 	dirCache map[string]*dirInfo
 }
 
-func NewResolver(fs fs.FS, log logger.Log, options config.Options) Resolver {
+func NewResolver(fs fs.FS, log logger.Log, caches *cache.CacheSet, options config.Options) Resolver {
 	// Bundling for node implies allowing node's builtin modules
 	if options.Platform == config.PlatformNode {
 		externalNodeModules := make(map[string]bool)
@@ -125,19 +217,52 @@ func NewResolver(fs fs.FS, log logger.Log, options config.Options) Resolver {
 		options.ExternalModules.NodeModules = externalNodeModules
 	}
 
+	// Filter out non-CSS extensions for CSS "@import" imports
+	atImportExtensionOrder := make([]string, 0, len(options.ExtensionOrder))
+	for _, ext := range options.ExtensionOrder {
+		if loader, ok := options.ExtensionToLoader[ext]; ok && loader != config.LoaderCSS {
+			continue
+		}
+		atImportExtensionOrder = append(atImportExtensionOrder, ext)
+	}
+
+	// Generate the condition sets for interpreting the "exports" field
+	esmConditionsDefault := map[string]bool{"default": true}
+	esmConditionsImport := map[string]bool{"import": true}
+	esmConditionsRequire := map[string]bool{"require": true}
+	for _, condition := range options.Conditions {
+		esmConditionsDefault[condition] = true
+	}
+	switch options.Platform {
+	case config.PlatformBrowser:
+		esmConditionsDefault["browser"] = true
+	case config.PlatformNode:
+		esmConditionsDefault["node"] = true
+	}
+	for key := range esmConditionsDefault {
+		esmConditionsImport[key] = true
+		esmConditionsRequire[key] = true
+	}
+
 	return &resolver{
-		fs:       fs,
-		log:      log,
-		options:  options,
-		dirCache: make(map[string]*dirInfo),
+		fs:                     fs,
+		log:                    log,
+		options:                options,
+		caches:                 caches,
+		dirCache:               make(map[string]*dirInfo),
+		atImportExtensionOrder: atImportExtensionOrder,
+		esmConditionsDefault:   esmConditionsDefault,
+		esmConditionsImport:    esmConditionsImport,
+		esmConditionsRequire:   esmConditionsRequire,
 	}
 }
 
-func (r *resolver) Resolve(sourceDir string, importPath string, kind ast.ImportKind) *ResolveResult {
+func (r *resolver) Resolve(sourceDir string, importPath string, kind ast.ImportKind) (*ResolveResult, DebugMeta) {
 	// Certain types of URLs default to being external for convenience
-	if
-	// "fill: url(#filter);"
-	(kind.IsFromCSS() && strings.HasPrefix(importPath, "#")) ||
+	if r.isExternalPattern(importPath) ||
+
+		// "fill: url(#filter);"
+		(kind.IsFromCSS() && strings.HasPrefix(importPath, "#")) ||
 
 		// "background: url(http://example.com/images/image.png);"
 		strings.HasPrefix(importPath, "http://") ||
@@ -145,28 +270,73 @@ func (r *resolver) Resolve(sourceDir string, importPath string, kind ast.ImportK
 		// "background: url(https://example.com/images/image.png);"
 		strings.HasPrefix(importPath, "https://") ||
 
-		// "background: url(data:image/png;base64,iVBORw0KGgo=);"
-		strings.HasPrefix(importPath, "data:") ||
-
 		// "background: url(//example.com/images/image.png);"
 		strings.HasPrefix(importPath, "//") {
 
 		return &ResolveResult{
 			PathPair:   PathPair{Primary: logger.Path{Text: importPath}},
 			IsExternal: true,
+		}, DebugMeta{}
+	}
+
+	if parsed, ok := ParseDataURL(importPath); ok {
+		// "import 'data:text/javascript,console.log(123)';"
+		// "@import 'data:text/css,body{background:white}';"
+		if parsed.DecodeMIMEType() != MIMETypeUnsupported {
+			return &ResolveResult{
+				PathPair: PathPair{Primary: logger.Path{Text: importPath, Namespace: "dataurl"}},
+			}, DebugMeta{}
 		}
+
+		// "background: url(data:image/png;base64,iVBORw0KGgo=);"
+		return &ResolveResult{
+			PathPair:   PathPair{Primary: logger.Path{Text: importPath}},
+			IsExternal: true,
+		}, DebugMeta{}
+	}
+
+	// Fail now if there is no directory to resolve in. This can happen for
+	// virtual modules (e.g. stdin) if a resolve directory is not specified.
+	if sourceDir == "" {
+		return nil, DebugMeta{}
 	}
 
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 
-	result := r.resolveWithoutSymlinks(sourceDir, importPath, kind)
+	result, debug := r.resolveWithoutSymlinks(sourceDir, importPath, kind)
 	if result == nil {
-		return nil
+		// If resolution failed, try again with the URL query and/or hash removed
+		suffix := strings.IndexAny(importPath, "?#")
+		if suffix < 1 {
+			return nil, debug
+		}
+		if result2, debug2 := r.resolveWithoutSymlinks(sourceDir, importPath[:suffix], kind); result2 == nil {
+			return nil, debug
+		} else {
+			result = result2
+			debug = debug2
+			result.PathPair.Primary.IgnoredSuffix = importPath[suffix:]
+			if result.PathPair.HasSecondary() {
+				result.PathPair.Secondary.IgnoredSuffix = importPath[suffix:]
+			}
+		}
 	}
 
 	// If successful, resolve symlinks using the directory info cache
-	return r.finalizeResolve(*result)
+	r.finalizeResolve(result)
+	return result, debug
+}
+
+func (r *resolver) isExternalPattern(path string) bool {
+	for _, pattern := range r.options.ExternalModules.Patterns {
+		if len(path) >= len(pattern.Prefix)+len(pattern.Suffix) &&
+			strings.HasPrefix(path, pattern.Prefix) &&
+			strings.HasSuffix(path, pattern.Suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *resolver) ResolveAbs(absPath string) *ResolveResult {
@@ -174,106 +344,196 @@ func (r *resolver) ResolveAbs(absPath string) *ResolveResult {
 	defer r.mutex.Unlock()
 
 	// Just decorate the absolute path with information from parent directories
-	return r.finalizeResolve(ResolveResult{PathPair: PathPair{Primary: logger.Path{Text: absPath, Namespace: "file"}}})
+	result := &ResolveResult{PathPair: PathPair{Primary: logger.Path{Text: absPath, Namespace: "file"}}}
+	r.finalizeResolve(result)
+	return result
 }
 
-func isInsideNodeModules(fs fs.FS, path string) bool {
-	dir := fs.Dir(path)
+func (r *resolver) ProbeResolvePackageAsRelative(sourceDir string, importPath string, kind ast.ImportKind) *ResolveResult {
+	absPath := r.fs.Join(sourceDir, importPath)
+
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+
+	if pair, ok, diffCase := r.loadAsFileOrDirectory(absPath, kind); ok {
+		result := &ResolveResult{PathPair: pair, DifferentCase: diffCase}
+		r.finalizeResolve(result)
+		return result
+	}
+	return nil
+}
+
+func IsInsideNodeModules(path string) bool {
 	for {
-		if fs.Base(dir) == "node_modules" {
-			return true
-		}
-		parent := fs.Dir(dir)
-		if dir == parent {
+		// This is written in a platform-independent manner because it's run on
+		// user-specified paths which can be arbitrary non-file-system things. So
+		// for example Windows paths may end up being used on Unix or URLs may end
+		// up being used on Windows. Be consistently agnostic to which kind of
+		// slash is used on all platforms.
+		slash := strings.LastIndexAny(path, "/\\")
+		if slash == -1 {
 			return false
 		}
-		dir = parent
+		dir, base := path[:slash], path[slash+1:]
+		if base == "node_modules" {
+			return true
+		}
+		path = dir
 	}
 }
 
-func (r *resolver) finalizeResolve(result ResolveResult) *ResolveResult {
+func (r *resolver) finalizeResolve(result *ResolveResult) {
 	for _, path := range result.PathPair.iter() {
 		if path.Namespace == "file" {
 			if dirInfo := r.dirInfoCached(r.fs.Dir(path.Text)); dirInfo != nil {
 				base := r.fs.Base(path.Text)
 
-				// Don't emit warnings for code inside a "node_modules" directory
-				if isInsideNodeModules(r.fs, path.Text) {
-					result.SuppressWarningsAboutWeirdCode = true
-				}
-
 				// Look up this file in the "sideEffects" map in the nearest enclosing
-				// directory with a "package.json" file
-				for info := dirInfo; info != nil; info = info.parent {
-					if info.packageJson != nil {
-						if info.packageJson.sideEffectsMap != nil {
-							result.IgnoreIfUnused = !info.packageJson.sideEffectsMap[path.Text]
+				// directory with a "package.json" file.
+				//
+				// Only do this for the primary path. Some packages have the primary
+				// path marked as having side effects and the secondary path marked
+				// as not having side effects. This is likely a bug in the package
+				// definition but we don't want to consider the primary path as not
+				// having side effects just because the secondary path is marked as
+				// not having side effects.
+				if *path == result.PathPair.Primary {
+					for info := dirInfo; info != nil; info = info.parent {
+						if info.packageJSON != nil {
+							if info.packageJSON.sideEffectsMap != nil {
+								hasSideEffects := false
+								if info.packageJSON.sideEffectsMap[path.Text] {
+									// Fast path: map lookup
+									hasSideEffects = true
+								} else {
+									// Slow path: glob tests
+									for _, re := range info.packageJSON.sideEffectsRegexps {
+										if re.MatchString(path.Text) {
+											hasSideEffects = true
+											break
+										}
+									}
+								}
+								if !hasSideEffects {
+									result.IgnorePrimaryIfUnused = info.packageJSON.ignoreIfUnusedData
+								}
+							}
+
+							// Also copy over the "type" field
+							result.ModuleType = info.packageJSON.moduleType
+							break
 						}
-						break
 					}
 				}
 
 				// Copy various fields from the nearest enclosing "tsconfig.json" file if present
-				if path == &result.PathPair.Primary && dirInfo.tsConfigJson != nil {
-					result.JSXFactory = dirInfo.tsConfigJson.jsxFactory
-					result.JSXFragment = dirInfo.tsConfigJson.jsxFragmentFactory
-					result.StrictClassFields = dirInfo.tsConfigJson.useDefineForClassFields
+				if path == &result.PathPair.Primary && dirInfo.tsConfigJSON != nil {
+					result.JSXFactory = dirInfo.tsConfigJSON.JSXFactory
+					result.JSXFragment = dirInfo.tsConfigJSON.JSXFragmentFactory
+					result.UseDefineForClassFieldsTS = dirInfo.tsConfigJSON.UseDefineForClassFields
+					result.PreserveUnusedImportsTS = dirInfo.tsConfigJSON.PreserveImportsNotUsedAsValues
 				}
 
-				if entry, ok := dirInfo.entries[base]; ok {
-					if symlink := entry.Symlink(); symlink != "" {
-						// Is this entry itself a symlink?
-						path.Text = symlink
-					} else if dirInfo.absRealPath != "" {
-						// Is there at least one parent directory with a symlink?
-						path.Text = r.fs.Join(dirInfo.absRealPath, base)
+				if !r.options.PreserveSymlinks {
+					if entry, _ := dirInfo.entries.Get(base); entry != nil {
+						if symlink := entry.Symlink(r.fs); symlink != "" {
+							// Is this entry itself a symlink?
+							path.Text = symlink
+						} else if dirInfo.absRealPath != "" {
+							// Is there at least one parent directory with a symlink?
+							path.Text = r.fs.Join(dirInfo.absRealPath, base)
+						}
 					}
 				}
 			}
 		}
 	}
-
-	return &result
 }
 
-func (r *resolver) resolveWithoutSymlinks(sourceDir string, importPath string, kind ast.ImportKind) *ResolveResult {
+func (r *resolver) resolveWithoutSymlinks(sourceDir string, importPath string, kind ast.ImportKind) (*ResolveResult, DebugMeta) {
 	// This implements the module resolution algorithm from node.js, which is
 	// described here: https://nodejs.org/api/modules.html#modules_all_together
-	var result PathPair
+	var result ResolveResult
 
-	// Return early if this is already an absolute path
-	if r.fs.IsAbs(importPath) {
+	// Return early if this is already an absolute path. In addition to asking
+	// the file system whether this is an absolute path, we also explicitly check
+	// whether it starts with a "/" and consider that an absolute path too. This
+	// is because relative paths can technically start with a "/" on Windows
+	// because it's not an absolute path on Windows. Then people might write code
+	// with imports that start with a "/" that works fine on Windows only to
+	// experience unexpected build failures later on other operating systems.
+	// Treating these paths as absolute paths on all platforms means Windows
+	// users will not be able to accidentally make use of these paths.
+	if strings.HasPrefix(importPath, "/") || r.fs.IsAbs(importPath) {
+		// First, check path overrides from the nearest enclosing TypeScript "tsconfig.json" file
+		if dirInfo := r.dirInfoCached(sourceDir); dirInfo != nil && dirInfo.tsConfigJSON != nil && dirInfo.tsConfigJSON.Paths != nil {
+			if absolute, ok, diffCase := r.matchTSConfigPaths(dirInfo.tsConfigJSON, importPath, kind); ok {
+				return &ResolveResult{PathPair: absolute, DifferentCase: diffCase}, DebugMeta{}
+			}
+		}
+
 		if r.options.ExternalModules.AbsPaths != nil && r.options.ExternalModules.AbsPaths[importPath] {
 			// If the string literal in the source text is an absolute path and has
 			// been marked as an external module, mark it as *not* an absolute path.
 			// That way we preserve the literal text in the output and don't generate
 			// a relative path from the output directory to that path.
-			return &ResolveResult{PathPair: PathPair{Primary: logger.Path{Text: importPath}}, IsExternal: true}
+			return &ResolveResult{PathPair: PathPair{Primary: logger.Path{Text: importPath}}, IsExternal: true}, DebugMeta{}
 		}
 
-		return &ResolveResult{PathPair: PathPair{Primary: logger.Path{Text: importPath, Namespace: "file"}}}
+		// Run node's resolution rules (e.g. adding ".js")
+		if absolute, ok, diffCase := r.loadAsFileOrDirectory(importPath, kind); ok {
+			return &ResolveResult{PathPair: absolute, DifferentCase: diffCase}, DebugMeta{}
+		}
+		return nil, DebugMeta{}
 	}
 
-	if !IsPackagePath(importPath) {
+	// Check both relative and package paths for CSS URL tokens, with relative
+	// paths taking precedence over package paths to match Webpack behavior.
+	isPackagePath := IsPackagePath(importPath)
+	checkRelative := !isPackagePath || kind == ast.ImportURL
+	checkPackage := isPackagePath
+
+	if checkRelative {
 		absPath := r.fs.Join(sourceDir, importPath)
 
 		// Check for external packages first
 		if r.options.ExternalModules.AbsPaths != nil && r.options.ExternalModules.AbsPaths[absPath] {
-			return &ResolveResult{PathPair: PathPair{Primary: logger.Path{Text: absPath, Namespace: "file"}}, IsExternal: true}
+			return &ResolveResult{PathPair: PathPair{Primary: logger.Path{Text: absPath, Namespace: "file"}}, IsExternal: true}, DebugMeta{}
 		}
 
-		if absolute, ok := r.loadAsFileOrDirectory(absPath, kind); ok {
-			result = absolute
-		} else {
-			return nil
+		// Check the non-package "browser" map for the first time (1 out of 2)
+		importDirInfo := r.dirInfoCached(r.fs.Dir(absPath))
+		if importDirInfo != nil && importDirInfo.enclosingBrowserScope != nil {
+			if packageJSON := importDirInfo.enclosingBrowserScope.packageJSON; packageJSON.browserNonPackageMap != nil {
+				if remapped, ok := packageJSON.browserNonPackageMap[absPath]; ok {
+					if remapped == nil {
+						return &ResolveResult{PathPair: PathPair{Primary: logger.Path{Text: absPath, Namespace: "file", Flags: logger.PathDisabled}}}, DebugMeta{}
+					} else if remappedResult, ok, diffCase, _ := r.resolveWithoutRemapping(importDirInfo.enclosingBrowserScope, *remapped, kind); ok {
+						result = ResolveResult{PathPair: remappedResult, DifferentCase: diffCase}
+						checkRelative = false
+						checkPackage = false
+					}
+				}
+			}
 		}
-	} else {
+
+		if checkRelative {
+			if absolute, ok, diffCase := r.loadAsFileOrDirectory(absPath, kind); ok {
+				checkPackage = false
+				result = ResolveResult{PathPair: absolute, DifferentCase: diffCase}
+			} else if !checkPackage {
+				return nil, DebugMeta{}
+			}
+		}
+	}
+
+	if checkPackage {
 		// Check for external packages first
 		if r.options.ExternalModules.NodeModules != nil {
 			query := importPath
 			for {
 				if r.options.ExternalModules.NodeModules[query] {
-					return &ResolveResult{PathPair: PathPair{Primary: logger.Path{Text: importPath}}, IsExternal: true}
+					return &ResolveResult{PathPair: PathPair{Primary: logger.Path{Text: importPath}}, IsExternal: true}, DebugMeta{}
 				}
 
 				// If the module "foo" has been marked as external, we also want to treat
@@ -289,24 +549,24 @@ func (r *resolver) resolveWithoutSymlinks(sourceDir string, importPath string, k
 		sourceDirInfo := r.dirInfoCached(sourceDir)
 		if sourceDirInfo == nil {
 			// Bail if the directory is missing for some reason
-			return nil
+			return nil, DebugMeta{}
 		}
 
 		// Support remapping one package path to another via the "browser" field
 		if sourceDirInfo.enclosingBrowserScope != nil {
-			packageJson := sourceDirInfo.enclosingBrowserScope.packageJson
-			if packageJson.browserPackageMap != nil {
-				if remapped, ok := packageJson.browserPackageMap[importPath]; ok {
+			packageJSON := sourceDirInfo.enclosingBrowserScope.packageJSON
+			if packageJSON.browserPackageMap != nil {
+				if remapped, ok := packageJSON.browserPackageMap[importPath]; ok {
 					if remapped == nil {
 						// "browser": {"module": false}
-						if absolute, ok := r.loadNodeModules(importPath, kind, sourceDirInfo); ok {
-							absolute.Primary = logger.Path{Text: absolute.Primary.Text, Namespace: BrowserFalseNamespace}
+						if absolute, ok, diffCase, _ := r.loadNodeModules(importPath, kind, sourceDirInfo); ok {
+							absolute.Primary = logger.Path{Text: absolute.Primary.Text, Namespace: "file", Flags: logger.PathDisabled}
 							if absolute.HasSecondary() {
-								absolute.Secondary = logger.Path{Text: absolute.Secondary.Text, Namespace: BrowserFalseNamespace}
+								absolute.Secondary = logger.Path{Text: absolute.Secondary.Text, Namespace: "file", Flags: logger.PathDisabled}
 							}
-							return &ResolveResult{PathPair: absolute}
+							return &ResolveResult{PathPair: absolute, DifferentCase: diffCase}, DebugMeta{}
 						} else {
-							return &ResolveResult{PathPair: PathPair{Primary: logger.Path{Text: importPath, Namespace: BrowserFalseNamespace}}}
+							return &ResolveResult{PathPair: PathPair{Primary: logger.Path{Text: importPath, Flags: logger.PathDisabled}}, DifferentCase: diffCase}, DebugMeta{}
 						}
 					} else {
 						// "browser": {"module": "./some-file"}
@@ -318,44 +578,45 @@ func (r *resolver) resolveWithoutSymlinks(sourceDir string, importPath string, k
 			}
 		}
 
-		if absolute, ok := r.resolveWithoutRemapping(sourceDirInfo, importPath, kind); ok {
-			result = absolute
+		if absolute, ok, diffCase, debug := r.resolveWithoutRemapping(sourceDirInfo, importPath, kind); ok {
+			result = ResolveResult{PathPair: absolute, DifferentCase: diffCase}
 		} else {
 			// Note: node's "self references" are not currently supported
-			return nil
+			return nil, debug
 		}
 	}
 
 	// Check the directory that contains this file
-	for _, path := range result.iter() {
+	for _, path := range result.PathPair.iter() {
 		resultDir := r.fs.Dir(path.Text)
 		resultDirInfo := r.dirInfoCached(resultDir)
 
-		// Support remapping one non-module path to another via the "browser" field
+		// Check the non-package "browser" map for the second time (2 out of 2)
 		if resultDirInfo != nil && resultDirInfo.enclosingBrowserScope != nil {
-			packageJson := resultDirInfo.enclosingBrowserScope.packageJson
-			if packageJson.browserNonPackageMap != nil {
-				if remapped, ok := packageJson.browserNonPackageMap[path.Text]; ok {
+			packageJSON := resultDirInfo.enclosingBrowserScope.packageJSON
+			if packageJSON.browserNonPackageMap != nil {
+				if remapped, ok := packageJSON.browserNonPackageMap[path.Text]; ok {
 					if remapped == nil {
-						path.Namespace = BrowserFalseNamespace
-					} else if remappedResult, ok := r.resolveWithoutRemapping(resultDirInfo.enclosingBrowserScope, *remapped, kind); ok {
+						path.Flags |= logger.PathDisabled
+					} else if remappedResult, ok, _, _ := r.resolveWithoutRemapping(resultDirInfo.enclosingBrowserScope, *remapped, kind); ok {
 						*path = remappedResult.Primary
 					} else {
-						return nil
+						return nil, DebugMeta{}
 					}
 				}
 			}
 		}
 	}
 
-	return &ResolveResult{PathPair: result}
+	return &result, DebugMeta{}
 }
 
-func (r *resolver) resolveWithoutRemapping(sourceDirInfo *dirInfo, importPath string, kind ast.ImportKind) (PathPair, bool) {
+func (r *resolver) resolveWithoutRemapping(sourceDirInfo *dirInfo, importPath string, kind ast.ImportKind) (PathPair, bool, *fs.DifferentCase, DebugMeta) {
 	if IsPackagePath(importPath) {
 		return r.loadNodeModules(importPath, kind, sourceDirInfo)
 	} else {
-		return r.loadAsFileOrDirectory(r.fs.Join(sourceDirInfo.absPath, importPath), kind)
+		pair, ok, diffCase := r.loadAsFileOrDirectory(r.fs.Join(sourceDirInfo.absPath, importPath), kind)
+		return pair, ok, diffCase, DebugMeta{}
 	}
 }
 
@@ -370,67 +631,19 @@ func (r *resolver) PrettyPath(path logger.Path) string {
 		// These should be platform-independent so our output doesn't depend on which
 		// operating system it was run. Replace Windows backward slashes with standard
 		// forward slashes.
-		return strings.ReplaceAll(path.Text, "\\", "/")
+		path.Text = strings.ReplaceAll(path.Text, "\\", "/")
+	} else if path.Namespace != "" {
+		path.Text = fmt.Sprintf("%s:%s", path.Namespace, path.Text)
 	}
 
-	if path.Namespace != "" {
-		return fmt.Sprintf("%s:%s", path.Namespace, path.Text)
+	if path.IsDisabled() {
+		path.Text = "(disabled):" + path.Text
 	}
 
-	return path.Text
+	return path.Text + path.IgnoredSuffix
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-
-type packageJson struct {
-	absMainFields map[string]string
-
-	// Present if the "browser" field is present. This field is intended to be
-	// used by bundlers and lets you redirect the paths of certain 3rd-party
-	// modules that don't work in the browser to other modules that shim that
-	// functionality. That way you don't have to rewrite the code for those 3rd-
-	// party modules. For example, you might remap the native "util" node module
-	// to something like https://www.npmjs.com/package/util so it works in the
-	// browser.
-	//
-	// This field contains a mapping of absolute paths to absolute paths. Mapping
-	// to an empty path indicates that the module is disabled. As far as I can
-	// tell, the official spec is a GitHub repo hosted by a user account:
-	// https://github.com/defunctzombie/package-browser-field-spec. The npm docs
-	// say almost nothing: https://docs.npmjs.com/files/package.json.
-	browserNonPackageMap map[string]*string
-	browserPackageMap    map[string]*string
-
-	// If this is non-nil, each entry in this map is the absolute path of a file
-	// with side effects. Any entry not in this map should be considered to have
-	// no side effects, which means import statements for these files can be
-	// removed if none of the imports are used. This is a convention from Webpack:
-	// https://webpack.js.org/guides/tree-shaking/.
-	//
-	// Note that if a file is included, all statements that can't be proven to be
-	// free of side effects must be included. This convention does not say
-	// anything about whether any statements within the file have side effects or
-	// not.
-	sideEffectsMap map[string]bool
-}
-
-type tsConfigJson struct {
-	// The absolute path of "compilerOptions.baseUrl"
-	absPathBaseUrl *string
-
-	// The verbatim values of "compilerOptions.paths". The keys are patterns to
-	// match and the values are arrays of fallback paths to search. Each key and
-	// each fallback path can optionally have a single "*" wildcard character.
-	// If both the key and the value have a wildcard, the substring matched by
-	// the wildcard is substituted into the fallback path. The keys represent
-	// module-style path names and the fallback paths are relative to the
-	// "baseUrl" value in the "tsconfig.json" file.
-	paths map[string][]string
-
-	jsxFactory              []string
-	jsxFragmentFactory      []string
-	useDefineForClassFields bool
-}
 
 type dirInfo struct {
 	// These objects are immutable, so we can just point to the parent directory
@@ -443,11 +656,11 @@ type dirInfo struct {
 
 	// All relevant information about this directory
 	absPath        string
-	entries        map[string]*fs.Entry
+	entries        fs.DirEntries
 	hasNodeModules bool          // Is there a "node_modules" subdirectory?
 	absPathIndex   *string       // Is there an "index.js" file?
-	packageJson    *packageJson  // Is there a "package.json" file?
-	tsConfigJson   *tsConfigJson // Is there a "tsconfig.json" file in this directory or a parent directory?
+	packageJSON    *packageJSON  // Is there a "package.json" file?
+	tsConfigJSON   *TSConfigJSON // Is there a "tsconfig.json" file in this directory or a parent directory?
 	absRealPath    string        // If non-empty, this is the real absolute path resolving any symlinks
 }
 
@@ -469,230 +682,118 @@ func (r *resolver) dirInfoCached(path string) *dirInfo {
 	return info
 }
 
-func (r *resolver) parseMemberExpressionForJSX(source logger.Source, loc logger.Loc, text string) []string {
-	if text == "" {
-		return nil
-	}
-	parts := strings.Split(text, ".")
-	for _, part := range parts {
-		if !js_lexer.IsIdentifier(part) {
-			warnRange := source.RangeOfString(loc)
-			r.log.AddRangeWarning(&source, warnRange, fmt.Sprintf("Invalid JSX member expression: %q", text))
-			return nil
-		}
-	}
-	return parts
-}
-
 var parseErrorImportCycle = errors.New("(import cycle)")
+var parseErrorAlreadyLogged = errors.New("(error already logged)")
 
 // This may return "parseErrorAlreadyLogged" in which case there was a syntax
 // error, but it's already been reported. No further errors should be logged.
 //
 // Nested calls may also return "parseErrorImportCycle". In that case the
 // caller is responsible for logging an appropriate error message.
-func (r *resolver) parseJsTsConfig(file string, visited map[string]bool) (*tsConfigJson, error) {
+func (r *resolver) parseTSConfig(file string, visited map[string]bool) (*TSConfigJSON, error) {
 	// Don't infinite loop if a series of "extends" links forms a cycle
 	if visited[file] {
 		return nil, parseErrorImportCycle
 	}
 	visited[file] = true
-	filePath := r.fs.Dir(file)
 
-	// Unfortunately "tsconfig.json" isn't actually JSON. It's some other
-	// format that appears to be defined by the implementation details of the
-	// TypeScript compiler.
-	//
-	// Attempt to parse it anyway by modifying the JSON parser, but just for
-	// these particular files. This is likely not a completely accurate
-	// emulation of what the TypeScript compiler does (e.g. string escape
-	// behavior may also be different).
-	json, tsConfigSource, err := r.parseJSON(file, js_parser.ParseJSONOptions{
-		AllowComments:       true, // https://github.com/microsoft/TypeScript/issues/4987
-		AllowTrailingCommas: true,
-	})
+	contents, err := r.caches.FSCache.ReadFile(r.fs, file)
 	if err != nil {
 		return nil, err
 	}
 
-	var result tsConfigJson
+	keyPath := logger.Path{Text: file, Namespace: "file"}
+	source := logger.Source{
+		KeyPath:    keyPath,
+		PrettyPath: r.PrettyPath(keyPath),
+		Contents:   contents,
+	}
+	fileDir := r.fs.Dir(file)
 
-	// Parse "extends"
-	if extendsJson, _, ok := getProperty(json, "extends"); ok {
-		if extends, ok := getString(extendsJson); ok {
-			warnRange := tsConfigSource.RangeOfString(extendsJson.Loc)
-			found := false
-
-			if IsPackagePath(extends) {
-				// If this is a package path, try to resolve it to a "node_modules"
-				// folder. This doesn't use the normal node module resolution algorithm
-				// both because it's different (e.g. we don't want to match a directory)
-				// and because it would deadlock since we're currently in the middle of
-				// populating the directory info cache.
-				current := filePath
-				for !found {
-					// Skip "node_modules" folders
-					if r.fs.Base(current) != "node_modules" {
-						join := r.fs.Join(current, "node_modules", extends)
-						filesToCheck := []string{r.fs.Join(join, "tsconfig.json"), join, join + ".json"}
-						for _, fileToCheck := range filesToCheck {
-							base, err := r.parseJsTsConfig(fileToCheck, visited)
-							if err == nil {
-								result = *base
-							} else if err == syscall.ENOENT {
-								continue
-							} else if err == parseErrorImportCycle {
-								r.log.AddRangeWarning(&tsConfigSource, warnRange,
-									fmt.Sprintf("Base config file %q forms cycle", extends))
-							} else if err != parseErrorAlreadyLogged {
-								r.log.AddRangeError(&tsConfigSource, warnRange,
-									fmt.Sprintf("Cannot read file %q: %s",
-										r.PrettyPath(logger.Path{Text: fileToCheck, Namespace: "file"}), err.Error()))
-							}
-							found = true
-							break
+	result := ParseTSConfigJSON(r.log, source, &r.caches.JSONCache, func(extends string, extendsRange logger.Range) *TSConfigJSON {
+		if IsPackagePath(extends) {
+			// If this is a package path, try to resolve it to a "node_modules"
+			// folder. This doesn't use the normal node module resolution algorithm
+			// both because it's different (e.g. we don't want to match a directory)
+			// and because it would deadlock since we're currently in the middle of
+			// populating the directory info cache.
+			current := fileDir
+			for {
+				// Skip "node_modules" folders
+				if r.fs.Base(current) != "node_modules" {
+					join := r.fs.Join(current, "node_modules", extends)
+					filesToCheck := []string{r.fs.Join(join, "tsconfig.json"), join, join + ".json"}
+					for _, fileToCheck := range filesToCheck {
+						base, err := r.parseTSConfig(fileToCheck, visited)
+						if err == nil {
+							return base
+						} else if err == syscall.ENOENT {
+							continue
+						} else if err == parseErrorImportCycle {
+							r.log.AddRangeWarning(&source, extendsRange,
+								fmt.Sprintf("Base config file %q forms cycle", extends))
+						} else if err != parseErrorAlreadyLogged {
+							r.log.AddRangeError(&source, extendsRange,
+								fmt.Sprintf("Cannot read file %q: %s",
+									r.PrettyPath(logger.Path{Text: fileToCheck, Namespace: "file"}), err.Error()))
 						}
+						return nil
 					}
-
-					// Go to the parent directory, stopping at the file system root
-					next := r.fs.Dir(current)
-					if current == next {
-						break
-					}
-					current = next
 				}
-			} else {
-				// If this is a regular path, search relative to the enclosing directory
-				extendsFile := r.fs.Join(filePath, extends)
-				for _, fileToCheck := range []string{extendsFile, extendsFile + ".json"} {
-					base, err := r.parseJsTsConfig(fileToCheck, visited)
-					if err == nil {
-						result = *base
-					} else if err == syscall.ENOENT {
-						continue
-					} else if err == parseErrorImportCycle {
-						r.log.AddRangeWarning(&tsConfigSource, warnRange,
-							fmt.Sprintf("Base config file %q forms cycle", extends))
-					} else if err != parseErrorAlreadyLogged {
-						r.log.AddRangeError(&tsConfigSource, warnRange,
-							fmt.Sprintf("Cannot read file %q: %s",
-								r.PrettyPath(logger.Path{Text: fileToCheck, Namespace: "file"}), err.Error()))
-					}
-					found = true
+
+				// Go to the parent directory, stopping at the file system root
+				next := r.fs.Dir(current)
+				if current == next {
 					break
 				}
+				current = next
 			}
-
-			// Suppress warnings about missing base config files inside "node_modules"
-			if !found && !isInsideNodeModules(r.fs, file) {
-				r.log.AddRangeWarning(&tsConfigSource, warnRange,
-					fmt.Sprintf("Cannot find base config file %q", extends))
+		} else {
+			// If this is a regular path, search relative to the enclosing directory
+			extendsFile := extends
+			if !r.fs.IsAbs(extends) {
+				extendsFile = r.fs.Join(fileDir, extends)
 			}
-		}
-	}
-
-	// Parse "compilerOptions"
-	if compilerOptionsJson, _, ok := getProperty(json, "compilerOptions"); ok {
-		// Parse "baseUrl"
-		if baseUrlJson, _, ok := getProperty(compilerOptionsJson, "baseUrl"); ok {
-			if baseUrl, ok := getString(baseUrlJson); ok {
-				baseUrl = r.fs.Join(filePath, baseUrl)
-				result.absPathBaseUrl = &baseUrl
-			}
-		}
-
-		// Parse "jsxFactory"
-		if jsxFactoryJson, _, ok := getProperty(compilerOptionsJson, "jsxFactory"); ok {
-			if jsxFactory, ok := getString(jsxFactoryJson); ok {
-				result.jsxFactory = r.parseMemberExpressionForJSX(tsConfigSource, jsxFactoryJson.Loc, jsxFactory)
-			}
-		}
-
-		// Parse "jsxFragmentFactory"
-		if jsxFragmentFactoryJson, _, ok := getProperty(compilerOptionsJson, "jsxFragmentFactory"); ok {
-			if jsxFragmentFactory, ok := getString(jsxFragmentFactoryJson); ok {
-				result.jsxFragmentFactory = r.parseMemberExpressionForJSX(tsConfigSource, jsxFragmentFactoryJson.Loc, jsxFragmentFactory)
-			}
-		}
-
-		// Parse "useDefineForClassFields"
-		if useDefineForClassFieldsJson, _, ok := getProperty(compilerOptionsJson, "useDefineForClassFields"); ok {
-			if useDefineForClassFields, ok := getBool(useDefineForClassFieldsJson); ok {
-				result.useDefineForClassFields = useDefineForClassFields
-			}
-		}
-
-		// Parse "paths"
-		if pathsJson, pathsKeyLoc, ok := getProperty(compilerOptionsJson, "paths"); ok {
-			if result.absPathBaseUrl == nil {
-				warnRange := tsConfigSource.RangeOfString(pathsKeyLoc)
-				r.log.AddRangeWarning(&tsConfigSource, warnRange,
-					"Cannot use the \"paths\" property without the \"baseUrl\" property")
-			} else if paths, ok := pathsJson.Data.(*js_ast.EObject); ok {
-				result.paths = make(map[string][]string)
-				for _, prop := range paths.Properties {
-					if key, ok := getString(prop.Key); ok {
-						if !isValidTSConfigPathPattern(key, r.log, tsConfigSource, prop.Key.Loc) {
-							continue
-						}
-
-						// The "paths" field is an object which maps a pattern to an
-						// array of remapping patterns to try, in priority order. See
-						// the documentation for examples of how this is used:
-						// https://www.typescriptlang.org/docs/handbook/module-resolution.html#path-mapping.
-						//
-						// One particular example:
-						//
-						//   {
-						//     "compilerOptions": {
-						//       "baseUrl": "projectRoot",
-						//       "paths": {
-						//         "*": [
-						//           "*",
-						//           "generated/*"
-						//         ]
-						//       }
-						//     }
-						//   }
-						//
-						// Matching "folder1/file2" should first check "projectRoot/folder1/file2"
-						// and then, if that didn't work, also check "projectRoot/generated/folder1/file2".
-						if array, ok := prop.Value.Data.(*js_ast.EArray); ok {
-							for _, item := range array.Items {
-								if str, ok := getString(item); ok {
-									if isValidTSConfigPathPattern(str, r.log, tsConfigSource, item.Loc) {
-										result.paths[key] = append(result.paths[key], str)
-									}
-								}
-							}
-						} else {
-							warnRange := tsConfigSource.RangeOfString(prop.Value.Loc)
-							r.log.AddRangeWarning(&tsConfigSource, warnRange, fmt.Sprintf(
-								"Substitutions for pattern %q should be an array", key))
-						}
-					}
+			for _, fileToCheck := range []string{extendsFile, extendsFile + ".json"} {
+				base, err := r.parseTSConfig(fileToCheck, visited)
+				if err == nil {
+					return base
+				} else if err == syscall.ENOENT {
+					continue
+				} else if err == parseErrorImportCycle {
+					r.log.AddRangeWarning(&source, extendsRange,
+						fmt.Sprintf("Base config file %q forms cycle", extends))
+				} else if err != parseErrorAlreadyLogged {
+					r.log.AddRangeError(&source, extendsRange,
+						fmt.Sprintf("Cannot read file %q: %s",
+							r.PrettyPath(logger.Path{Text: fileToCheck, Namespace: "file"}), err.Error()))
 				}
+				return nil
 			}
 		}
-	}
 
-	return &result, nil
-}
-
-func isValidTSConfigPathPattern(text string, log logger.Log, source logger.Source, loc logger.Loc) bool {
-	foundAsterisk := false
-	for i := 0; i < len(text); i++ {
-		if text[i] == '*' {
-			if foundAsterisk {
-				r := source.RangeOfString(loc)
-				log.AddRangeWarning(&source, r, fmt.Sprintf(
-					"Invalid pattern %q, must have at most one \"*\" character", text))
-				return false
-			}
-			foundAsterisk = true
+		// Suppress warnings about missing base config files inside "node_modules"
+		if !IsInsideNodeModules(file) {
+			r.log.AddRangeWarning(&source, extendsRange,
+				fmt.Sprintf("Cannot find base config file %q", extends))
 		}
+
+		return nil
+	})
+
+	if result == nil {
+		return nil, parseErrorAlreadyLogged
 	}
-	return true
+
+	if result.BaseURL != nil && !r.fs.IsAbs(*result.BaseURL) {
+		*result.BaseURL = r.fs.Join(fileDir, *result.BaseURL)
+	}
+
+	if result.Paths != nil && !r.fs.IsAbs(result.BaseURLForPaths) {
+		result.BaseURLForPaths = r.fs.Join(fileDir, result.BaseURLForPaths)
+	}
+
+	return result, nil
 }
 
 func (r *resolver) dirInfoUncached(path string) *dirInfo {
@@ -710,8 +811,23 @@ func (r *resolver) dirInfoUncached(path string) *dirInfo {
 
 	// List the directories
 	entries, err := r.fs.ReadDirectory(path)
+	if err == syscall.EACCES {
+		// Just pretend this directory is empty if we can't access it. This is the
+		// case on Unix for directories that only have the execute permission bit
+		// set. It means we will just pass through the empty directory and
+		// continue to check the directories above it, which is now node behaves.
+		entries = fs.MakeEmptyDirEntries(path)
+		err = nil
+	}
 	if err != nil {
-		if err != syscall.ENOENT {
+		// Ignore "ENOTDIR" here so that calling "ReadDirectory" on a file behaves
+		// as if there is nothing there at all instead of causing an error due to
+		// the directory actually being a file. This is a workaround for situations
+		// where people try to import from a path containing a file as a parent
+		// directory. The "pnpm" package manager generates a faulty "NODE_PATH"
+		// list which contains such paths and treating them as missing means we just
+		// ignore them during path resolution.
+		if err != syscall.ENOENT && err != syscall.ENOTDIR {
 			r.log.AddError(nil, logger.Loc{},
 				fmt.Sprintf("Cannot read directory %q: %s",
 					r.PrettyPath(logger.Path{Text: path, Namespace: "file"}), err.Error()))
@@ -727,8 +843,8 @@ func (r *resolver) dirInfoUncached(path string) *dirInfo {
 	// A "node_modules" directory isn't allowed to directly contain another "node_modules" directory
 	base := r.fs.Base(path)
 	if base != "node_modules" {
-		if entry, ok := entries["node_modules"]; ok {
-			info.hasNodeModules = entry.Kind() == fs.DirEntry
+		if entry, _ := entries.Get("node_modules"); entry != nil {
+			info.hasNodeModules = entry.Kind(r.fs) == fs.DirEntry
 		}
 	}
 
@@ -737,21 +853,23 @@ func (r *resolver) dirInfoUncached(path string) *dirInfo {
 		info.enclosingBrowserScope = parentInfo.enclosingBrowserScope
 
 		// Make sure "absRealPath" is the real path of the directory (resolving any symlinks)
-		if entry, ok := parentInfo.entries[base]; ok {
-			if symlink := entry.Symlink(); symlink != "" {
-				info.absRealPath = symlink
-			} else if parentInfo.absRealPath != "" {
-				info.absRealPath = r.fs.Join(parentInfo.absRealPath, base)
+		if !r.options.PreserveSymlinks {
+			if entry, _ := parentInfo.entries.Get(base); entry != nil {
+				if symlink := entry.Symlink(r.fs); symlink != "" {
+					info.absRealPath = symlink
+				} else if parentInfo.absRealPath != "" {
+					info.absRealPath = r.fs.Join(parentInfo.absRealPath, base)
+				}
 			}
 		}
 	}
 
 	// Record if this directory has a package.json file
-	if entry, ok := entries["package.json"]; ok && entry.Kind() == fs.FileEntry {
-		info.packageJson = r.parsePackageJSON(path)
+	if entry, _ := entries.Get("package.json"); entry != nil && entry.Kind(r.fs) == fs.FileEntry {
+		info.packageJSON = r.parsePackageJSON(path)
 
 		// Propagate this browser scope into child directories
-		if info.packageJson != nil && (info.packageJson.browserPackageMap != nil || info.packageJson.browserNonPackageMap != nil) {
+		if info.packageJSON != nil && (info.packageJSON.browserPackageMap != nil || info.packageJSON.browserNonPackageMap != nil) {
 			info.enclosingBrowserScope = info
 		}
 	}
@@ -760,9 +878,9 @@ func (r *resolver) dirInfoUncached(path string) *dirInfo {
 	{
 		var tsConfigPath string
 		if forceTsConfig := r.options.TsConfigOverride; forceTsConfig == "" {
-			if entry, ok := entries["tsconfig.json"]; ok && entry.Kind() == fs.FileEntry {
+			if entry, _ := entries.Get("tsconfig.json"); entry != nil && entry.Kind(r.fs) == fs.FileEntry {
 				tsConfigPath = r.fs.Join(path, "tsconfig.json")
-			} else if entry, ok := entries["jsconfig.json"]; ok && entry.Kind() == fs.FileEntry {
+			} else if entry, _ := entries.Get("jsconfig.json"); entry != nil && entry.Kind(r.fs) == fs.FileEntry {
 				tsConfigPath = r.fs.Join(path, "jsconfig.json")
 			}
 		} else if parentInfo == nil {
@@ -771,7 +889,7 @@ func (r *resolver) dirInfoUncached(path string) *dirInfo {
 		}
 		if tsConfigPath != "" {
 			var err error
-			info.tsConfigJson, err = r.parseJsTsConfig(tsConfigPath, make(map[string]bool))
+			info.tsConfigJSON, err = r.parseTSConfig(tsConfigPath, make(map[string]bool))
 			if err != nil {
 				if err == syscall.ENOENT {
 					r.log.AddError(nil, logger.Loc{}, fmt.Sprintf("Cannot find tsconfig file %q",
@@ -786,155 +904,19 @@ func (r *resolver) dirInfoUncached(path string) *dirInfo {
 	}
 
 	// Propagate the enclosing tsconfig.json from the parent directory
-	if info.tsConfigJson == nil && parentInfo != nil {
-		info.tsConfigJson = parentInfo.tsConfigJson
+	if info.tsConfigJSON == nil && parentInfo != nil {
+		info.tsConfigJSON = parentInfo.tsConfigJSON
 	}
 
 	// Look for an "index" file with known extensions
-	if absolute, ok := r.loadAsIndex(path, entries); ok {
+	if absolute, ok, _ := r.loadAsIndex(path, entries); ok {
 		info.absPathIndex = &absolute
 	}
 
 	return info
 }
 
-func (r *resolver) parsePackageJSON(path string) *packageJson {
-	packageJsonPath := r.fs.Join(path, "package.json")
-	json, jsonSource, err := r.parseJSON(packageJsonPath, js_parser.ParseJSONOptions{})
-	if err != nil {
-		if err != parseErrorAlreadyLogged {
-			r.log.AddError(nil, logger.Loc{},
-				fmt.Sprintf("Cannot read file %q: %s",
-					r.PrettyPath(logger.Path{Text: packageJsonPath, Namespace: "file"}), err.Error()))
-		}
-		return nil
-	}
-
-	toAbsPath := func(pathText string, pathRange logger.Range) *string {
-		// Is it a file?
-		if absolute, ok := r.loadAsFile(pathText); ok {
-			return &absolute
-		}
-
-		// Is it a directory?
-		if mainEntries, err := r.fs.ReadDirectory(pathText); err == nil {
-			// Look for an "index" file with known extensions
-			if absolute, ok := r.loadAsIndex(pathText, mainEntries); ok {
-				return &absolute
-			}
-		} else if err != syscall.ENOENT {
-			r.log.AddRangeError(&jsonSource, pathRange,
-				fmt.Sprintf("Cannot read directory %q: %s",
-					r.PrettyPath(logger.Path{Text: pathText, Namespace: "file"}), err.Error()))
-		}
-		return nil
-	}
-
-	packageJson := &packageJson{}
-
-	// Read the "main" fields
-	mainFields := r.options.MainFields
-	if mainFields == nil {
-		mainFields = defaultMainFields[r.options.Platform]
-	}
-	for _, field := range mainFields {
-		if mainJson, _, ok := getProperty(json, field); ok {
-			if main, ok := getString(mainJson); ok {
-				if packageJson.absMainFields == nil {
-					packageJson.absMainFields = make(map[string]string)
-				}
-				if absPath := toAbsPath(r.fs.Join(path, main), jsonSource.RangeOfString(mainJson.Loc)); absPath != nil {
-					packageJson.absMainFields[field] = *absPath
-				}
-			}
-		}
-	}
-
-	// Read the "browser" property, but only when targeting the browser
-	if browserJson, _, ok := getProperty(json, "browser"); ok && r.options.Platform == config.PlatformBrowser {
-		// We both want the ability to have the option of CJS vs. ESM and the
-		// option of having node vs. browser. The way to do this is to use the
-		// object literal form of the "browser" field like this:
-		//
-		//   "main": "dist/index.node.cjs.js",
-		//   "module": "dist/index.node.esm.js",
-		//   "browser": {
-		//     "./dist/index.node.cjs.js": "./dist/index.browser.cjs.js",
-		//     "./dist/index.node.esm.js": "./dist/index.browser.esm.js"
-		//   },
-		//
-		if browser, ok := browserJson.Data.(*js_ast.EObject); ok {
-			// The value is an object
-			browserPackageMap := make(map[string]*string)
-			browserNonPackageMap := make(map[string]*string)
-
-			// Remap all files in the browser field
-			for _, prop := range browser.Properties {
-				if key, ok := getString(prop.Key); ok && prop.Value != nil {
-					isPackagePath := IsPackagePath(key)
-
-					// Make this an absolute path if it's not a package
-					if !isPackagePath {
-						key = r.fs.Join(path, key)
-					}
-
-					if value, ok := getString(*prop.Value); ok {
-						// If this is a string, it's a replacement package
-						if isPackagePath {
-							browserPackageMap[key] = &value
-						} else {
-							browserNonPackageMap[key] = &value
-						}
-					} else if value, ok := getBool(*prop.Value); ok && !value {
-						// If this is false, it means the package is disabled
-						if isPackagePath {
-							browserPackageMap[key] = nil
-						} else {
-							browserNonPackageMap[key] = nil
-						}
-					}
-				}
-			}
-
-			packageJson.browserPackageMap = browserPackageMap
-			packageJson.browserNonPackageMap = browserNonPackageMap
-		}
-	}
-
-	// Read the "sideEffects" property
-	if sideEffectsJson, _, ok := getProperty(json, "sideEffects"); ok {
-		switch data := sideEffectsJson.Data.(type) {
-		case *js_ast.EBoolean:
-			if !data.Value {
-				// Make an empty map for "sideEffects: false", which indicates all
-				// files in this module can be considered to not have side effects.
-				packageJson.sideEffectsMap = make(map[string]bool)
-			}
-
-		case *js_ast.EArray:
-			// The "sideEffects: []" format means all files in this module but not in
-			// the array can be considered to not have side effects.
-			packageJson.sideEffectsMap = make(map[string]bool)
-			for _, itemJson := range data.Items {
-				if item, ok := itemJson.Data.(*js_ast.EString); ok && item.Value != nil {
-					absolute := r.fs.Join(path, js_lexer.UTF16ToString(item.Value))
-					packageJson.sideEffectsMap[absolute] = true
-				} else {
-					r.log.AddWarning(&jsonSource, itemJson.Loc,
-						"Expected string in array for \"sideEffects\"")
-				}
-			}
-
-		default:
-			r.log.AddWarning(&jsonSource, sideEffectsJson.Loc,
-				"Invalid value for \"sideEffects\"")
-		}
-	}
-
-	return packageJson
-}
-
-func (r *resolver) loadAsFile(path string) (string, bool) {
+func (r *resolver) loadAsFile(path string, extensionOrder []string) (string, bool, *fs.DifferentCase) {
 	// Read the directory entries once to minimize locking
 	dirPath := r.fs.Dir(path)
 	entries, err := r.fs.ReadDirectory(dirPath)
@@ -944,20 +926,20 @@ func (r *resolver) loadAsFile(path string) (string, bool) {
 				fmt.Sprintf("Cannot read directory %q: %s",
 					r.PrettyPath(logger.Path{Text: dirPath, Namespace: "file"}), err.Error()))
 		}
-		return "", false
+		return "", false, nil
 	}
 
 	base := r.fs.Base(path)
 
 	// Try the plain path without any extensions
-	if entry, ok := entries[base]; ok && entry.Kind() == fs.FileEntry {
-		return path, true
+	if entry, diffCase := entries.Get(base); entry != nil && entry.Kind(r.fs) == fs.FileEntry {
+		return path, true, diffCase
 	}
 
 	// Try the path with extensions
-	for _, ext := range r.options.ExtensionOrder {
-		if entry, ok := entries[base+ext]; ok && entry.Kind() == fs.FileEntry {
-			return path + ext, true
+	for _, ext := range extensionOrder {
+		if entry, diffCase := entries.Get(base + ext); entry != nil && entry.Kind(r.fs) == fs.FileEntry {
+			return path + ext, true, diffCase
 		}
 	}
 
@@ -981,50 +963,28 @@ func (r *resolver) loadAsFile(path string) (string, bool) {
 		// Note that the official compiler code always tries ".ts" before
 		// ".tsx" even if the original extension was ".jsx".
 		for _, ext := range []string{".ts", ".tsx"} {
-			if entry, ok := entries[base[:lastDot]+ext]; ok && entry.Kind() == fs.FileEntry {
-				return path[:len(path)-(len(base)-lastDot)] + ext, true
+			if entry, diffCase := entries.Get(base[:lastDot] + ext); entry != nil && entry.Kind(r.fs) == fs.FileEntry {
+				return path[:len(path)-(len(base)-lastDot)] + ext, true, diffCase
 			}
 		}
 	}
 
-	return "", false
+	return "", false, nil
 }
 
 // We want to minimize the number of times directory contents are listed. For
 // this reason, the directory entries are computed by the caller and then
 // passed down to us.
-func (r *resolver) loadAsIndex(path string, entries map[string]*fs.Entry) (string, bool) {
+func (r *resolver) loadAsIndex(path string, entries fs.DirEntries) (string, bool, *fs.DifferentCase) {
 	// Try the "index" file with extensions
 	for _, ext := range r.options.ExtensionOrder {
 		base := "index" + ext
-		if entry, ok := entries[base]; ok && entry.Kind() == fs.FileEntry {
-			return r.fs.Join(path, base), true
+		if entry, diffCase := entries.Get(base); entry != nil && entry.Kind(r.fs) == fs.FileEntry {
+			return r.fs.Join(path, base), true, diffCase
 		}
 	}
 
-	return "", false
-}
-
-var parseErrorAlreadyLogged = errors.New("(error already logged)")
-
-// This may return "parseErrorAlreadyLogged" in which case there was a syntax
-// error, but it's already been reported. No further errors should be logged.
-func (r *resolver) parseJSON(path string, options js_parser.ParseJSONOptions) (js_ast.Expr, logger.Source, error) {
-	contents, err := r.fs.ReadFile(path)
-	if err != nil {
-		return js_ast.Expr{}, logger.Source{}, err
-	}
-	keyPath := logger.Path{Text: path, Namespace: "file"}
-	source := logger.Source{
-		KeyPath:    keyPath,
-		PrettyPath: r.PrettyPath(keyPath),
-		Contents:   contents,
-	}
-	result, ok := js_parser.ParseJSON(r.log, source, options)
-	if !ok {
-		return js_ast.Expr{}, logger.Source{}, parseErrorAlreadyLogged
-	}
-	return result, source, nil
+	return "", false, nil
 }
 
 func getProperty(json js_ast.Expr, name string) (js_ast.Expr, logger.Loc, bool) {
@@ -1053,22 +1013,28 @@ func getBool(json js_ast.Expr) (bool, bool) {
 	return false, false
 }
 
-func (r *resolver) loadAsFileOrDirectory(path string, kind ast.ImportKind) (PathPair, bool) {
+func (r *resolver) loadAsFileOrDirectory(path string, kind ast.ImportKind) (PathPair, bool, *fs.DifferentCase) {
+	// Use a special import order for CSS "@import" imports
+	extensionOrder := r.options.ExtensionOrder
+	if kind == ast.ImportAt || kind == ast.ImportAtConditional {
+		extensionOrder = r.atImportExtensionOrder
+	}
+
 	// Is this a file?
-	absolute, ok := r.loadAsFile(path)
+	absolute, ok, diffCase := r.loadAsFile(path, extensionOrder)
 	if ok {
-		return PathPair{Primary: logger.Path{Text: absolute, Namespace: "file"}}, true
+		return PathPair{Primary: logger.Path{Text: absolute, Namespace: "file"}}, true, diffCase
 	}
 
 	// Is this a directory?
 	dirInfo := r.dirInfoCached(path)
 	if dirInfo == nil {
-		return PathPair{}, false
+		return PathPair{}, false, nil
 	}
 
 	// Try using the main field(s) from "package.json"
-	if dirInfo.packageJson != nil && dirInfo.packageJson.absMainFields != nil {
-		absMainFields := dirInfo.packageJson.absMainFields
+	if dirInfo.packageJSON != nil && dirInfo.packageJSON.absMainFields != nil {
+		absMainFields := dirInfo.packageJSON.absMainFields
 		mainFields := r.options.MainFields
 		autoMain := false
 
@@ -1086,50 +1052,75 @@ func (r *resolver) loadAsFileOrDirectory(path string, kind ast.ImportKind) (Path
 				// use "module" or "main" based on whether the package is imported
 				// using "import" or "require".
 				if autoMain && field == "module" {
-					if absoluteMain, ok := absMainFields["main"]; ok {
-						// If both the "main" and "module" fields exist, use "main" if the path is
-						// for "require" and "module" if the path is for "import". If we're using
-						// "module", return enough information to be able to fall back to "main"
-						// later if that decision was incorrect.
+					absoluteMain, ok := absMainFields["main"]
+
+					// Some packages have a "module" field without a "main" field but
+					// still have an implicit "index.js" file. In that case, treat that
+					// as the value for "main".
+					if !ok && dirInfo.absPathIndex != nil {
+						absoluteMain = *dirInfo.absPathIndex
+						ok = true
+					}
+
+					if ok {
+						// If both the "main" and "module" fields exist, use "main" if the
+						// path is for "require" and "module" if the path is for "import".
+						// If we're using "module", return enough information to be able to
+						// fall back to "main" later if something ended up using "require()"
+						// with this same path. The goal of this code is to avoid having
+						// both the "module" file and the "main" file in the bundle at the
+						// same time.
 						if kind != ast.ImportRequire {
 							return PathPair{
 								// This is the whole point of the path pair
 								Primary:   logger.Path{Text: absolute, Namespace: "file"},
 								Secondary: logger.Path{Text: absoluteMain, Namespace: "file"},
-							}, true
+							}, true, nil
 						} else {
-							return PathPair{Primary: logger.Path{Text: absoluteMain, Namespace: "file"}}, true
+							return PathPair{Primary: logger.Path{Text: absoluteMain, Namespace: "file"}}, true, nil
 						}
 					}
 				}
 
-				return PathPair{Primary: logger.Path{Text: absolute, Namespace: "file"}}, true
+				return PathPair{Primary: logger.Path{Text: absolute, Namespace: "file"}}, true, nil
 			}
 		}
 	}
 
 	// Return the "index.js" file
 	if dirInfo.absPathIndex != nil {
-		return PathPair{Primary: logger.Path{Text: *dirInfo.absPathIndex, Namespace: "file"}}, true
+		return PathPair{Primary: logger.Path{Text: *dirInfo.absPathIndex, Namespace: "file"}}, true, nil
 	}
 
-	return PathPair{}, false
+	return PathPair{}, false, nil
 }
 
 // This closely follows the behavior of "tryLoadModuleUsingPaths()" in the
 // official TypeScript compiler
-func (r *resolver) matchTSConfigPaths(tsConfigJson *tsConfigJson, path string, kind ast.ImportKind) (PathPair, bool) {
+func (r *resolver) matchTSConfigPaths(tsConfigJSON *TSConfigJSON, path string, kind ast.ImportKind) (PathPair, bool, *fs.DifferentCase) {
+	absBaseURL := tsConfigJSON.BaseURLForPaths
+
+	// The explicit base URL should take precedence over the implicit base URL
+	// if present. This matters when a tsconfig.json file overrides "baseUrl"
+	// from another extended tsconfig.json file but doesn't override "paths".
+	if tsConfigJSON.BaseURL != nil {
+		absBaseURL = *tsConfigJSON.BaseURL
+	}
+
 	// Check for exact matches first
-	for key, originalPaths := range tsConfigJson.paths {
+	for key, originalPaths := range tsConfigJSON.Paths {
 		if key == path {
 			for _, originalPath := range originalPaths {
 				// Load the original path relative to the "baseUrl" from tsconfig.json
-				absoluteOriginalPath := r.fs.Join(*tsConfigJson.absPathBaseUrl, originalPath)
-				if absolute, ok := r.loadAsFileOrDirectory(absoluteOriginalPath, kind); ok {
-					return absolute, true
+				absoluteOriginalPath := originalPath
+				if !r.fs.IsAbs(originalPath) {
+					absoluteOriginalPath = r.fs.Join(absBaseURL, originalPath)
+				}
+				if absolute, ok, diffCase := r.loadAsFileOrDirectory(absoluteOriginalPath, kind); ok {
+					return absolute, true, diffCase
 				}
 			}
-			return PathPair{}, false
+			return PathPair{}, false, nil
 		}
 	}
 
@@ -1143,7 +1134,7 @@ func (r *resolver) matchTSConfigPaths(tsConfigJson *tsConfigJson, path string, k
 	longestMatchPrefixLength := -1
 	longestMatchSuffixLength := -1
 	var longestMatch match
-	for key, originalPaths := range tsConfigJson.paths {
+	for key, originalPaths := range tsConfigJSON.Paths {
 		if starIndex := strings.IndexByte(key, '*'); starIndex != -1 {
 			prefix, suffix := key[:starIndex], key[starIndex+1:]
 
@@ -1174,41 +1165,198 @@ func (r *resolver) matchTSConfigPaths(tsConfigJson *tsConfigJson, path string, k
 			originalPath = strings.Replace(originalPath, "*", matchedText, 1)
 
 			// Load the original path relative to the "baseUrl" from tsconfig.json
-			absoluteOriginalPath := r.fs.Join(*tsConfigJson.absPathBaseUrl, originalPath)
-			if absolute, ok := r.loadAsFileOrDirectory(absoluteOriginalPath, kind); ok {
-				return absolute, true
+			absoluteOriginalPath := originalPath
+			if !r.fs.IsAbs(originalPath) {
+				absoluteOriginalPath = r.fs.Join(absBaseURL, originalPath)
+			}
+			if absolute, ok, diffCase := r.loadAsFileOrDirectory(absoluteOriginalPath, kind); ok {
+				return absolute, true, diffCase
 			}
 		}
 	}
 
-	return PathPair{}, false
+	return PathPair{}, false, nil
 }
 
-func (r *resolver) loadNodeModules(path string, kind ast.ImportKind, dirInfo *dirInfo) (PathPair, bool) {
+func (r *resolver) loadNodeModules(path string, kind ast.ImportKind, dirInfo *dirInfo) (PathPair, bool, *fs.DifferentCase, DebugMeta) {
 	// First, check path overrides from the nearest enclosing TypeScript "tsconfig.json" file
-	if dirInfo.tsConfigJson != nil && dirInfo.tsConfigJson.absPathBaseUrl != nil {
+	if dirInfo.tsConfigJSON != nil {
 		// Try path substitutions first
-		if dirInfo.tsConfigJson.paths != nil {
-			if absolute, ok := r.matchTSConfigPaths(dirInfo.tsConfigJson, path, kind); ok {
-				return absolute, true
+		if dirInfo.tsConfigJSON.Paths != nil {
+			if absolute, ok, diffCase := r.matchTSConfigPaths(dirInfo.tsConfigJSON, path, kind); ok {
+				return absolute, true, diffCase, DebugMeta{}
 			}
 		}
 
 		// Try looking up the path relative to the base URL
-		basePath := r.fs.Join(*dirInfo.tsConfigJson.absPathBaseUrl, path)
-		if absolute, ok := r.loadAsFileOrDirectory(basePath, kind); ok {
-			return absolute, true
+		if dirInfo.tsConfigJSON.BaseURL != nil {
+			basePath := r.fs.Join(*dirInfo.tsConfigJSON.BaseURL, path)
+			if absolute, ok, diffCase := r.loadAsFileOrDirectory(basePath, kind); ok {
+				return absolute, true, diffCase, DebugMeta{}
+			}
 		}
 	}
+
+	// Then check the global "NODE_PATH" environment variable
+	for _, absDir := range r.options.AbsNodePaths {
+		absPath := r.fs.Join(absDir, path)
+		if absolute, ok, diffCase := r.loadAsFileOrDirectory(absPath, kind); ok {
+			return absolute, true, diffCase, DebugMeta{}
+		}
+	}
+
+	esmPackageName, esmPackageSubpath, esmOK := esmParsePackageName(path)
 
 	// Then check for the package in any enclosing "node_modules" directories
 	for {
 		// Skip directories that are themselves called "node_modules", since we
 		// don't ever want to search for "node_modules/node_modules"
 		if dirInfo.hasNodeModules {
-			absolute, ok := r.loadAsFileOrDirectory(r.fs.Join(dirInfo.absPath, "node_modules", path), kind)
-			if ok {
-				return absolute, true
+			absPath := r.fs.Join(dirInfo.absPath, "node_modules", path)
+
+			// Check for an "exports" map in the package's package.json folder
+			if esmOK {
+				absPkgPath := r.fs.Join(dirInfo.absPath, "node_modules", esmPackageName)
+				if pkgDirInfo := r.dirInfoCached(absPkgPath); pkgDirInfo != nil {
+					if pkgJSON := pkgDirInfo.packageJSON; pkgJSON != nil && pkgJSON.exportsMap != nil {
+						// The condition set is determined by the kind of import
+						conditions := r.esmConditionsDefault
+						switch kind {
+						case ast.ImportStmt, ast.ImportDynamic:
+							conditions = r.esmConditionsImport
+						case ast.ImportRequire, ast.ImportRequireResolve:
+							conditions = r.esmConditionsRequire
+						}
+
+						// Resolve against the path "/", then join it with the absolute
+						// directory path. This is done because ESM package resolution uses
+						// URLs while our path resolution uses file system paths. We don't
+						// want problems due to Windows paths, which are very unlike URL
+						// paths. We also want to avoid any "%" characters in the absolute
+						// directory path accidentally being interpreted as URL escapes.
+						resolvedPath, status, debug := esmPackageExportsResolveWithPostConditions("/", esmPackageSubpath, pkgJSON.exportsMap.root, conditions)
+						if (status == peStatusExact || status == peStatusInexact) && strings.HasPrefix(resolvedPath, "/") {
+							absResolvedPath := r.fs.Join(absPkgPath, resolvedPath[1:])
+
+							switch status {
+							case peStatusExact:
+								resolvedDirInfo := r.dirInfoCached(r.fs.Dir(absResolvedPath))
+								if resolvedDirInfo == nil {
+									status = peStatusModuleNotFound
+								} else if entry, diffCase := resolvedDirInfo.entries.Get(r.fs.Base(absResolvedPath)); entry == nil {
+									status = peStatusModuleNotFound
+								} else if kind := entry.Kind(r.fs); kind == fs.DirEntry {
+									status = peStatusUnsupportedDirectoryImport
+								} else if kind != fs.FileEntry {
+									status = peStatusModuleNotFound
+								} else {
+									return PathPair{Primary: logger.Path{Text: absResolvedPath, Namespace: "file"}}, true, diffCase, DebugMeta{}
+								}
+
+							case peStatusInexact:
+								// If this was resolved against an expansion key ending in a "/"
+								// instead of a "*", we need to try CommonJS-style implicit
+								// extension and/or directory detection.
+								if absolute, ok, diffCase := r.loadAsFileOrDirectory(absResolvedPath, kind); ok {
+									return absolute, true, diffCase, DebugMeta{}
+								}
+								status = peStatusModuleNotFound
+							}
+						}
+
+						var notes []logger.MsgData
+						var approach AlternativeApproach
+						if strings.HasPrefix(resolvedPath, "/") {
+							resolvedPath = "." + resolvedPath
+						}
+
+						// Provide additional details about the failure to help with debugging
+						switch status {
+						case peStatusInvalidModuleSpecifier:
+							notes = []logger.MsgData{logger.RangeData(&pkgJSON.source, debug.token,
+								fmt.Sprintf("The module specifier %q is invalid", resolvedPath))}
+
+						case peStatusInvalidPackageConfiguration:
+							notes = []logger.MsgData{logger.RangeData(&pkgJSON.source, debug.token,
+								"The package configuration has an invalid value here")}
+
+						case peStatusInvalidPackageTarget:
+							why := fmt.Sprintf("The package target %q is invalid", resolvedPath)
+							if resolvedPath == "" {
+								// "PACKAGE_TARGET_RESOLVE" is specified to throw an "Invalid
+								// Package Target" error for what is actually an invalid package
+								// configuration error
+								why = "The package configuration has an invalid value here"
+							}
+							notes = []logger.MsgData{logger.RangeData(&pkgJSON.source, debug.token, why)}
+
+						case peStatusPackagePathNotExported:
+							notes = []logger.MsgData{logger.RangeData(&pkgJSON.source, debug.token,
+								fmt.Sprintf("The path %q is not exported by package %q", esmPackageSubpath, esmPackageName))}
+
+						case peStatusModuleNotFound:
+							notes = []logger.MsgData{logger.RangeData(&pkgJSON.source, debug.token,
+								fmt.Sprintf("The module %q was not found on the file system", resolvedPath))}
+
+						case peStatusUnsupportedDirectoryImport:
+							notes = []logger.MsgData{logger.RangeData(&pkgJSON.source, debug.token,
+								fmt.Sprintf("Importing the directory %q is not supported", resolvedPath))}
+
+						case peStatusUndefinedNoConditionsMatch:
+							prettyPrintConditions := func(conditions []string) string {
+								quoted := make([]string, len(conditions))
+								for i, condition := range conditions {
+									quoted[i] = fmt.Sprintf("%q", condition)
+								}
+								return strings.Join(quoted, ", ")
+							}
+							keys := make([]string, 0, len(conditions))
+							for key := range conditions {
+								keys = append(keys, key)
+							}
+							sort.Strings(keys)
+							notes = []logger.MsgData{
+								logger.RangeData(&pkgJSON.source, pkgJSON.exportsMap.root.firstToken,
+									fmt.Sprintf("The path %q is not currently exported by package %q",
+										esmPackageSubpath, esmPackageName)),
+								logger.RangeData(&pkgJSON.source, debug.token,
+									fmt.Sprintf("None of the conditions provided (%s) match any of the currently active conditions (%s)",
+										prettyPrintConditions(debug.unmatchedConditions),
+										prettyPrintConditions(keys),
+									))}
+							for _, key := range debug.unmatchedConditions {
+								if key == "import" && (kind == ast.ImportRequire || kind == ast.ImportRequireResolve) {
+									approach = AlternativeApproachImport
+								} else if key == "require" && (kind == ast.ImportStmt || kind == ast.ImportDynamic) {
+									approach = AlternativeApproachRequire
+								}
+							}
+						}
+
+						return PathPair{}, false, nil, DebugMeta{
+							notes:    notes,
+							approach: approach,
+						}
+					}
+				}
+			}
+
+			// Check the non-package "browser" map for the first time (1 out of 2)
+			importDirInfo := r.dirInfoCached(r.fs.Dir(absPath))
+			if importDirInfo != nil && importDirInfo.enclosingBrowserScope != nil {
+				if packageJSON := importDirInfo.enclosingBrowserScope.packageJSON; packageJSON.browserNonPackageMap != nil {
+					if remapped, ok := packageJSON.browserNonPackageMap[absPath]; ok {
+						if remapped == nil {
+							return PathPair{Primary: logger.Path{Text: absPath, Namespace: "file", Flags: logger.PathDisabled}}, true, nil, DebugMeta{}
+						} else if remappedResult, ok, diffCase, notes := r.resolveWithoutRemapping(importDirInfo.enclosingBrowserScope, *remapped, kind); ok {
+							return remappedResult, true, diffCase, notes
+						}
+					}
+				}
+			}
+
+			if absolute, ok, diffCase := r.loadAsFileOrDirectory(absPath, kind); ok {
+				return absolute, true, diffCase, DebugMeta{}
 			}
 		}
 
@@ -1219,7 +1367,7 @@ func (r *resolver) loadNodeModules(path string, kind ast.ImportKind, dirInfo *di
 		}
 	}
 
-	return PathPair{}, false
+	return PathPair{}, false, nil, DebugMeta{}
 }
 
 // Package paths are loaded from a "node_modules" directory. Non-package paths

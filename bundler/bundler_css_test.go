@@ -39,7 +39,7 @@ func TestCSSAtImportMissing(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/out.css",
 		},
-		expectedScanLog: `/entry.css: error: Could not resolve "./missing.css"
+		expectedScanLog: `entry.css: error: Could not resolve "./missing.css"
 `,
 	})
 }
@@ -124,7 +124,7 @@ func TestCSSFromJSMissingImport(t *testing.T) {
 			Mode:         config.ModeBundle,
 			AbsOutputDir: "/out",
 		},
-		expectedCompileLog: `/entry.js: error: No matching export for import "missing"
+		expectedCompileLog: `entry.js: error: No matching export in "a.css" for import "missing"
 `,
 	})
 }
@@ -145,7 +145,7 @@ func TestCSSFromJSMissingStarImport(t *testing.T) {
 			Mode:         config.ModeBundle,
 			AbsOutputDir: "/out",
 		},
-		expectedCompileLog: `/entry.js: warning: No matching export for import "missing"
+		expectedCompileLog: `entry.js: warning: Import "missing" will always be undefined because there is no matching export
 `,
 	})
 }
@@ -195,7 +195,7 @@ func TestImportCSSFromJSWriteToStdout(t *testing.T) {
 			Mode:          config.ModeBundle,
 			WriteToStdout: true,
 		},
-		expectedScanLog: `/entry.js: error: Cannot import "/entry.css" into a JavaScript file without an output path configured
+		expectedScanLog: `entry.js: error: Cannot import "entry.css" into a JavaScript file without an output path configured
 `,
 	})
 }
@@ -215,7 +215,7 @@ func TestImportJSFromCSS(t *testing.T) {
 			Mode:         config.ModeBundle,
 			AbsOutputDir: "/out",
 		},
-		expectedScanLog: `/entry.css: error: Cannot import "/entry.js" into a CSS file
+		expectedScanLog: `entry.css: error: Cannot import "entry.js" into a CSS file
 `,
 	})
 }
@@ -235,7 +235,7 @@ func TestImportJSONFromCSS(t *testing.T) {
 			Mode:         config.ModeBundle,
 			AbsOutputDir: "/out",
 		},
-		expectedScanLog: `/entry.css: error: Cannot import "/entry.json" into a CSS file
+		expectedScanLog: `entry.css: error: Cannot import "entry.json" into a CSS file
 `,
 	})
 }
@@ -253,8 +253,8 @@ func TestMissingImportURLInCSS(t *testing.T) {
 			Mode:         config.ModeBundle,
 			AbsOutputDir: "/out",
 		},
-		expectedScanLog: `/src/entry.css: error: Could not resolve "./one.png"
-/src/entry.css: error: Could not resolve "./two.png"
+		expectedScanLog: `src/entry.css: error: Could not resolve "./one.png"
+src/entry.css: error: Could not resolve "./two.png"
 `,
 	})
 }
@@ -314,12 +314,12 @@ func TestInvalidImportURLInCSS(t *testing.T) {
 			Mode:         config.ModeBundle,
 			AbsOutputDir: "/out",
 		},
-		expectedScanLog: `/entry.css: error: Cannot use "/js.js" as a URL
-/entry.css: error: Cannot use "/jsx.jsx" as a URL
-/entry.css: error: Cannot use "/ts.ts" as a URL
-/entry.css: error: Cannot use "/tsx.tsx" as a URL
-/entry.css: error: Cannot use "/json.json" as a URL
-/entry.css: error: Cannot use "/css.css" as a URL
+		expectedScanLog: `entry.css: error: Cannot use "js.js" as a URL
+entry.css: error: Cannot use "jsx.jsx" as a URL
+entry.css: error: Cannot use "ts.ts" as a URL
+entry.css: error: Cannot use "tsx.tsx" as a URL
+entry.css: error: Cannot use "json.json" as a URL
+entry.css: error: Cannot use "css.css" as a URL
 `,
 	})
 }
@@ -449,6 +449,159 @@ func TestIgnoreURLsInAtRulePrelude(t *testing.T) {
 		options: config.Options{
 			Mode:         config.ModeBundle,
 			AbsOutputDir: "/out",
+		},
+	})
+}
+
+func TestPackageURLsInCSS(t *testing.T) {
+	css_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.css": `
+				a { background: url(a/1.png); }
+				b { background: url(b/2.png); }
+				c { background: url(c/3.png); }
+			`,
+			"/a/1.png":              `a-1`,
+			"/node_modules/b/2.png": `b-2-node_modules`,
+			"/c/3.png":              `c-3`,
+			"/node_modules/c/3.png": `c-3-node_modules`,
+		},
+		entryPaths: []string{"/entry.css"},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
+			ExtensionToLoader: map[string]config.Loader{
+				".css": config.LoaderCSS,
+				".png": config.LoaderBase64,
+			},
+		},
+	})
+}
+
+func TestCSSAtImportExtensionOrderCollision(t *testing.T) {
+	css_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			// This should avoid picking ".js" because it's explicitly configured as non-CSS
+			"/entry.css": `@import "./test";`,
+			"/test.js":   `console.log('js')`,
+			"/test.css":  `.css { color: red }`,
+		},
+		entryPaths: []string{"/entry.css"},
+		options: config.Options{
+			Mode:           config.ModeBundle,
+			AbsOutputFile:  "/out.css",
+			ExtensionOrder: []string{".js", ".css"},
+			ExtensionToLoader: map[string]config.Loader{
+				".js":  config.LoaderJS,
+				".css": config.LoaderCSS,
+			},
+		},
+	})
+}
+
+func TestCSSAtImportExtensionOrderCollisionUnsupported(t *testing.T) {
+	css_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			// This still shouldn't pick ".js" even though ".sass" isn't ".css"
+			"/entry.css": `@import "./test";`,
+			"/test.js":   `console.log('js')`,
+			"/test.sass": `// some code`,
+		},
+		entryPaths: []string{"/entry.css"},
+		options: config.Options{
+			Mode:           config.ModeBundle,
+			AbsOutputFile:  "/out.css",
+			ExtensionOrder: []string{".js", ".sass"},
+			ExtensionToLoader: map[string]config.Loader{
+				".js":  config.LoaderJS,
+				".css": config.LoaderCSS,
+			},
+		},
+		expectedScanLog: `entry.css: error: No loader is configured for ".sass" files: test.sass
+`,
+	})
+}
+
+func TestCSSAtImportConditionsNoBundle(t *testing.T) {
+	css_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.css": `@import "./print.css" print;`,
+		},
+		entryPaths: []string{"/entry.css"},
+		options: config.Options{
+			Mode:          config.ModePassThrough,
+			AbsOutputFile: "/out.css",
+		},
+	})
+}
+
+func TestCSSAtImportConditionsBundleExternal(t *testing.T) {
+	css_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.css": `@import "https://example.com/print.css" print;`,
+		},
+		entryPaths: []string{"/entry.css"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.css",
+		},
+	})
+}
+
+func TestCSSAtImportConditionsBundle(t *testing.T) {
+	css_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.css": `@import "./print.css" print;`,
+			"/print.css": `body { color: red }`,
+		},
+		entryPaths: []string{"/entry.css"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.css",
+		},
+		expectedScanLog: `entry.css: error: Bundling with conditional "@import" rules is not currently supported
+`,
+	})
+}
+
+// This test mainly just makes sure that this scenario doesn't crash
+func TestCSSAndJavaScriptCodeSplittingIssue1064(t *testing.T) {
+	css_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/a.js": `
+				import shared from './shared.js'
+				console.log(shared() + 1)
+			`,
+			"/b.js": `
+				import shared from './shared.js'
+				console.log(shared() + 2)
+			`,
+			"/c.css": `
+				@import "./shared.css";
+				body { color: red }
+			`,
+			"/d.css": `
+				@import "./shared.css";
+				body { color: blue }
+			`,
+			"/shared.js": `
+				export default function() { return 3 }
+			`,
+			"/shared.css": `
+				body { background: black }
+			`,
+		},
+		entryPaths: []string{
+			"/a.js",
+			"/b.js",
+			"/c.css",
+			"/d.css",
+		},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			OutputFormat:  config.FormatESModule,
+			CodeSplitting: true,
+			AbsOutputDir:  "/out",
 		},
 	})
 }

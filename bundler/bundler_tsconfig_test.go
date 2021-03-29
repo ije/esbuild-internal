@@ -27,6 +27,10 @@ func TestTsConfigPaths(t *testing.T) {
 				import test3 from 'test3/foo'
 				import test4 from 'test4/foo'
 				import test5 from 'test5/foo'
+				import absoluteIn from './absolute-in'
+				import absoluteInStar from './absolute-in-star'
+				import absoluteOut from './absolute-out'
+				import absoluteOutStar from './absolute-out-star'
 				export default {
 					test0,
 					test1,
@@ -34,6 +38,10 @@ func TestTsConfigPaths(t *testing.T) {
 					test3,
 					test4,
 					test5,
+					absoluteIn,
+					absoluteInStar,
+					absoluteOut,
+					absoluteOutStar,
 				}
 			`,
 			"/Users/user/project/baseurl_dot/tsconfig.json": `
@@ -47,6 +55,10 @@ func TestTsConfigPaths(t *testing.T) {
 							"t*t3/foo": ["./test3-succ*s.ts"],
 							"test4/*": ["./test4-first/*", "./test4-second/*"],
 							"test5/*": ["./test5-first/*", "./test5-second/*"],
+							"/virtual-in/test": ["./actual/test"],
+							"/virtual-in-star/*": ["./actual/*"],
+							"/virtual-out/test": ["/Users/user/project/baseurl_dot/actual/test"],
+							"/virtual-out-star/*": ["/Users/user/project/baseurl_dot/actual/*"],
 						}
 					}
 				}
@@ -69,6 +81,21 @@ func TestTsConfigPaths(t *testing.T) {
 			"/Users/user/project/baseurl_dot/test5-second/foo.ts": `
 				export default 'test5-success'
 			`,
+			"/Users/user/project/baseurl_dot/absolute-in.ts": `
+				export {default} from '/virtual-in/test'
+			`,
+			"/Users/user/project/baseurl_dot/absolute-in-star.ts": `
+				export {default} from '/virtual-in-star/test'
+			`,
+			"/Users/user/project/baseurl_dot/absolute-out.ts": `
+				export {default} from '/virtual-out/test'
+			`,
+			"/Users/user/project/baseurl_dot/absolute-out-star.ts": `
+				export {default} from '/virtual-out-star/test'
+			`,
+			"/Users/user/project/baseurl_dot/actual/test.ts": `
+				export default 'absolute-success'
+			`,
 
 			// Tests with "baseUrl": "nested"
 			"/Users/user/project/baseurl_nested/index.ts": `
@@ -78,6 +105,10 @@ func TestTsConfigPaths(t *testing.T) {
 				import test3 from 'test3/foo'
 				import test4 from 'test4/foo'
 				import test5 from 'test5/foo'
+				import absoluteIn from './absolute-in'
+				import absoluteInStar from './absolute-in-star'
+				import absoluteOut from './absolute-out'
+				import absoluteOutStar from './absolute-out-star'
 				export default {
 					test0,
 					test1,
@@ -85,6 +116,10 @@ func TestTsConfigPaths(t *testing.T) {
 					test3,
 					test4,
 					test5,
+					absoluteIn,
+					absoluteInStar,
+					absoluteOut,
+					absoluteOutStar,
 				}
 			`,
 			"/Users/user/project/baseurl_nested/tsconfig.json": `
@@ -98,6 +133,10 @@ func TestTsConfigPaths(t *testing.T) {
 							"t*t3/foo": ["./test3-succ*s.ts"],
 							"test4/*": ["./test4-first/*", "./test4-second/*"],
 							"test5/*": ["./test5-first/*", "./test5-second/*"],
+							"/virtual-in/test": ["./actual/test"],
+							"/virtual-in-star/*": ["./actual/*"],
+							"/virtual-out/test": ["/Users/user/project/baseurl_nested/nested/actual/test"],
+							"/virtual-out-star/*": ["/Users/user/project/baseurl_nested/nested/actual/*"],
 						}
 					}
 				}
@@ -120,12 +159,334 @@ func TestTsConfigPaths(t *testing.T) {
 			"/Users/user/project/baseurl_nested/nested/test5-second/foo.ts": `
 				export default 'test5-success'
 			`,
+			"/Users/user/project/baseurl_nested/absolute-in.ts": `
+				export {default} from '/virtual-in/test'
+			`,
+			"/Users/user/project/baseurl_nested/absolute-in-star.ts": `
+				export {default} from '/virtual-in/test'
+			`,
+			"/Users/user/project/baseurl_nested/absolute-out.ts": `
+				export {default} from '/virtual-out/test'
+			`,
+			"/Users/user/project/baseurl_nested/absolute-out-star.ts": `
+				export {default} from '/virtual-out-star/test'
+			`,
+			"/Users/user/project/baseurl_nested/nested/actual/test.ts": `
+				export default 'absolute-success'
+			`,
 		},
 		entryPaths: []string{"/Users/user/project/entry.ts"},
 		options: config.Options{
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/Users/user/project/out.js",
 		},
+	})
+}
+
+func TestTsConfigPathsNoBaseURL(t *testing.T) {
+	tsconfig_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/entry.ts": `
+				import simple from './simple'
+				import extended from './extended'
+				console.log(simple, extended)
+			`,
+
+			// Tests with "baseUrl": "."
+			"/Users/user/project/simple/index.ts": `
+				import test0 from 'test0'
+				import test1 from 'test1/foo'
+				import test2 from 'test2/foo'
+				import test3 from 'test3/foo'
+				import test4 from 'test4/foo'
+				import test5 from 'test5/foo'
+				import absolute from './absolute'
+				export default {
+					test0,
+					test1,
+					test2,
+					test3,
+					test4,
+					test5,
+					absolute,
+				}
+			`,
+			"/Users/user/project/simple/tsconfig.json": `
+				{
+					"compilerOptions": {
+						"paths": {
+							"test0": ["./test0-success.ts"],
+							"test1/*": ["./test1-success.ts"],
+							"test2/*": ["./test2-success/*"],
+							"t*t3/foo": ["./test3-succ*s.ts"],
+							"test4/*": ["./test4-first/*", "./test4-second/*"],
+							"test5/*": ["./test5-first/*", "./test5-second/*"],
+							"/virtual/*": ["./actual/*"],
+						}
+					}
+				}
+			`,
+			"/Users/user/project/simple/test0-success.ts": `
+				export default 'test0-success'
+			`,
+			"/Users/user/project/simple/test1-success.ts": `
+				export default 'test1-success'
+			`,
+			"/Users/user/project/simple/test2-success/foo.ts": `
+				export default 'test2-success'
+			`,
+			"/Users/user/project/simple/test3-success.ts": `
+				export default 'test3-success'
+			`,
+			"/Users/user/project/simple/test4-first/foo.ts": `
+				export default 'test4-success'
+			`,
+			"/Users/user/project/simple/test5-second/foo.ts": `
+				export default 'test5-success'
+			`,
+			"/Users/user/project/simple/absolute.ts": `
+				export {default} from '/virtual/test'
+			`,
+			"/Users/user/project/simple/actual/test.ts": `
+				export default 'absolute-success'
+			`,
+
+			// Tests with "baseUrl": "nested"
+			"/Users/user/project/extended/index.ts": `
+				import test0 from 'test0'
+				import test1 from 'test1/foo'
+				import test2 from 'test2/foo'
+				import test3 from 'test3/foo'
+				import test4 from 'test4/foo'
+				import test5 from 'test5/foo'
+				import absolute from './absolute'
+				export default {
+					test0,
+					test1,
+					test2,
+					test3,
+					test4,
+					test5,
+					absolute,
+				}
+			`,
+			"/Users/user/project/extended/tsconfig.json": `
+				{
+					"extends": "./nested/tsconfig.json"
+				}
+			`,
+			"/Users/user/project/extended/nested/tsconfig.json": `
+				{
+					"compilerOptions": {
+						"paths": {
+							"test0": ["./test0-success.ts"],
+							"test1/*": ["./test1-success.ts"],
+							"test2/*": ["./test2-success/*"],
+							"t*t3/foo": ["./test3-succ*s.ts"],
+							"test4/*": ["./test4-first/*", "./test4-second/*"],
+							"test5/*": ["./test5-first/*", "./test5-second/*"],
+							"/virtual/*": ["./actual/*"],
+						}
+					}
+				}
+			`,
+			"/Users/user/project/extended/nested/test0-success.ts": `
+				export default 'test0-success'
+			`,
+			"/Users/user/project/extended/nested/test1-success.ts": `
+				export default 'test1-success'
+			`,
+			"/Users/user/project/extended/nested/test2-success/foo.ts": `
+				export default 'test2-success'
+			`,
+			"/Users/user/project/extended/nested/test3-success.ts": `
+				export default 'test3-success'
+			`,
+			"/Users/user/project/extended/nested/test4-first/foo.ts": `
+				export default 'test4-success'
+			`,
+			"/Users/user/project/extended/nested/test5-second/foo.ts": `
+				export default 'test5-success'
+			`,
+			"/Users/user/project/extended/absolute.ts": `
+				export {default} from '/virtual/test'
+			`,
+			"/Users/user/project/extended/nested/actual/test.ts": `
+				export default 'absolute-success'
+			`,
+		},
+		entryPaths: []string{"/Users/user/project/entry.ts"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+		},
+	})
+}
+
+func TestTsConfigBadPathsNoBaseURL(t *testing.T) {
+	tsconfig_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/entry.ts": `
+				import "should-not-be-imported"
+			`,
+			"/Users/user/project/should-not-be-imported.ts": `
+			`,
+			"/Users/user/project/tsconfig.json": `
+				{
+					"compilerOptions": {
+						"paths": {
+							"test": [
+								".",
+								"..",
+								"./good",
+								".\\good",
+								"../good",
+								"..\\good",
+								"/good",
+								"\\good",
+								"c:/good",
+								"c:\\good",
+								"C:/good",
+								"C:\\good",
+
+								"bad",
+								"@bad/core",
+								".*/bad",
+								"..*/bad",
+								"c*:\\bad",
+								"c:*\\bad",
+								"http://bad"
+							]
+						}
+					}
+				}
+			`,
+		},
+		entryPaths: []string{"/Users/user/project/entry.ts"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+		},
+		expectedScanLog: `Users/user/project/entry.ts: error: Could not resolve "should-not-be-imported" ` +
+			`(use "./should-not-be-imported" to reference the file "Users/user/project/should-not-be-imported.ts")
+Users/user/project/tsconfig.json: warning: Non-relative path "bad" is not allowed when "baseUrl" is not set (did you forget a leading "./"?)
+Users/user/project/tsconfig.json: warning: Non-relative path "@bad/core" is not allowed when "baseUrl" is not set (did you forget a leading "./"?)
+Users/user/project/tsconfig.json: warning: Non-relative path ".*/bad" is not allowed when "baseUrl" is not set (did you forget a leading "./"?)
+Users/user/project/tsconfig.json: warning: Non-relative path "..*/bad" is not allowed when "baseUrl" is not set (did you forget a leading "./"?)
+Users/user/project/tsconfig.json: warning: Non-relative path "c*:\\bad" is not allowed when "baseUrl" is not set (did you forget a leading "./"?)
+Users/user/project/tsconfig.json: warning: Non-relative path "c:*\\bad" is not allowed when "baseUrl" is not set (did you forget a leading "./"?)
+Users/user/project/tsconfig.json: warning: Non-relative path "http://bad" is not allowed when "baseUrl" is not set (did you forget a leading "./"?)
+`,
+	})
+}
+
+// https://github.com/evanw/esbuild/issues/913
+func TestTsConfigPathsOverriddenBaseURL(t *testing.T) {
+	tsconfig_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/entry.ts": `
+				import test from '#/test'
+				console.log(test)
+			`,
+			"/Users/user/project/src/test.ts": `
+				export default 123
+			`,
+			"/Users/user/project/tsconfig.json": `
+				{
+					"extends": "./tsconfig.paths.json",
+					"compilerOptions": {
+						"baseUrl": "./src"
+					}
+				}
+			`,
+			"/Users/user/project/tsconfig.paths.json": `
+				{
+					"compilerOptions": {
+						"paths": {
+							"#/*": ["./*"]
+						}
+					}
+				}
+			`,
+		},
+		entryPaths: []string{"/Users/user/project/src/entry.ts"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+		},
+	})
+}
+
+func TestTsConfigPathsOverriddenBaseURLDifferentDir(t *testing.T) {
+	tsconfig_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/entry.ts": `
+				import test from '#/test'
+				console.log(test)
+			`,
+			"/Users/user/project/src/test.ts": `
+				export default 123
+			`,
+			"/Users/user/project/src/tsconfig.json": `
+				{
+					"extends": "../tsconfig.paths.json",
+					"compilerOptions": {
+						"baseUrl": "./"
+					}
+				}
+			`,
+			"/Users/user/project/tsconfig.paths.json": `
+				{
+					"compilerOptions": {
+						"paths": {
+							"#/*": ["./*"]
+						}
+					}
+				}
+			`,
+		},
+		entryPaths: []string{"/Users/user/project/src/entry.ts"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+		},
+	})
+}
+
+func TestTsConfigPathsMissingBaseURL(t *testing.T) {
+	tsconfig_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/entry.ts": `
+				import test from '#/test'
+				console.log(test)
+			`,
+			"/Users/user/project/src/test.ts": `
+				export default 123
+			`,
+			"/Users/user/project/src/tsconfig.json": `
+				{
+					"extends": "../tsconfig.paths.json",
+					"compilerOptions": {
+					}
+				}
+			`,
+			"/Users/user/project/tsconfig.paths.json": `
+				{
+					"compilerOptions": {
+						"paths": {
+							"#/*": ["./*"]
+						}
+					}
+				}
+			`,
+		},
+		entryPaths: []string{"/Users/user/project/src/entry.ts"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+		},
+		expectedScanLog: `Users/user/project/src/entry.ts: error: Could not resolve "#/test" (mark it as external to exclude it from the bundle)
+`,
 	})
 }
 
@@ -257,6 +618,34 @@ func TestJsconfigJsonBaseUrl(t *testing.T) {
 	})
 }
 
+func TestTsconfigJsonAbsoluteBaseUrl(t *testing.T) {
+	tsconfig_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/app/entry.js": `
+				import fn from 'lib/util'
+				console.log(fn())
+			`,
+			"/Users/user/project/src/tsconfig.json": `
+				{
+					"compilerOptions": {
+						"baseUrl": "/Users/user/project/src"
+					}
+				}
+			`,
+			"/Users/user/project/src/lib/util.js": `
+				module.exports = function() {
+					return 123
+				}
+			`,
+		},
+		entryPaths: []string{"/Users/user/project/src/app/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+		},
+	})
+}
+
 func TestTsconfigJsonCommentAllowed(t *testing.T) {
 	tsconfig_suite.expectBundled(t, bundled{
 		files: map[string]string{
@@ -345,26 +734,21 @@ func TestTsconfigJsonExtends(t *testing.T) {
 	})
 }
 
-func TestTsconfigJsonExtendsThreeLevels(t *testing.T) {
+func TestTsconfigJsonExtendsAbsolute(t *testing.T) {
 	tsconfig_suite.expectBundled(t, bundled{
 		files: map[string]string{
-			"/entry.jsx": `
+			"/Users/user/project/entry.jsx": `
 				console.log(<div/>, <></>)
 			`,
-			"/tsconfig.json": `
+			"/Users/user/project/tsconfig.json": `
 				{
-					"extends": "./base",
+					"extends": "/Users/user/project/base.json",
 					"compilerOptions": {
 						"jsxFragmentFactory": "derivedFragment"
 					}
 				}
 			`,
-			"/base.json": `
-				{
-					"extends": "./base2"
-				}
-			`,
-			"/base2.json": `
+			"/Users/user/project/base.json": `
 				{
 					"compilerOptions": {
 						"jsxFactory": "baseFactory",
@@ -373,7 +757,51 @@ func TestTsconfigJsonExtendsThreeLevels(t *testing.T) {
 				}
 			`,
 		},
-		entryPaths: []string{"/entry.jsx"},
+		entryPaths: []string{"/Users/user/project/entry.jsx"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+		},
+	})
+}
+
+func TestTsconfigJsonExtendsThreeLevels(t *testing.T) {
+	tsconfig_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/entry.jsx": `
+				import "test/import.js"
+				console.log(<div/>, <></>)
+			`,
+			"/Users/user/project/src/tsconfig.json": `
+				{
+					"extends": "./path1/base",
+					"compilerOptions": {
+						"jsxFragmentFactory": "derivedFragment"
+					}
+				}
+			`,
+			"/Users/user/project/src/path1/base.json": `
+				{
+					"extends": "../path2/base2"
+				}
+			`,
+			"/Users/user/project/src/path2/base2.json": `
+				{
+					"compilerOptions": {
+						"baseUrl": ".",
+						"paths": {
+							"test/*": ["./works/*"]
+						},
+						"jsxFactory": "baseFactory",
+						"jsxFragmentFactory": "baseFragment"
+					}
+				}
+			`,
+			"/Users/user/project/src/path2/works/import.js": `
+				console.log('works')
+			`,
+		},
+		entryPaths: []string{"/Users/user/project/src/entry.jsx"},
 		options: config.Options{
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/out.js",
@@ -403,7 +831,8 @@ func TestTsconfigJsonExtendsLoop(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/out.js",
 		},
-		expectedScanLog: "/base.json: warning: Base config file \"./tsconfig\" forms cycle\n",
+		expectedScanLog: `base.json: warning: Base config file "./tsconfig" forms cycle
+`,
 	})
 }
 
@@ -532,7 +961,8 @@ func TestTsconfigJsonOverrideInvalid(t *testing.T) {
 			AbsOutputFile:    "/out.js",
 			TsConfigOverride: "/this/file/doesn't/exist/tsconfig.json",
 		},
-		expectedScanLog: "error: Cannot find tsconfig file \"/this/file/doesn't/exist/tsconfig.json\"\n",
+		expectedScanLog: `error: Cannot find tsconfig file "this/file/doesn't/exist/tsconfig.json"
+`,
 	})
 }
 
@@ -583,7 +1013,87 @@ func TestTsconfigWarningsInsideNodeModules(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/Users/user/project/out.js",
 		},
-		expectedScanLog: `/Users/user/project/src/foo/tsconfig.json: warning: Cannot find base config file "extends for foo"
+		expectedScanLog: `Users/user/project/src/foo/tsconfig.json: warning: Cannot find base config file "extends for foo"
 `,
+	})
+}
+
+func TestTsconfigRemoveUnusedImports(t *testing.T) {
+	tsconfig_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/entry.ts": `
+				import {x, y} from "./foo"
+				console.log(1 as x)
+			`,
+			"/Users/user/project/src/tsconfig.json": `{
+				"compilerOptions": {
+					"importsNotUsedAsValues": "remove"
+				}
+			}`,
+		},
+		entryPaths: []string{"/Users/user/project/src/entry.ts"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+		},
+	})
+}
+
+func TestTsconfigPreserveUnusedImports(t *testing.T) {
+	tsconfig_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/entry.ts": `
+				import {x, y} from "./foo"
+				console.log(1 as x)
+			`,
+			"/Users/user/project/src/tsconfig.json": `{
+				"compilerOptions": {
+					"importsNotUsedAsValues": "preserve"
+				}
+			}`,
+		},
+		entryPaths: []string{"/Users/user/project/src/entry.ts"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+			ExternalModules: config.ExternalModules{
+				AbsPaths: map[string]bool{
+					"/Users/user/project/src/foo": true,
+				},
+			},
+		},
+	})
+}
+
+// This must preserve the import clause even though all imports are not used as
+// values. THIS BEHAVIOR IS A DEVIATION FROM THE TYPESCRIPT COMPILER! It exists
+// to support the use case of compiling partial modules for compile-to-JavaScript
+// languages such as Svelte.
+func TestTsconfigPreserveUnusedImportClause(t *testing.T) {
+	tsconfig_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/entry.ts": `
+				import {x, y} from "./foo"
+				import z from "./foo"
+				import * as ns from "./foo"
+				console.log(1 as x, 2 as z, 3 as ns.y)
+			`,
+			"/Users/user/project/src/tsconfig.json": `{
+				"compilerOptions": {
+					"importsNotUsedAsValues": "preserve"
+				}
+			}`,
+		},
+		entryPaths: []string{"/Users/user/project/src/entry.ts"},
+		options: config.Options{
+			Mode:          config.ModeConvertFormat,
+			OutputFormat:  config.FormatESModule,
+			AbsOutputFile: "/Users/user/project/out.js",
+			ExternalModules: config.ExternalModules{
+				AbsPaths: map[string]bool{
+					"/Users/user/project/src/foo": true,
+				},
+			},
+		},
 	})
 }

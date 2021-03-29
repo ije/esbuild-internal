@@ -90,7 +90,7 @@ const (
 	TSlash
 	TTilde
 
-	// Assignments
+	// Assignments (keep in sync with IsAssign() below)
 	TAmpersandAmpersandEquals
 	TAmpersandEquals
 	TAsteriskAsteriskEquals
@@ -153,6 +153,10 @@ const (
 	TWhile
 	TWith
 )
+
+func (t T) IsAssign() bool {
+	return t >= TAmpersandAmpersandEquals && t <= TSlashEquals
+}
 
 var Keywords = map[string]T{
 	// Reserved words
@@ -218,11 +222,14 @@ type Lexer struct {
 	start                           int
 	end                             int
 	ApproximateNewlineCount         int
+	LegacyOctalLoc                  logger.Loc
 	Token                           T
 	HasNewlineBefore                bool
 	HasPureCommentBefore            bool
 	PreserveAllCommentsBefore       bool
+	IsLegacyOctalLiteral            bool
 	CommentsToPreserveBefore        []js_ast.Comment
+	AllOriginalComments             []js_ast.Comment
 	codePoint                       rune
 	StringLiteral                   []uint16
 	Identifier                      string
@@ -231,7 +238,9 @@ type Lexer struct {
 	SourceMappingURL                js_ast.Span
 	Number                          float64
 	rescanCloseBraceAsTemplateToken bool
+	forGlobalName                   bool
 	json                            json
+	prevErrorLoc                    logger.Loc
 
 	// The log is disabled during speculative scans that may backtrack
 	IsLogDisabled bool
@@ -241,8 +250,21 @@ type LexerPanic struct{}
 
 func NewLexer(log logger.Log, source logger.Source) Lexer {
 	lexer := Lexer{
-		log:    log,
-		source: source,
+		log:          log,
+		source:       source,
+		prevErrorLoc: logger.Loc{Start: -1},
+	}
+	lexer.step()
+	lexer.Next()
+	return lexer
+}
+
+func NewLexerGlobalName(log logger.Log, source logger.Source) Lexer {
+	lexer := Lexer{
+		log:           log,
+		source:        source,
+		prevErrorLoc:  logger.Loc{Start: -1},
+		forGlobalName: true,
 	}
 	lexer.step()
 	lexer.Next()
@@ -251,8 +273,9 @@ func NewLexer(log logger.Log, source logger.Source) Lexer {
 
 func NewLexerJSON(log logger.Log, source logger.Source, allowComments bool) Lexer {
 	lexer := Lexer{
-		log:    log,
-		source: source,
+		log:          log,
+		source:       source,
+		prevErrorLoc: logger.Loc{Start: -1},
 		json: json{
 			parse:         true,
 			allowComments: allowComments,
@@ -414,6 +437,7 @@ func (lexer *Lexer) ExpectLessThan(isInsideJSXElement bool) {
 	case TLessThanEquals:
 		lexer.Token = TEquals
 		lexer.start++
+		lexer.maybeExpandEquals()
 
 	case TLessThanLessThan:
 		lexer.Token = TLessThan
@@ -443,6 +467,7 @@ func (lexer *Lexer) ExpectGreaterThan(isInsideJSXElement bool) {
 	case TGreaterThanEquals:
 		lexer.Token = TEquals
 		lexer.start++
+		lexer.maybeExpandEquals()
 
 	case TGreaterThanGreaterThan:
 		lexer.Token = TGreaterThan
@@ -462,6 +487,26 @@ func (lexer *Lexer) ExpectGreaterThan(isInsideJSXElement bool) {
 
 	default:
 		lexer.Expected(TGreaterThan)
+	}
+}
+
+func (lexer *Lexer) maybeExpandEquals() {
+	switch lexer.codePoint {
+	case '>':
+		// "=" + ">" = "=>"
+		lexer.Token = TEqualsGreaterThan
+		lexer.step()
+
+	case '=':
+		// "=" + "=" = "=="
+		lexer.Token = TEqualsEquals
+		lexer.step()
+
+		if lexer.Token == '=' {
+			// "=" + "==" = "==="
+			lexer.Token = TEqualsEqualsEquals
+			lexer.step()
+		}
 	}
 }
 
@@ -520,10 +565,11 @@ func IsIdentifierUTF16(text []uint16) bool {
 	}
 	for i := 0; i < n; i++ {
 		r1 := rune(text[i])
-		if utf16.IsSurrogate(r1) && i+1 < n {
-			r2 := rune(text[i+1])
-			r1 = (r1-0xD800)<<10 | (r2 - 0xDC00) + 0x10000
-			i++
+		if r1 >= 0xD800 && r1 <= 0xDBFF && i+1 < n {
+			if r2 := rune(text[i+1]); r2 >= 0xDC00 && r2 <= 0xDFFF {
+				r1 = (r1 << 10) + r2 + (0x10000 - (0xD800 << 10) - 0xDC00)
+				i++
+			}
 		}
 		if i == 0 {
 			if !IsIdentifierStart(r1) {
@@ -621,17 +667,37 @@ func RangeOfIdentifier(source logger.Source, loc logger.Loc) logger.Range {
 	}
 
 	i := 0
-	c, width := utf8.DecodeRuneInString(text)
-	i += width
+	c, _ := utf8.DecodeRuneInString(text[i:])
+
+	// Handle private names
+	if c == '#' {
+		i++
+		c, _ = utf8.DecodeRuneInString(text[i:])
+	}
 
 	if IsIdentifierStart(c) || c == '\\' {
 		// Search for the end of the identifier
 		for i < len(text) {
 			c2, width2 := utf8.DecodeRuneInString(text[i:])
-			if !IsIdentifierContinue(c2) && c2 != '\\' {
+			if c2 == '\\' {
+				i += width2
+
+				// Skip over bracketed unicode escapes such as "\u{10000}"
+				if i+2 < len(text) && text[i] == 'u' && text[i+1] == '{' {
+					i += 2
+					for i < len(text) {
+						if text[i] == '}' {
+							i++
+							break
+						}
+						i++
+					}
+				}
+			} else if !IsIdentifierContinue(c2) {
 				return logger.Range{Loc: loc, Len: int32(i)}
+			} else {
+				i += width2
 			}
-			i += width2
 		}
 	}
 
@@ -792,6 +858,7 @@ func (lexer *Lexer) NextInsideJSXElement() {
 
 			case '*':
 				lexer.step()
+				startRange := lexer.Range()
 			multiLineComment:
 				for {
 					switch lexer.codePoint {
@@ -808,7 +875,8 @@ func (lexer *Lexer) NextInsideJSXElement() {
 
 					case -1: // This indicates the end of the file
 						lexer.start = lexer.end
-						lexer.addError(lexer.Loc(), "Expected \"*/\" to terminate multi-line comment")
+						lexer.addErrorWithNotes(lexer.Loc(), "Expected \"*/\" to terminate multi-line comment",
+							[]logger.MsgData{logger.RangeData(&lexer.source, startRange, "The multi-line comment starts here")})
 						panic(LexerPanic{})
 
 					default:
@@ -877,6 +945,24 @@ func (lexer *Lexer) NextInsideJSXElement() {
 				for IsIdentifierContinue(lexer.codePoint) || lexer.codePoint == '-' {
 					lexer.step()
 				}
+
+				// Parse JSX namespaces. These are not supported by React or TypeScript
+				// but someone using JSX syntax in more obscure ways may find a use for
+				// them. A namespaced name is just always turned into a string so you
+				// can't use this feature to reference JavaScript identifiers.
+				if lexer.codePoint == ':' {
+					lexer.step()
+					if IsIdentifierStart(lexer.codePoint) {
+						lexer.step()
+						for IsIdentifierContinue(lexer.codePoint) || lexer.codePoint == '-' {
+							lexer.step()
+						}
+					} else {
+						lexer.addError(logger.Loc{Start: lexer.Range().End()},
+							fmt.Sprintf("Expected identifier after %q in namespaced JSX name", lexer.Raw()))
+					}
+				}
+
 				lexer.Identifier = lexer.Raw()
 				lexer.Token = TIdentifier
 				break
@@ -1160,6 +1246,10 @@ func (lexer *Lexer) Next() {
 		case '/':
 			// '/' or '/=' or '//' or '/* ... */'
 			lexer.step()
+			if lexer.forGlobalName {
+				lexer.Token = TSlash
+				break
+			}
 			switch lexer.codePoint {
 			case '=':
 				lexer.step()
@@ -1186,6 +1276,7 @@ func (lexer *Lexer) Next() {
 
 			case '*':
 				lexer.step()
+				startRange := lexer.Range()
 			multiLineComment:
 				for {
 					switch lexer.codePoint {
@@ -1202,7 +1293,8 @@ func (lexer *Lexer) Next() {
 
 					case -1: // This indicates the end of the file
 						lexer.start = lexer.end
-						lexer.addError(lexer.Loc(), "Expected \"*/\" to terminate multi-line comment")
+						lexer.addErrorWithNotes(lexer.Loc(), "Expected \"*/\" to terminate multi-line comment",
+							[]logger.MsgData{logger.RangeData(&lexer.source, startRange, "The multi-line comment starts here")})
 						panic(LexerPanic{})
 
 					default:
@@ -1361,7 +1453,8 @@ func (lexer *Lexer) Next() {
 					}
 
 				case -1: // This indicates the end of the file
-					lexer.SyntaxError()
+					lexer.addError(logger.Loc{Start: int32(lexer.end)}, "Unterminated string literal")
+					panic(LexerPanic{})
 
 				case '\r':
 					if quote != '`' {
@@ -1597,8 +1690,8 @@ func (lexer *Lexer) parseNumericLiteralOrDot() {
 	underscoreCount := 0
 	lastUnderscoreEnd := 0
 	hasDotOrExponent := first == '.'
-	isLegacyOctalLiteral := false
 	base := 0.0
+	lexer.IsLegacyOctalLiteral = false
 
 	// Assume this is a number, but potentially change to a bigint later
 	lexer.Token = TNumericLiteral
@@ -1617,7 +1710,7 @@ func (lexer *Lexer) parseNumericLiteralOrDot() {
 
 		case '0', '1', '2', '3', '4', '5', '6', '7', '_':
 			base = 8
-			isLegacyOctalLiteral = true
+			lexer.IsLegacyOctalLiteral = true
 		}
 	}
 
@@ -1626,7 +1719,7 @@ func (lexer *Lexer) parseNumericLiteralOrDot() {
 		isFirst := true
 		isInvalidLegacyOctalLiteral := false
 		lexer.Number = 0
-		if !isLegacyOctalLiteral {
+		if !lexer.IsLegacyOctalLiteral {
 			lexer.step()
 		}
 
@@ -1640,7 +1733,7 @@ func (lexer *Lexer) parseNumericLiteralOrDot() {
 				}
 
 				// The first digit must exist
-				if isFirst || isLegacyOctalLiteral {
+				if isFirst || lexer.IsLegacyOctalLiteral {
 					lexer.SyntaxError()
 				}
 
@@ -1657,7 +1750,7 @@ func (lexer *Lexer) parseNumericLiteralOrDot() {
 				lexer.Number = lexer.Number*base + float64(lexer.codePoint-'0')
 
 			case '8', '9':
-				if isLegacyOctalLiteral {
+				if lexer.IsLegacyOctalLiteral {
 					isInvalidLegacyOctalLiteral = true
 				} else if base < 10 {
 					lexer.SyntaxError()
@@ -1696,7 +1789,7 @@ func (lexer *Lexer) parseNumericLiteralOrDot() {
 			text := lexer.Raw()
 
 			// Can't use a leading zero for bigint literals
-			if isBigIntegerLiteral && isLegacyOctalLiteral {
+			if isBigIntegerLiteral && lexer.IsLegacyOctalLiteral {
 				lexer.SyntaxError()
 			}
 
@@ -2073,12 +2166,14 @@ func (lexer *Lexer) decodeEscapeSequences(start int, text string) []uint16 {
 				continue
 
 			case '0', '1', '2', '3', '4', '5', '6', '7':
+				octalStart := i - 2
 				if lexer.json.parse {
 					lexer.end = start + i - width2
 					lexer.SyntaxError()
 				}
 
 				// 1-3 digit octal
+				isBad := false
 				value := c2 - '0'
 				c3, width3 := utf8.DecodeRuneInString(text[i:])
 				switch c3 {
@@ -2093,9 +2188,24 @@ func (lexer *Lexer) decodeEscapeSequences(start int, text string) []uint16 {
 							value = temp
 							i += width4
 						}
+					case '8', '9':
+						isBad = true
 					}
+				case '8', '9':
+					isBad = true
 				}
 				c = value
+
+				// Forbid the use of octal literals other than "\0"
+				if isBad || text[octalStart:i] != "\\0" {
+					lexer.LegacyOctalLoc = logger.Loc{Start: int32(start + octalStart)}
+				}
+
+			case '8', '9':
+				c = c2
+
+				// Forbid the invalid octal literals "\8" and "\9"
+				lexer.LegacyOctalLoc = logger.Loc{Start: int32(start + i - 2)}
 
 			case 'x':
 				if lexer.json.parse {
@@ -2283,12 +2393,36 @@ func (lexer *Lexer) step() {
 }
 
 func (lexer *Lexer) addError(loc logger.Loc, text string) {
+	// Don't report multiple errors in the same spot
+	if loc == lexer.prevErrorLoc {
+		return
+	}
+	lexer.prevErrorLoc = loc
+
 	if !lexer.IsLogDisabled {
 		lexer.log.AddError(&lexer.source, loc, text)
 	}
 }
 
+func (lexer *Lexer) addErrorWithNotes(loc logger.Loc, text string, notes []logger.MsgData) {
+	// Don't report multiple errors in the same spot
+	if loc == lexer.prevErrorLoc {
+		return
+	}
+	lexer.prevErrorLoc = loc
+
+	if !lexer.IsLogDisabled {
+		lexer.log.AddErrorWithNotes(&lexer.source, loc, text, notes)
+	}
+}
+
 func (lexer *Lexer) addRangeError(r logger.Range, text string) {
+	// Don't report multiple errors in the same spot
+	if r.Loc == lexer.prevErrorLoc {
+		return
+	}
+	lexer.prevErrorLoc = r.Loc
+
 	if !lexer.IsLogDisabled {
 		lexer.log.AddRangeError(&lexer.source, r, text)
 	}
@@ -2365,11 +2499,25 @@ func scanForPragmaArg(kind pragmaArg, start int, pragma string, text string) (js
 func (lexer *Lexer) scanCommentText() {
 	text := lexer.source.Contents[lexer.start:lexer.end]
 	hasPreserveAnnotation := len(text) > 2 && text[2] == '!'
+	isMultiLineComment := text[1] == '*'
+
+	// Save the original comment text so we can subtract comments from the
+	// character frequency analysis used by symbol minification
+	lexer.AllOriginalComments = append(lexer.AllOriginalComments, js_ast.Comment{
+		Loc:  logger.Loc{Start: int32(lexer.start)},
+		Text: text,
+	})
+
+	// Omit the trailing "*/" from the checks below
+	endOfCommentText := len(text)
+	if isMultiLineComment {
+		endOfCommentText -= 2
+	}
 
 	for i, n := 0, len(text); i < n; i++ {
 		switch text[i] {
 		case '#':
-			rest := text[i+1:]
+			rest := text[i+1 : endOfCommentText]
 			if hasPrefixWithWordBoundary(rest, "__PURE__") {
 				lexer.HasPureCommentBefore = true
 			} else if strings.HasPrefix(rest, " sourceMappingURL=") {
@@ -2379,7 +2527,7 @@ func (lexer *Lexer) scanCommentText() {
 			}
 
 		case '@':
-			rest := text[i+1:]
+			rest := text[i+1 : endOfCommentText]
 			if hasPrefixWithWordBoundary(rest, "__PURE__") {
 				lexer.HasPureCommentBefore = true
 			} else if hasPrefixWithWordBoundary(rest, "preserve") || hasPrefixWithWordBoundary(rest, "license") {
@@ -2401,7 +2549,7 @@ func (lexer *Lexer) scanCommentText() {
 	}
 
 	if hasPreserveAnnotation || lexer.PreserveAllCommentsBefore {
-		if text[1] == '*' {
+		if isMultiLineComment {
 			text = removeMultiLineCommentIndent(lexer.source.Contents[:lexer.start], text)
 		}
 
@@ -2474,6 +2622,31 @@ seekBackwardToNewline:
 	return strings.Join(lines, "\n")
 }
 
+func ContainsNonBMPCodePoint(text string) bool {
+	for _, c := range text {
+		if c > 0xFFFF {
+			return true
+		}
+	}
+	return false
+}
+
+// This does "ContainsNonBMPCodePoint(UTF16ToString(text))" without any allocations
+func ContainsNonBMPCodePointUTF16(text []uint16) bool {
+	if n := len(text); n > 0 {
+		for i, c := range text[:n-1] {
+			// Check for a high surrogate
+			if c >= 0xD800 && c <= 0xDBFF {
+				// Check for a low surrogate
+				if c2 := text[i+1]; c2 >= 0xDC00 && c2 <= 0xDFFF {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 func StringToUTF16(text string) []uint16 {
 	decoded := []uint16{}
 	for _, c := range text {
@@ -2544,23 +2717,6 @@ func UTF16EqualsUTF16(a []uint16, b []uint16) bool {
 		return true
 	}
 	return false
-}
-
-// Does "append(bytes, UTF16ToString(text))" without a temporary allocation
-func AppendUTF16ToBytes(bytes []byte, text []uint16) []byte {
-	temp := make([]byte, utf8.UTFMax)
-	n := len(text)
-	for i := 0; i < n; i++ {
-		r1 := rune(text[i])
-		if utf16.IsSurrogate(r1) && i+1 < n {
-			r2 := rune(text[i+1])
-			r1 = (r1-0xD800)<<10 | (r2 - 0xDC00) + 0x10000
-			i++
-		}
-		width := encodeWTF8Rune(temp, r1)
-		bytes = append(bytes, temp[:width]...)
-	}
-	return bytes
 }
 
 // This is a clone of "utf8.EncodeRune" that has been modified to encode using

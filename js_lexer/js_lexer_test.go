@@ -53,10 +53,17 @@ func expectLexerError(t *testing.T, contents string, expected string) {
 		msgs := log.Done()
 		text := ""
 		for _, msg := range msgs {
-			text += msg.String(logger.StderrOptions{}, logger.TerminalInfo{})
+			text += msg.String(logger.OutputOptions{}, logger.TerminalInfo{})
 		}
 		test.AssertEqual(t, text, expected)
 	})
+}
+
+func TestComment(t *testing.T) {
+	expectLexerError(t, "/*", "<stdin>: error: Expected \"*/\" to terminate multi-line comment\n<stdin>: note: The multi-line comment starts here\n")
+	expectLexerError(t, "/*/", "<stdin>: error: Expected \"*/\" to terminate multi-line comment\n<stdin>: note: The multi-line comment starts here\n")
+	expectLexerError(t, "/**/", "")
+	expectLexerError(t, "//", "")
 }
 
 func expectHashbang(t *testing.T, contents string, expected string) {
@@ -489,18 +496,18 @@ func TestStringLiteral(t *testing.T) {
 	expectString(t, "'1\\\u20292'", "12")
 	expectLexerError(t, "'1\\\n\r2'", "<stdin>: error: Unterminated string literal\n")
 
-	expectLexerError(t, "\"'", "<stdin>: error: Unexpected end of file\n")
-	expectLexerError(t, "'\"", "<stdin>: error: Unexpected end of file\n")
-	expectLexerError(t, "'\\", "<stdin>: error: Unexpected end of file\n")
-	expectLexerError(t, "'\\'", "<stdin>: error: Unexpected end of file\n")
+	expectLexerError(t, "\"'", "<stdin>: error: Unterminated string literal\n")
+	expectLexerError(t, "'\"", "<stdin>: error: Unterminated string literal\n")
+	expectLexerError(t, "'\\", "<stdin>: error: Unterminated string literal\n")
+	expectLexerError(t, "'\\'", "<stdin>: error: Unterminated string literal\n")
 
-	expectLexerError(t, "'\\x", "<stdin>: error: Unexpected end of file\n")
+	expectLexerError(t, "'\\x", "<stdin>: error: Unterminated string literal\n")
 	expectLexerError(t, "'\\x'", "<stdin>: error: Syntax error \"'\"\n")
 	expectLexerError(t, "'\\xG'", "<stdin>: error: Syntax error \"G\"\n")
 	expectLexerError(t, "'\\xF'", "<stdin>: error: Syntax error \"'\"\n")
 	expectLexerError(t, "'\\xFG'", "<stdin>: error: Syntax error \"G\"\n")
 
-	expectLexerError(t, "'\\u", "<stdin>: error: Unexpected end of file\n")
+	expectLexerError(t, "'\\u", "<stdin>: error: Unterminated string literal\n")
 	expectLexerError(t, "'\\u'", "<stdin>: error: Syntax error \"'\"\n")
 	expectLexerError(t, "'\\u0'", "<stdin>: error: Syntax error \"'\"\n")
 	expectLexerError(t, "'\\u00'", "<stdin>: error: Syntax error \"'\"\n")

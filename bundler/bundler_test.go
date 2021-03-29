@@ -16,12 +16,13 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/ije/esbuild-internal/cache"
 	"github.com/ije/esbuild-internal/compat"
 	"github.com/ije/esbuild-internal/config"
 	"github.com/ije/esbuild-internal/fs"
 	"github.com/ije/esbuild-internal/logger"
 	"github.com/ije/esbuild-internal/resolver"
-	"github.com/kylelemons/godebug/diff"
+	"github.com/ije/esbuild-internal/test"
 )
 
 func es(version int) compat.JSFeature {
@@ -36,7 +37,8 @@ func assertEqual(t *testing.T, a interface{}, b interface{}) {
 		stringA := fmt.Sprintf("%v", a)
 		stringB := fmt.Sprintf("%v", b)
 		if strings.Contains(stringA, "\n") {
-			t.Fatal(diff.Diff(stringB, stringA))
+			color := !fs.CheckIfWindows()
+			t.Fatal(test.Diff(stringB, stringA, color))
 		} else {
 			t.Fatalf("%s != %s", a, b)
 		}
@@ -47,7 +49,7 @@ func assertLog(t *testing.T, msgs []logger.Msg, expected string) {
 	t.Helper()
 	text := ""
 	for _, msg := range msgs {
-		text += msg.String(logger.StderrOptions{}, logger.TerminalInfo{})
+		text += msg.String(logger.OutputOptions{}, logger.TerminalInfo{})
 	}
 	assertEqual(t, text, expected)
 }
@@ -83,13 +85,20 @@ func (s *suite) expectBundled(t *testing.T, args bundled) {
 	t.Run("", func(t *testing.T) {
 		t.Helper()
 		fs := fs.MockFS(args.files)
-		args.options.ExtensionOrder = []string{".tsx", ".ts", ".jsx", ".js", ".json"}
+		if args.options.ExtensionOrder == nil {
+			args.options.ExtensionOrder = []string{".tsx", ".ts", ".jsx", ".js", ".css", ".json"}
+		}
 		if args.options.AbsOutputFile != "" {
 			args.options.AbsOutputDir = path.Dir(args.options.AbsOutputFile)
 		}
 		log := logger.NewDeferLog()
-		resolver := resolver.NewResolver(fs, log, args.options)
-		bundle := ScanBundle(log, fs, resolver, args.entryPaths, args.options)
+		caches := cache.MakeCacheSet()
+		resolver := resolver.NewResolver(fs, log, caches, args.options)
+		entryPoints := make([]EntryPoint, 0, len(args.entryPaths))
+		for _, path := range args.entryPaths {
+			entryPoints = append(entryPoints, EntryPoint{InputPath: path})
+		}
+		bundle := ScanBundle(log, fs, resolver, caches, entryPoints, args.options)
 		msgs := log.Done()
 		assertLog(t, msgs, args.expectedScanLog)
 
@@ -100,7 +109,7 @@ func (s *suite) expectBundled(t *testing.T, args bundled) {
 
 		log = logger.NewDeferLog()
 		args.options.OmitRuntimeForTests = true
-		results := bundle.Compile(log, args.options)
+		results, _ := bundle.Compile(log, args.options)
 		msgs = log.Done()
 		assertLog(t, msgs, args.expectedCompileLog)
 

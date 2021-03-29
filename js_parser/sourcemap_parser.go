@@ -3,7 +3,6 @@ package js_parser
 import (
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/ije/esbuild-internal/js_ast"
 	"github.com/ije/esbuild-internal/js_lexer"
@@ -13,7 +12,7 @@ import (
 
 // Specification: https://sourcemaps.info/spec.html
 func ParseSourceMap(log logger.Log, source logger.Source) *sourcemap.SourceMap {
-	expr, ok := ParseJSON(log, source, ParseJSONOptions{})
+	expr, ok := ParseJSON(log, source, JSONOptions{})
 	if !ok {
 		return nil
 	}
@@ -24,17 +23,11 @@ func ParseSourceMap(log logger.Log, source logger.Source) *sourcemap.SourceMap {
 		return nil
 	}
 
-	var sourcesContent []*string
 	var sources []string
+	var sourcesContent []sourcemap.SourceContent
 	var mappingsRaw []uint16
 	var mappingsStart int32
 	hasVersion := false
-
-	// Treat the paths in the source map as relative to the directory containing the source map
-	var sourcesPrefix string
-	if slash := strings.LastIndexAny(source.PrettyPath, "/\\"); slash != -1 {
-		sourcesPrefix = source.PrettyPath[:slash+1]
-	}
 
 	for _, prop := range obj.Properties {
 		keyRange := source.RangeOfString(prop.Key.Loc)
@@ -60,7 +53,9 @@ func ParseSourceMap(log logger.Log, source logger.Source) *sourcemap.SourceMap {
 				sources = nil
 				for _, item := range value.Items {
 					if element, ok := item.Data.(*js_ast.EString); ok {
-						sources = append(sources, sourcesPrefix+js_lexer.UTF16ToString(element.Value))
+						sources = append(sources, js_lexer.UTF16ToString(element.Value))
+					} else {
+						sources = append(sources, "")
 					}
 				}
 			}
@@ -70,10 +65,12 @@ func ParseSourceMap(log logger.Log, source logger.Source) *sourcemap.SourceMap {
 				sourcesContent = nil
 				for _, item := range value.Items {
 					if element, ok := item.Data.(*js_ast.EString); ok {
-						str := js_lexer.UTF16ToString(element.Value)
-						sourcesContent = append(sourcesContent, &str)
+						sourcesContent = append(sourcesContent, sourcemap.SourceContent{
+							Value:  element.Value,
+							Quoted: source.TextForRange(source.RangeOfString(item.Loc)),
+						})
 					} else {
-						sourcesContent = append(sourcesContent, nil)
+						sourcesContent = append(sourcesContent, sourcemap.SourceContent{})
 					}
 				}
 			}

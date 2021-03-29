@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/ije/esbuild-internal/ast"
-	"github.com/ije/esbuild-internal/config"
+	"github.com/ije/esbuild-internal/compat"
 	"github.com/ije/esbuild-internal/css_ast"
 	"github.com/ije/esbuild-internal/css_lexer"
 	"github.com/ije/esbuild-internal/logger"
@@ -17,7 +17,7 @@ import (
 type parser struct {
 	log           logger.Log
 	source        logger.Source
-	options       config.Options
+	options       Options
 	tokens        []css_lexer.Token
 	stack         []css_lexer.T
 	index         int
@@ -26,7 +26,13 @@ type parser struct {
 	importRecords []ast.ImportRecord
 }
 
-func Parse(log logger.Log, source logger.Source, options config.Options) css_ast.AST {
+type Options struct {
+	UnsupportedCSSFeatures compat.CSSFeature
+	MangleSyntax           bool
+	RemoveWhitespace       bool
+}
+
+func Parse(log logger.Log, source logger.Source, options Options) css_ast.AST {
 	p := parser{
 		log:       log,
 		source:    source,
@@ -75,8 +81,13 @@ func (p *parser) next() css_lexer.Token {
 	return p.at(p.index + 1)
 }
 
-func (p *parser) text() string {
-	return p.current().Raw(p.source.Contents)
+func (p *parser) raw() string {
+	t := p.current()
+	return p.source.Contents[t.Range.Loc.Start:t.Range.End()]
+}
+
+func (p *parser) decoded() string {
+	return p.current().DecodedText(p.source.Contents)
 }
 
 func (p *parser) peek(kind css_lexer.T) bool {
@@ -99,7 +110,7 @@ func (p *parser) expect(kind css_lexer.T) bool {
 	var text string
 	if kind == css_lexer.TSemicolon && p.index > 0 && p.at(p.index-1).Kind == css_lexer.TWhitespace {
 		// Have a nice error message for forgetting a trailing semicolon
-		text = fmt.Sprintf("Expected \";\"")
+		text = "Expected \";\""
 		t = p.at(p.index - 1)
 	} else {
 		switch t.Kind {
@@ -109,7 +120,7 @@ func (p *parser) expect(kind css_lexer.T) bool {
 		case css_lexer.TBadURL, css_lexer.TBadString:
 			text = fmt.Sprintf("Expected %s but found %s", kind.String(), t.Kind.String())
 		default:
-			text = fmt.Sprintf("Expected %s but found %q", kind.String(), p.text())
+			text = fmt.Sprintf("Expected %s but found %q", kind.String(), p.raw())
 		}
 	}
 	if t.Range.Loc.Start > p.prevError.Start {
@@ -129,7 +140,7 @@ func (p *parser) unexpected() {
 		case css_lexer.TBadURL, css_lexer.TBadString:
 			text = fmt.Sprintf("Unexpected %s", t.Kind.String())
 		default:
-			text = fmt.Sprintf("Unexpected %q", p.text())
+			text = fmt.Sprintf("Unexpected %q", p.raw())
 		}
 		p.log.AddRangeWarning(&p.source, t.Range, text)
 		p.prevError = t.Range.Loc
@@ -142,18 +153,58 @@ type ruleContext struct {
 }
 
 func (p *parser) parseListOfRules(context ruleContext) []css_ast.R {
+	didWarnAboutCharset := false
+	didWarnAboutImport := false
 	rules := []css_ast.R{}
+	locs := []logger.Loc{}
+
+loop:
 	for {
 		switch p.current().Kind {
 		case css_lexer.TEndOfFile, css_lexer.TCloseBrace:
-			return rules
+			break loop
 
 		case css_lexer.TWhitespace:
 			p.advance()
 			continue
 
 		case css_lexer.TAtKeyword:
-			rules = append(rules, p.parseAtRule(atRuleContext{}))
+			first := p.current().Range
+			rule := p.parseAtRule(atRuleContext{})
+
+			// Validate structure
+			if context.isTopLevel {
+				switch rule.(type) {
+				case *css_ast.RAtCharset:
+					if !didWarnAboutCharset && len(rules) > 0 {
+						p.log.AddRangeWarningWithNotes(&p.source, first, "\"@charset\" must be the first rule in the file",
+							[]logger.MsgData{logger.RangeData(&p.source, logger.Range{Loc: locs[len(locs)-1]},
+								"This rule cannot come before a \"@charset\" rule")})
+						didWarnAboutCharset = true
+					}
+
+				case *css_ast.RAtImport:
+					if !didWarnAboutImport {
+					importLoop:
+						for i, before := range rules {
+							switch before.(type) {
+							case *css_ast.RAtCharset, *css_ast.RAtImport:
+							default:
+								p.log.AddRangeWarningWithNotes(&p.source, first, "All \"@import\" rules must come first",
+									[]logger.MsgData{logger.RangeData(&p.source, logger.Range{Loc: locs[i]},
+										"This rule cannot come before an \"@import\" rule")})
+								didWarnAboutImport = true
+								break importLoop
+							}
+						}
+					}
+				}
+			}
+
+			rules = append(rules, rule)
+			if context.isTopLevel {
+				locs = append(locs, first.Loc)
+			}
 			continue
 
 		case css_lexer.TCDO, css_lexer.TCDC:
@@ -163,12 +214,20 @@ func (p *parser) parseListOfRules(context ruleContext) []css_ast.R {
 			}
 		}
 
+		if context.isTopLevel {
+			locs = append(locs, p.current().Range.Loc)
+		}
 		if context.parseSelectors {
 			rules = append(rules, p.parseSelectorRule())
 		} else {
 			rules = append(rules, p.parseQualifiedRuleFrom(p.index, false /* isAlreadyInvalid */))
 		}
 	}
+
+	if p.options.MangleSyntax {
+		rules = removeEmptyRules(rules)
+	}
+	return rules
 }
 
 func (p *parser) parseListOfDeclarations() (list []css_ast.R) {
@@ -179,6 +238,9 @@ func (p *parser) parseListOfDeclarations() (list []css_ast.R) {
 
 		case css_lexer.TEndOfFile, css_lexer.TCloseBrace:
 			p.processDeclarations(list)
+			if p.options.MangleSyntax {
+				list = removeEmptyRules(list)
+			}
 			return
 
 		case css_lexer.TAtKeyword:
@@ -196,25 +258,52 @@ func (p *parser) parseListOfDeclarations() (list []css_ast.R) {
 	}
 }
 
+func removeEmptyRules(rules []css_ast.R) []css_ast.R {
+	end := 0
+	for _, rule := range rules {
+		switch r := rule.(type) {
+		case *css_ast.RAtKeyframes:
+			if len(r.Blocks) == 0 {
+				continue
+			}
+
+		case *css_ast.RKnownAt:
+			if len(r.Rules) == 0 {
+				continue
+			}
+
+		case *css_ast.RSelector:
+			if len(r.Rules) == 0 {
+				continue
+			}
+		}
+
+		rules[end] = rule
+		end++
+	}
+	return rules[:end]
+}
+
 func (p *parser) parseURLOrString() (string, logger.Range, bool) {
 	t := p.current()
 	switch t.Kind {
 	case css_lexer.TString:
+		text := p.decoded()
 		p.advance()
-		return css_lexer.ContentsOfStringToken(t.Raw(p.source.Contents)), t.Range, true
+		return text, t.Range, true
 
 	case css_lexer.TURL:
+		text := p.decoded()
 		p.advance()
-		text, r := css_lexer.ContentsOfURLToken(t.Raw(p.source.Contents))
-		r.Loc.Start += t.Range.Loc.Start
-		return text, r, true
+		return text, t.Range, true
 
 	case css_lexer.TFunction:
-		if t.Raw(p.source.Contents) == "url(" {
+		if p.decoded() == "url" {
 			p.advance()
 			t = p.current()
+			text := p.decoded()
 			if p.expect(css_lexer.TString) && p.expect(css_lexer.TCloseParen) {
-				return css_lexer.ContentsOfStringToken(t.Raw(p.source.Contents)), t.Range, true
+				return text, t.Range, true
 			}
 		}
 	}
@@ -240,13 +329,42 @@ const (
 )
 
 var specialAtRules = map[string]atRuleKind{
-	"@font-face": atRuleDeclarations,
-	"@page":      atRuleDeclarations,
+	"font-face": atRuleDeclarations,
+	"page":      atRuleDeclarations,
 
-	"@document": atRuleInheritContext,
-	"@media":    atRuleInheritContext,
-	"@scope":    atRuleInheritContext,
-	"@supports": atRuleInheritContext,
+	// These go inside "@page": https://www.w3.org/TR/css-page-3/#syntax-page-selector
+	"bottom-center":       atRuleDeclarations,
+	"bottom-left-corner":  atRuleDeclarations,
+	"bottom-left":         atRuleDeclarations,
+	"bottom-right-corner": atRuleDeclarations,
+	"bottom-right":        atRuleDeclarations,
+	"left-bottom":         atRuleDeclarations,
+	"left-middle":         atRuleDeclarations,
+	"left-top":            atRuleDeclarations,
+	"right-bottom":        atRuleDeclarations,
+	"right-middle":        atRuleDeclarations,
+	"right-top":           atRuleDeclarations,
+	"top-center":          atRuleDeclarations,
+	"top-left-corner":     atRuleDeclarations,
+	"top-left":            atRuleDeclarations,
+	"top-right-corner":    atRuleDeclarations,
+	"top-right":           atRuleDeclarations,
+
+	// These properties are very deprecated and appear to only be useful for
+	// mobile versions of internet explorer (which may no longer exist?), but
+	// they are used by the https://ant.design/ design system so we recognize
+	// them to avoid the warning.
+	//
+	//   Documentation: https://developer.mozilla.org/en-US/docs/Web/CSS/@viewport
+	//   Discussion: https://github.com/w3c/csswg-drafts/issues/4766
+	//
+	"viewport":     atRuleDeclarations,
+	"-ms-viewport": atRuleDeclarations,
+
+	"document": atRuleInheritContext,
+	"media":    atRuleInheritContext,
+	"scope":    atRuleInheritContext,
+	"supports": atRuleInheritContext,
 }
 
 type atRuleContext struct {
@@ -255,7 +373,7 @@ type atRuleContext struct {
 
 func (p *parser) parseAtRule(context atRuleContext) css_ast.R {
 	// Parse the name
-	atToken := p.text()
+	atToken := p.decoded()
 	atRange := p.current().Range
 	kind := specialAtRules[atToken]
 	p.advance()
@@ -263,11 +381,11 @@ func (p *parser) parseAtRule(context atRuleContext) css_ast.R {
 	// Parse the prelude
 	preludeStart := p.index
 	switch atToken {
-	case "@charset":
+	case "charset":
 		kind = atRuleEmpty
 		p.expect(css_lexer.TWhitespace)
 		if p.peek(css_lexer.TString) {
-			encoding := css_lexer.ContentsOfStringToken(p.text())
+			encoding := p.decoded()
 			if encoding != "UTF-8" {
 				p.log.AddRangeWarning(&p.source, p.current().Range,
 					fmt.Sprintf("\"UTF-8\" will be used instead of unsupported charset %q", encoding))
@@ -278,106 +396,119 @@ func (p *parser) parseAtRule(context atRuleContext) css_ast.R {
 		}
 		p.expect(css_lexer.TString)
 
-	case "@namespace":
-		kind = atRuleEmpty
-		p.eat(css_lexer.TWhitespace)
-		prefix := ""
-		if p.peek(css_lexer.TIdent) {
-			prefix = p.text()
-			p.advance()
-			p.eat(css_lexer.TWhitespace)
-		}
-		if path, _, ok := p.expectURLOrString(); ok {
-			p.eat(css_lexer.TWhitespace)
-			p.expect(css_lexer.TSemicolon)
-			return &css_ast.RAtNamespace{Prefix: prefix, Path: path}
-		}
-
-	case "@import":
+	case "import":
 		kind = atRuleEmpty
 		p.eat(css_lexer.TWhitespace)
 		if path, r, ok := p.expectURLOrString(); ok {
-			p.eat(css_lexer.TWhitespace)
+			importConditionsStart := p.index
+			for p.current().Kind != css_lexer.TSemicolon && p.current().Kind != css_lexer.TEndOfFile {
+				p.parseComponentValue()
+			}
+			importConditions := p.convertTokens(p.tokens[importConditionsStart:p.index])
+			kind := ast.ImportAt
+
+			// Insert or remove whitespace before the first token
+			if len(importConditions) > 0 {
+				kind = ast.ImportAtConditional
+				if p.options.RemoveWhitespace {
+					importConditions[0].Whitespace &= ^css_ast.WhitespaceBefore
+				} else {
+					importConditions[0].Whitespace |= css_ast.WhitespaceBefore
+				}
+			}
+
 			p.expect(css_lexer.TSemicolon)
 			importRecordIndex := uint32(len(p.importRecords))
 			p.importRecords = append(p.importRecords, ast.ImportRecord{
-				Kind:  ast.AtImport,
+				Kind:  kind,
 				Path:  logger.Path{Text: path},
 				Range: r,
 			})
-			return &css_ast.RAtImport{ImportRecordIndex: importRecordIndex}
+			return &css_ast.RAtImport{
+				ImportRecordIndex: importRecordIndex,
+				ImportConditions:  importConditions,
+			}
 		}
 
-	case "@keyframes", "@-webkit-keyframes", "@-moz-keyframes", "@-ms-keyframes", "@-o-keyframes":
+	case "keyframes", "-webkit-keyframes", "-moz-keyframes", "-ms-keyframes", "-o-keyframes":
 		p.eat(css_lexer.TWhitespace)
-		name := p.current()
+		var name string
 
-		// Consider string names a syntax error even though they are allowed by
-		// the specification and they work in Firefox because they do not work in
-		// Chrome or Safari.
-		if p.expect(css_lexer.TIdent) || p.eat(css_lexer.TString) || p.peek(css_lexer.TOpenBrace) {
-			p.eat(css_lexer.TWhitespace)
-			if p.expect(css_lexer.TOpenBrace) {
-				var blocks []css_ast.KeyframeBlock
+		if p.peek(css_lexer.TIdent) {
+			name = p.decoded()
+			p.advance()
+		} else if !p.expect(css_lexer.TIdent) && !p.eat(css_lexer.TString) && !p.peek(css_lexer.TOpenBrace) {
+			// Consider string names a syntax error even though they are allowed by
+			// the specification and they work in Firefox because they do not work in
+			// Chrome or Safari.
+			break
+		}
 
-			blocks:
-				for {
-					switch p.current().Kind {
-					case css_lexer.TWhitespace:
-						p.advance()
-						continue
+		p.eat(css_lexer.TWhitespace)
+		if p.expect(css_lexer.TOpenBrace) {
+			var blocks []css_ast.KeyframeBlock
 
-					case css_lexer.TCloseBrace, css_lexer.TEndOfFile:
-						break blocks
+		blocks:
+			for {
+				switch p.current().Kind {
+				case css_lexer.TWhitespace:
+					p.advance()
+					continue
 
-					case css_lexer.TOpenBrace:
-						p.expect(css_lexer.TPercentage)
-						p.parseComponentValue()
+				case css_lexer.TCloseBrace, css_lexer.TEndOfFile:
+					break blocks
 
-					default:
-						var selectors []string
+				case css_lexer.TOpenBrace:
+					p.expect(css_lexer.TPercentage)
+					p.parseComponentValue()
 
-					selectors:
-						for {
-							t := p.current()
-							switch t.Kind {
-							case css_lexer.TWhitespace:
-								p.advance()
-								continue
+				default:
+					var selectors []string
 
-							case css_lexer.TOpenBrace, css_lexer.TEndOfFile:
-								break selectors
+				selectors:
+					for {
+						t := p.current()
+						switch t.Kind {
+						case css_lexer.TWhitespace:
+							p.advance()
+							continue
 
-							case css_lexer.TIdent, css_lexer.TPercentage:
-								text := t.Raw(p.source.Contents)
-								if t.Kind == css_lexer.TIdent {
-									if text == "from" {
-										if p.options.MangleSyntax {
-											text = "0%" // "0%" is equivalent to but shorter than "from"
-										}
-									} else if text != "to" {
-										p.expect(css_lexer.TPercentage)
+						case css_lexer.TOpenBrace, css_lexer.TEndOfFile:
+							break selectors
+
+						case css_lexer.TIdent, css_lexer.TPercentage:
+							text := p.decoded()
+							if t.Kind == css_lexer.TIdent {
+								if text == "from" {
+									if p.options.MangleSyntax {
+										text = "0%" // "0%" is equivalent to but shorter than "from"
 									}
-								} else if p.options.MangleSyntax && text == "100%" {
-									text = "to" // "to" is equivalent to but shorter than "100%"
+								} else if text != "to" {
+									p.expect(css_lexer.TPercentage)
 								}
-								selectors = append(selectors, text)
-								p.advance()
-
-							default:
-								p.expect(css_lexer.TPercentage)
-								p.parseComponentValue()
+							} else if p.options.MangleSyntax && text == "100%" {
+								text = "to" // "to" is equivalent to but shorter than "100%"
 							}
+							selectors = append(selectors, text)
+							p.advance()
 
-							p.eat(css_lexer.TWhitespace)
-							if t.Kind != css_lexer.TComma && !p.peek(css_lexer.TOpenBrace) {
-								p.expect(css_lexer.TComma)
-							}
+						default:
+							p.expect(css_lexer.TPercentage)
+							p.parseComponentValue()
 						}
 
-						if p.expect(css_lexer.TOpenBrace) {
-							rules := p.parseListOfDeclarations()
-							p.expect(css_lexer.TCloseBrace)
+						p.eat(css_lexer.TWhitespace)
+						if t.Kind != css_lexer.TComma && !p.peek(css_lexer.TOpenBrace) {
+							p.expect(css_lexer.TComma)
+						}
+					}
+
+					if p.expect(css_lexer.TOpenBrace) {
+						rules := p.parseListOfDeclarations()
+						p.expect(css_lexer.TCloseBrace)
+
+						// "@keyframes { from {} to { color: red } }" => "@keyframes { to { color: red } }"
+						if !p.options.MangleSyntax || len(rules) > 0 {
 							blocks = append(blocks, css_ast.KeyframeBlock{
 								Selectors: selectors,
 								Rules:     rules,
@@ -385,13 +516,13 @@ func (p *parser) parseAtRule(context atRuleContext) css_ast.R {
 						}
 					}
 				}
+			}
 
-				p.expect(css_lexer.TCloseBrace)
-				return &css_ast.RAtKeyframes{
-					AtToken: atToken,
-					Name:    name.Raw(p.source.Contents),
-					Blocks:  blocks,
-				}
+			p.expect(css_lexer.TCloseBrace)
+			return &css_ast.RAtKeyframes{
+				AtToken: atToken,
+				Name:    name,
+				Blocks:  blocks,
 			}
 		}
 
@@ -404,7 +535,27 @@ func (p *parser) parseAtRule(context atRuleContext) css_ast.R {
 		// https://developer.mozilla.org/en-US/docs/Web/CSS/At-rule. Deprecated
 		// and Firefox-only at-rules have been removed.
 		if kind == atRuleUnknown {
-			p.log.AddRangeWarning(&p.source, atRange, fmt.Sprintf("%q is not a known rule name", atToken))
+			if atToken == "namespace" {
+				// CSS namespaces are a weird feature that appears to only really be
+				// useful for styling XML. And the world has moved on from XHTML to
+				// HTML5 so pretty much no one uses CSS namespaces anymore. They are
+				// also complicated to support in a bundler because CSS namespaces are
+				// file-scoped, which means:
+				//
+				// * Default namespaces can be different in different files, in which
+				//   case some default namespaces would have to be converted to prefixed
+				//   namespaces to avoid collisions.
+				//
+				// * Prefixed namespaces from different files can use the same name, in
+				//   which case some prefixed namespaces would need to be renamed to
+				//   avoid collisions.
+				//
+				// Instead of implementing all of that for an extremely obscure feature,
+				// CSS namespaces are just explicitly not supported.
+				p.log.AddRangeWarning(&p.source, atRange, "\"@namespace\" rules are not supported")
+			} else {
+				p.log.AddRangeWarning(&p.source, atRange, fmt.Sprintf("%q is not a known rule name", "@"+atToken))
+			}
 		}
 	}
 
@@ -468,48 +619,46 @@ prelude:
 	default:
 		// Otherwise, parse an unknown rule
 		p.parseBlock(css_lexer.TOpenBrace, css_lexer.TCloseBrace)
-		block := p.convertTokensWithImports(p.tokens[blockStart:p.index])
+		block, _ := p.convertTokensHelper(p.tokens[blockStart:p.index], css_lexer.TEndOfFile, convertTokensOpts{allowImports: true})
 		return &css_ast.RUnknownAt{AtToken: atToken, Prelude: prelude, Block: block}
 	}
 }
 
 func (p *parser) convertTokens(tokens []css_lexer.Token) []css_ast.Token {
-	result, _ := p.convertTokensHelper(tokens, css_lexer.TEndOfFile, false)
+	result, _ := p.convertTokensHelper(tokens, css_lexer.TEndOfFile, convertTokensOpts{})
 	return result
 }
 
-func (p *parser) convertTokensWithImports(tokens []css_lexer.Token) []css_ast.Token {
-	result, _ := p.convertTokensHelper(tokens, css_lexer.TEndOfFile, true)
-	return result
+type convertTokensOpts struct {
+	allowImports       bool
+	verbatimWhitespace bool
 }
 
-func (p *parser) convertTokensHelper(tokens []css_lexer.Token, close css_lexer.T, allowImports bool) ([]css_ast.Token, []css_lexer.Token) {
+func (p *parser) convertTokensHelper(tokens []css_lexer.Token, close css_lexer.T, opts convertTokensOpts) ([]css_ast.Token, []css_lexer.Token) {
 	var result []css_ast.Token
+	var nextWhitespace css_ast.WhitespaceFlags
+
 loop:
 	for len(tokens) > 0 {
 		t := tokens[0]
 		tokens = tokens[1:]
-		token := css_ast.Token{
-			Kind: t.Kind,
-			Text: t.Raw(p.source.Contents),
+		if t.Kind == close {
+			break loop
 		}
+		token := css_ast.Token{
+			Kind:       t.Kind,
+			Text:       t.DecodedText(p.source.Contents),
+			Whitespace: nextWhitespace,
+		}
+		nextWhitespace = 0
 
 		switch t.Kind {
 		case css_lexer.TWhitespace:
 			if last := len(result) - 1; last >= 0 {
-				result[last].HasWhitespaceAfter = true
+				result[last].Whitespace |= css_ast.WhitespaceAfter
 			}
+			nextWhitespace = css_ast.WhitespaceBefore
 			continue
-
-		case css_lexer.TComma:
-			// Assume that whitespace can always be removed before a comma
-			if last := len(result) - 1; last >= 0 {
-				result[last].HasWhitespaceAfter = false
-			}
-
-			// Assume whitespace can always be added after a comma (it will be
-			// automatically omitted by the printer if we're minifying)
-			token.HasWhitespaceAfter = true
 
 		case css_lexer.TNumber:
 			if p.options.MangleSyntax {
@@ -535,69 +684,114 @@ loop:
 				}
 			}
 
-		case css_lexer.TString:
-			token.Text = css_lexer.ContentsOfStringToken(token.Text)
-
 		case css_lexer.TURL:
-			path, r := css_lexer.ContentsOfURLToken(token.Text)
-			r.Loc.Start += t.Range.Loc.Start
-			token.Text = ""
 			token.ImportRecordIndex = uint32(len(p.importRecords))
 			p.importRecords = append(p.importRecords, ast.ImportRecord{
-				Kind:     ast.URLToken,
-				Path:     logger.Path{Text: path},
-				Range:    r,
-				IsUnused: !allowImports,
+				Kind:     ast.ImportURL,
+				Path:     logger.Path{Text: token.Text},
+				Range:    t.Range,
+				IsUnused: !opts.allowImports,
 			})
+			token.Text = ""
 
 		case css_lexer.TFunction:
 			var nested []css_ast.Token
 			original := tokens
-			nested, tokens = p.convertTokensHelper(tokens, css_lexer.TCloseParen, allowImports)
+			nestedOpts := opts
+			if token.Text == "var" {
+				// CSS variables require verbatim whitespace for correctness
+				nestedOpts.verbatimWhitespace = true
+			}
+			nested, tokens = p.convertTokensHelper(tokens, css_lexer.TCloseParen, nestedOpts)
 			token.Children = &nested
 
-			switch token.Text {
-			case "url(":
-				// Treat a URL function call with a string just like a URL token
-				if len(nested) == 1 {
-					if arg := nested[0]; arg.Kind == css_lexer.TString {
-						token.Kind = css_lexer.TURL
-						token.Text = ""
-						token.Children = nil
-						token.ImportRecordIndex = uint32(len(p.importRecords))
-						p.importRecords = append(p.importRecords, ast.ImportRecord{
-							Kind:     ast.URLToken,
-							Path:     logger.Path{Text: arg.Text},
-							Range:    original[0].Range,
-							IsUnused: !allowImports,
-						})
-					}
-				}
+			// Treat a URL function call with a string just like a URL token
+			if token.Text == "url" && len(nested) == 1 && nested[0].Kind == css_lexer.TString {
+				token.Kind = css_lexer.TURL
+				token.Text = ""
+				token.Children = nil
+				token.ImportRecordIndex = uint32(len(p.importRecords))
+				p.importRecords = append(p.importRecords, ast.ImportRecord{
+					Kind:     ast.ImportURL,
+					Path:     logger.Path{Text: nested[0].Text},
+					Range:    original[0].Range,
+					IsUnused: !opts.allowImports,
+				})
 			}
 
 		case css_lexer.TOpenParen:
 			var nested []css_ast.Token
-			nested, tokens = p.convertTokensHelper(tokens, css_lexer.TCloseParen, allowImports)
+			nested, tokens = p.convertTokensHelper(tokens, css_lexer.TCloseParen, opts)
 			token.Children = &nested
 
 		case css_lexer.TOpenBrace:
 			var nested []css_ast.Token
-			nested, tokens = p.convertTokensHelper(tokens, css_lexer.TCloseBrace, allowImports)
+			nested, tokens = p.convertTokensHelper(tokens, css_lexer.TCloseBrace, opts)
+
+			// Pretty-printing: insert leading and trailing whitespace when not minifying
+			if !opts.verbatimWhitespace && !p.options.RemoveWhitespace && len(nested) > 0 {
+				nested[0].Whitespace |= css_ast.WhitespaceBefore
+				nested[len(nested)-1].Whitespace |= css_ast.WhitespaceAfter
+			}
+
 			token.Children = &nested
 
 		case css_lexer.TOpenBracket:
 			var nested []css_ast.Token
-			nested, tokens = p.convertTokensHelper(tokens, css_lexer.TCloseBracket, allowImports)
+			nested, tokens = p.convertTokensHelper(tokens, css_lexer.TCloseBracket, opts)
 			token.Children = &nested
-
-		default:
-			if t.Kind == close {
-				break loop
-			}
 		}
 
 		result = append(result, token)
 	}
+
+	if !opts.verbatimWhitespace {
+		for i := range result {
+			token := &result[i]
+
+			// Always remove leading and trailing whitespace
+			if i == 0 {
+				token.Whitespace &= ^css_ast.WhitespaceBefore
+			}
+			if i+1 == len(result) {
+				token.Whitespace &= ^css_ast.WhitespaceAfter
+			}
+
+			switch token.Kind {
+			case css_lexer.TComma:
+				// Assume that whitespace can always be removed before a comma
+				token.Whitespace &= ^css_ast.WhitespaceBefore
+				if i > 0 {
+					result[i-1].Whitespace &= ^css_ast.WhitespaceAfter
+				}
+
+				// Assume whitespace can always be added after a comma
+				if p.options.RemoveWhitespace {
+					token.Whitespace &= ^css_ast.WhitespaceAfter
+					if i+1 < len(result) {
+						result[i+1].Whitespace &= ^css_ast.WhitespaceBefore
+					}
+				} else {
+					token.Whitespace |= css_ast.WhitespaceAfter
+					if i+1 < len(result) {
+						result[i+1].Whitespace |= css_ast.WhitespaceBefore
+					}
+				}
+			}
+		}
+	}
+
+	// Insert an explicit whitespace token if we're in verbatim mode and all
+	// tokens were whitespace. In this case there is no token to attach the
+	// whitespace before/after flags so this is the only way to represent this.
+	// This is the only case where this function generates an explicit whitespace
+	// token. It represents whitespace as flags in all other cases.
+	if opts.verbatimWhitespace && len(result) == 0 && nextWhitespace == css_ast.WhitespaceBefore {
+		result = append(result, css_ast.Token{
+			Kind: css_lexer.TWhitespace,
+		})
+	}
+
 	return result, tokens
 }
 
@@ -613,6 +807,9 @@ func mangleNumber(t string) (string, bool) {
 		// Remove the decimal point if it's unnecessary
 		if dot+1 == len(t) {
 			t = t[:dot]
+			if t == "" || t == "+" || t == "-" {
+				t += "0"
+			}
 		} else {
 			// Remove a leading zero
 			if len(t) >= 3 && t[0] == '0' && t[1] == '.' && t[2] >= '0' && t[2] <= '9' {
@@ -687,8 +884,6 @@ func (p *parser) parseDeclaration() css_ast.R {
 		if p.expect(css_lexer.TColon) {
 			ok = true
 		}
-	} else {
-		p.advance()
 	}
 
 	// Parse the value
@@ -720,34 +915,49 @@ stop:
 		}
 	}
 
-	// Remove leading and trailing whitespace from the value
-	value := trimWhitespace(p.tokens[valueStart:p.index])
+	keyToken := p.tokens[keyStart]
+	keyText := keyToken.DecodedText(p.source.Contents)
+	value := p.tokens[valueStart:p.index]
+	verbatimWhitespace := strings.HasPrefix(keyText, "--")
 
 	// Remove trailing "!important"
 	important := false
-	if last := len(value) - 1; last >= 0 {
-		if t := value[last]; t.Kind == css_lexer.TIdent && strings.EqualFold(t.Raw(p.source.Contents), "important") {
-			i := len(value) - 2
-			if i >= 0 && value[i].Kind == css_lexer.TWhitespace {
-				i--
-			}
-			if i >= 0 && value[i].Kind == css_lexer.TDelimExclamation {
-				if i >= 1 && value[i-1].Kind == css_lexer.TWhitespace {
-					i--
-				}
-				value = value[:i]
-				important = true
-			}
+	i := len(value) - 1
+	if i >= 0 && value[i].Kind == css_lexer.TWhitespace {
+		i--
+	}
+	if i >= 0 && value[i].Kind == css_lexer.TIdent && strings.EqualFold(value[i].DecodedText(p.source.Contents), "important") {
+		i--
+		if i >= 0 && value[i].Kind == css_lexer.TWhitespace {
+			i--
+		}
+		if i >= 0 && value[i].Kind == css_lexer.TDelimExclamation {
+			value = value[:i]
+			important = true
 		}
 	}
 
-	keyToken := p.tokens[keyStart]
-	keyText := keyToken.Raw(p.source.Contents)
+	result, _ := p.convertTokensHelper(value, css_lexer.TEndOfFile, convertTokensOpts{
+		allowImports: true,
+
+		// CSS variables require verbatim whitespace for correctness
+		verbatimWhitespace: verbatimWhitespace,
+	})
+
+	// Insert or remove whitespace before the first token
+	if !verbatimWhitespace && len(result) > 0 {
+		if p.options.RemoveWhitespace {
+			result[0].Whitespace &= ^css_ast.WhitespaceBefore
+		} else {
+			result[0].Whitespace |= css_ast.WhitespaceBefore
+		}
+	}
+
 	return &css_ast.RDeclaration{
 		Key:       css_ast.KnownDeclarations[keyText],
 		KeyText:   keyText,
 		KeyRange:  keyToken.Range,
-		Value:     p.convertTokensWithImports(value),
+		Value:     result,
 		Important: important,
 	}
 }
@@ -785,14 +995,4 @@ func (p *parser) parseBlock(open css_lexer.T, close css_lexer.T) {
 			p.parseComponentValue()
 		}
 	}
-}
-
-func trimWhitespace(tokens []css_lexer.Token) []css_lexer.Token {
-	if len(tokens) > 0 && tokens[0].Kind == css_lexer.TWhitespace {
-		tokens = tokens[1:]
-	}
-	if i := len(tokens) - 1; i >= 0 && tokens[i].Kind == css_lexer.TWhitespace {
-		tokens = tokens[:i]
-	}
-	return tokens
 }

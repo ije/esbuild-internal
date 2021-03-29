@@ -206,8 +206,8 @@ func TestTSImportMissingES6(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/out.js",
 		},
-		expectedCompileLog: `/entry.ts: error: No matching export for import "default"
-/entry.ts: error: No matching export for import "y"
+		expectedCompileLog: `entry.ts: error: No matching export in "foo.js" for import "default"
+entry.ts: error: No matching export in "foo.js" for import "y"
 `,
 	})
 }
@@ -266,7 +266,7 @@ func TestTSImportMissingFile(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/out.js",
 		},
-		expectedScanLog: `/entry.ts: error: Could not resolve "./doesNotExist.ts"
+		expectedScanLog: `entry.ts: error: Could not resolve "./doesNotExist.ts"
 `,
 	})
 }
@@ -521,7 +521,8 @@ func TestTypeScriptDecorators(t *testing.T) {
 				import {i} from './i'
 				import {j} from './j'
 				import k from './k'
-				console.log(all, all_computed, a, b, c, d, e, f, g, h, i, j, k)
+				import {fn} from './arguments'
+				console.log(all, all_computed, a, b, c, d, e, f, g, h, i, j, k, fn)
 			`,
 			"/all.ts": `
 				@x.y()
@@ -529,6 +530,7 @@ func TestTypeScriptDecorators(t *testing.T) {
 				export default class Foo {
 					@x @y mUndef
 					@x @y mDef = 1
+					constructor(@x0 @y0 arg0, @x1 @y1 arg1) {}
 					@x @y method(@x0 @y0 arg0, @x1 @y1 arg1) { return new Foo }
 					@x @y static sUndef
 					@x @y static sDef = new Foo
@@ -622,6 +624,16 @@ func TestTypeScriptDecorators(t *testing.T) {
 			"/k.ts": `
 				export default class {
 					foo(@x(() => 0) @y(() => 1) x) {}
+				}
+			`,
+			"/arguments.ts": `
+				function dec(x: any): any {}
+				export function fn(x: string): any {
+					class Foo {
+						@dec(arguments[0])
+						[arguments[0]]() {}
+					}
+					return Foo;
 				}
 			`,
 		},
@@ -820,16 +832,16 @@ func TestTSImplicitExtensionsMissing(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/out.js",
 		},
-		expectedScanLog: `/entry.ts: error: Could not resolve "./mjs.mjs"
-/entry.ts: error: Could not resolve "./cjs.cjs"
-/entry.ts: error: Could not resolve "./js.js"
-/entry.ts: error: Could not resolve "./jsx.jsx"
+		expectedScanLog: `entry.ts: error: Could not resolve "./mjs.mjs"
+entry.ts: error: Could not resolve "./cjs.cjs"
+entry.ts: error: Could not resolve "./js.js"
+entry.ts: error: Could not resolve "./jsx.jsx"
 `,
 	})
 }
 
 func TestExportTypeIssue379(t *testing.T) {
-	default_suite.expectBundled(t, bundled{
+	ts_suite.expectBundled(t, bundled{
 		files: map[string]string{
 			"/entry.ts": `
 				import * as A from './a'

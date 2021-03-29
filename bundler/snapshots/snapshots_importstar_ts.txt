@@ -1,166 +1,168 @@
 TestTSImportStarAndCommonJS
 ---------- /out.js ----------
-// /foo.ts
-var require_foo = __commonJS((exports) => {
-  __export(exports, {
-    foo: () => foo2
-  });
-  const foo2 = 123;
+// foo.ts
+var foo_exports = {};
+__export(foo_exports, {
+  foo: () => foo
+});
+var foo;
+var init_foo = __esm(() => {
+  foo = 123;
 });
 
-// /entry.js
-const ns = __toModule(require_foo());
-const ns2 = require_foo();
-console.log(ns.foo, ns2.foo);
+// entry.js
+init_foo();
+var ns2 = (init_foo(), foo_exports);
+console.log(foo, ns2.foo);
 
 ================================================================================
 TestTSImportStarCapture
 ---------- /out.js ----------
-// /foo.ts
-const foo_exports = {};
+// foo.ts
+var foo_exports = {};
 __export(foo_exports, {
   foo: () => foo
 });
-const foo = 123;
+var foo = 123;
 
-// /entry.ts
-let foo2 = 234;
+// entry.ts
+var foo2 = 234;
 console.log(foo_exports, foo, foo2);
 
 ================================================================================
 TestTSImportStarCommonJSCapture
 ---------- /out.js ----------
-// /foo.ts
+// foo.ts
 var require_foo = __commonJS((exports) => {
   exports.foo = 123;
 });
 
-// /entry.ts
-const ns = __toModule(require_foo());
-let foo = 234;
+// entry.ts
+var ns = __toModule(require_foo());
+var foo = 234;
 console.log(ns, ns.foo, foo);
 
 ================================================================================
 TestTSImportStarCommonJSNoCapture
 ---------- /out.js ----------
-// /foo.ts
+// foo.ts
 var require_foo = __commonJS((exports) => {
   exports.foo = 123;
 });
 
-// /entry.ts
-const ns = __toModule(require_foo());
-let foo2 = 234;
+// entry.ts
+var ns = __toModule(require_foo());
+var foo2 = 234;
 console.log(ns.foo, ns.foo, foo2);
 
 ================================================================================
 TestTSImportStarCommonJSUnused
 ---------- /out.js ----------
-// /entry.ts
-let foo = 234;
+// entry.ts
+var foo = 234;
 console.log(foo);
 
 ================================================================================
 TestTSImportStarExportImportStarCapture
 ---------- /out.js ----------
-// /foo.ts
-const foo_exports = {};
+// foo.ts
+var foo_exports = {};
 __export(foo_exports, {
   foo: () => foo
 });
-const foo = 123;
+var foo = 123;
 
-// /entry.ts
-let foo2 = 234;
+// entry.ts
+var foo2 = 234;
 console.log(foo_exports, foo_exports.foo, foo2);
 
 ================================================================================
 TestTSImportStarExportImportStarNoCapture
 ---------- /out.js ----------
-// /foo.ts
-const foo_exports = {};
+// foo.ts
+var foo_exports = {};
 __export(foo_exports, {
   foo: () => foo
 });
-const foo = 123;
+var foo = 123;
 
-// /entry.ts
-let foo2 = 234;
+// entry.ts
+var foo2 = 234;
 console.log(foo_exports.foo, foo_exports.foo, foo2);
 
 ================================================================================
 TestTSImportStarExportImportStarUnused
 ---------- /out.js ----------
-// /entry.ts
-let foo = 234;
+// entry.ts
+var foo = 234;
 console.log(foo);
 
 ================================================================================
 TestTSImportStarExportStarAsCapture
 ---------- /out.js ----------
-// /foo.ts
-const foo_exports = {};
+// foo.ts
+var foo_exports = {};
 __export(foo_exports, {
   foo: () => foo
 });
-const foo = 123;
+var foo = 123;
 
-// /entry.ts
-let foo2 = 234;
+// entry.ts
+var foo2 = 234;
 console.log(foo_exports, foo_exports.foo, foo2);
 
 ================================================================================
 TestTSImportStarExportStarAsNoCapture
 ---------- /out.js ----------
-// /foo.ts
-const foo_exports = {};
+// foo.ts
+var foo_exports = {};
 __export(foo_exports, {
   foo: () => foo
 });
-const foo = 123;
+var foo = 123;
 
-// /entry.ts
-let foo2 = 234;
+// entry.ts
+var foo2 = 234;
 console.log(foo_exports.foo, foo_exports.foo, foo2);
 
 ================================================================================
 TestTSImportStarExportStarAsUnused
 ---------- /out.js ----------
-// /entry.ts
-let foo = 234;
+// entry.ts
+var foo = 234;
 console.log(foo);
 
 ================================================================================
 TestTSImportStarExportStarCapture
 ---------- /out.js ----------
-// /bar.ts
-const bar_exports = {};
+// bar.ts
+var bar_exports = {};
 __export(bar_exports, {
   foo: () => foo
 });
 
-// /foo.ts
-const foo = 123;
+// foo.ts
+var foo = 123;
 
-// /entry.ts
-let foo2 = 234;
+// entry.ts
+var foo2 = 234;
 console.log(bar_exports, foo, foo2);
 
 ================================================================================
 TestTSImportStarExportStarNoCapture
 ---------- /out.js ----------
-// /foo.ts
-const foo = 123;
+// foo.ts
+var foo = 123;
 
-// /entry.ts
-let foo2 = 234;
+// entry.ts
+var foo2 = 234;
 console.log(foo, foo, foo2);
 
 ================================================================================
 TestTSImportStarExportStarUnused
 ---------- /out.js ----------
-// /entry.ts
-let foo = 234;
+// entry.ts
+var foo = 234;
 console.log(foo);
 
 ================================================================================
@@ -206,16 +208,34 @@ console.log(foo);
 ================================================================================
 TestTSImportStarNoCapture
 ---------- /out.js ----------
-// /foo.ts
-const foo = 123;
+// foo.ts
+var foo = 123;
 
-// /entry.ts
-let foo2 = 234;
+// entry.ts
+var foo2 = 234;
 console.log(foo, foo, foo2);
 
 ================================================================================
 TestTSImportStarUnused
 ---------- /out.js ----------
-// /entry.ts
-let foo = 234;
+// entry.ts
+var foo = 234;
+console.log(foo);
+
+================================================================================
+TestTSReExportTypeOnlyFileES6
+---------- /out.js ----------
+// types1.ts
+console.log("some code");
+
+// types2.ts
+console.log("some code");
+
+// types3.ts
+console.log("some code");
+
+// values.ts
+var foo = 123;
+
+// entry.ts
 console.log(foo);

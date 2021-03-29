@@ -48,14 +48,31 @@ type Token struct {
 
 	// This will never be "TWhitespace" because whitespace isn't stored as a
 	// token directly. Instead it is stored in "HasWhitespaceAfter" on the
-	// previous token.
+	// previous token. This is to make it easier to pattern-match against
+	// tokens when handling CSS rules, since whitespace almost always doesn't
+	// matter. That way you can pattern match against e.g. "rgb(r, g, b)" and
+	// not have to handle all possible combinations of embedded whitespace
+	// tokens.
+	//
+	// There is one exception to this: when in verbatim whitespace mode and
+	// the token list is non-empty and is only whitespace tokens. In that case
+	// a single whitespace token is emitted. This is because otherwise there
+	// would be no tokens to attach the whitespace before/after flags to.
 	Kind css_lexer.T // 1 byte
 
-	// This is generally true if there was a "TWhitespace" token before this
-	// token. This isn't strictly true in some cases because sometimes this flag
-	// is changed to make the generated code look better (e.g. around commas).
-	HasWhitespaceAfter bool // 1 byte
+	// These flags indicate the presence of a "TWhitespace" token before or after
+	// this token. There should be whitespace printed between two tokens if either
+	// token indicates that there should be whitespace. Note that whitespace may
+	// be altered by processing in certain situations (e.g. minification).
+	Whitespace WhitespaceFlags // 1 byte
 }
+
+type WhitespaceFlags uint8
+
+const (
+	WhitespaceBefore WhitespaceFlags = 1 << iota
+	WhitespaceAfter
+)
 
 func (t Token) PercentValue() string {
 	return t.Text[:len(t.Text)-1]
@@ -79,13 +96,9 @@ type RAtCharset struct {
 	Encoding string
 }
 
-type RAtNamespace struct {
-	Prefix string
-	Path   string
-}
-
 type RAtImport struct {
 	ImportRecordIndex uint32
+	ImportConditions  []Token
 }
 
 type RAtKeyframes struct {
@@ -134,7 +147,6 @@ type RBadDeclaration struct {
 }
 
 func (*RAtCharset) isRule()      {}
-func (*RAtNamespace) isRule()    {}
 func (*RAtImport) isRule()       {}
 func (*RAtKeyframes) isRule()    {}
 func (*RKnownAt) isRule()        {}
@@ -156,12 +168,17 @@ type CompoundSelector struct {
 	PseudoClassSelectors []SSPseudoClass // If present, these follow a ":" character
 }
 
+type NameToken struct {
+	Kind css_lexer.T
+	Text string
+}
+
 type NamespacedName struct {
-	// If present, this is an identifier or "*" or "" and is followed by a "|" character
-	NamespacePrefix *string
+	// If present, this is an identifier or "*" and is followed by a "|" character
+	NamespacePrefix *NameToken
 
 	// This is an identifier or "*" or "&"
-	Name string
+	Name NameToken
 }
 
 // This interface is never called. Its purpose is to encode a variant type in

@@ -1,27 +1,32 @@
 ESBUILD_VERSION = $(shell cat version.txt)
 
-esbuild: cmd/esbuild/*.go pkg/*/*.go internal/*/*.go go.mod
+esbuild: cmd/esbuild/version.go cmd/esbuild/*.go pkg/*/*.go internal/*/*.go go.mod
 	go build "-ldflags=-s -w" ./cmd/esbuild
 
-npm/esbuild-wasm/esbuild.wasm: cmd/esbuild/*.go pkg/*/*.go internal/*/*.go
-	GOOS=js GOARCH=wasm go build -o npm/esbuild-wasm/esbuild.wasm ./cmd/esbuild
-
-npm/esbuild-wasm/wasm_exec.js:
-	cp "$(shell go env GOROOT)/misc/wasm/wasm_exec.js" npm/esbuild-wasm/wasm_exec.js
+test:
+	make -j6 test-common
 
 # These tests are for development
-test:
-	make -j5 test-go vet-go verify-source-map end-to-end-tests js-api-tests
+test-common: test-go vet-go no-filepath verify-source-map end-to-end-tests js-api-tests plugin-tests register-test node-unref-tests
 
-# These tests are for release ("test-wasm" is not included in "test" because it's pretty slow)
+# These tests are for release (the extra tests are not included in "test" because they are pretty slow)
 test-all:
-	make -j6 test-go vet-go verify-source-map end-to-end-tests js-api-tests test-wasm
+	make -j6 test-common ts-type-tests test-wasm-node test-wasm-browser lib-typecheck
 
 # This includes tests of some 3rd-party libraries, which can be very slow
-test-extra: test-all test-preact-splitting test-sucrase bench-rome-esbuild test-esprima test-rollup
+test-prepublish: check-go-version test-all test-preact-splitting test-sucrase bench-rome-esbuild test-esprima test-rollup
+
+check-go-version:
+	@go version | grep ' go1\.16\.2 ' || (echo 'Please install Go version 1.16.2' && false)
+
+# This "ESBUILD_RACE" variable exists at the request of a user on GitHub who
+# wants to run "make test" on an unsupported version of macOS (version 10.9).
+# Go's race detector does not run correctly on that version. With this flag
+# you can run "ESBUILD_RACE= make test" to disable the race detector.
+ESBUILD_RACE ?= -race
 
 test-go:
-	go test ./internal/...
+	go test $(ESBUILD_RACE) ./internal/...
 
 vet-go:
 	go vet ./cmd/... ./internal/... ./pkg/...
@@ -29,34 +34,84 @@ vet-go:
 fmt-go:
 	go fmt ./cmd/... ./internal/... ./pkg/...
 
-test-wasm:
-	PATH="$(shell go env GOROOT)/misc/wasm:$$PATH" GOOS=js GOARCH=wasm go test ./internal/...
+no-filepath:
+	@! grep --color --include '*.go' -r '"path/filepath"' cmd internal pkg || ( \
+		echo 'error: Use of "path/filepath" is disallowed. See http://golang.org/issue/43768.' && false)
 
-verify-source-map: | scripts/node_modules
+test-wasm-node: esbuild
+	PATH="$(shell go env GOROOT)/misc/wasm:$$PATH" GOOS=js GOARCH=wasm go test ./internal/...
+	node scripts/wasm-tests.js
+
+test-wasm-browser: platform-wasm | scripts/browser/node_modules
+	cd scripts/browser && node browser-tests.js
+
+register-test: cmd/esbuild/version.go | scripts/node_modules
+	cd npm/esbuild && npm version "$(ESBUILD_VERSION)" --allow-same-version
+	node scripts/register-test.js
+
+verify-source-map: cmd/esbuild/version.go | scripts/node_modules
 	cd npm/esbuild && npm version "$(ESBUILD_VERSION)" --allow-same-version
 	node scripts/verify-source-map.js
 
-end-to-end-tests: | scripts/node_modules
+end-to-end-tests: cmd/esbuild/version.go | scripts/node_modules
 	cd npm/esbuild && npm version "$(ESBUILD_VERSION)" --allow-same-version
 	node scripts/end-to-end-tests.js
 
-js-api-tests: | scripts/node_modules
+js-api-tests: cmd/esbuild/version.go | scripts/node_modules
 	cd npm/esbuild && npm version "$(ESBUILD_VERSION)" --allow-same-version
 	node scripts/js-api-tests.js
 
-update-version-go:
-	node -e 'console.log(`package main\n\nconst esbuildVersion = "$(ESBUILD_VERSION)"`)' > cmd/esbuild/version.go
+plugin-tests: cmd/esbuild/version.go | scripts/node_modules
+	node scripts/plugin-tests.js
 
-platform-all: update-version-go test-all
-	make -j11 \
+ts-type-tests: | scripts/node_modules
+	node scripts/ts-type-tests.js
+
+node-unref-tests: | scripts/node_modules
+	node scripts/node-unref-tests.js
+
+lib-typecheck: | lib/node_modules
+	cd lib && node_modules/.bin/tsc -noEmit -p .
+
+cmd/esbuild/version.go: version.txt
+	# Update this atomically to avoid issues with this being overwritten during use
+	node -e 'console.log(`package main\n\nconst esbuildVersion = "$(ESBUILD_VERSION)"`)' > cmd/esbuild/version.go.txt
+	mv cmd/esbuild/version.go.txt cmd/esbuild/version.go
+
+wasm-napi-exit0-darwin:
+	node -e 'console.log(`#include <unistd.h>\nvoid* napi_register_module_v1(void* a, void* b) { _exit(0); }`)' \
+		| clang -x c -dynamiclib -mmacosx-version-min=10.5 -o npm/esbuild-wasm/exit0/darwin-x64-LE.node -
+	ls -l npm/esbuild-wasm/exit0/darwin-x64-LE.node
+
+wasm-napi-exit0-linux:
+	node -e 'console.log(`#include <unistd.h>\nvoid* napi_register_module_v1(void* a, void* b) { _exit(0); }`)' \
+		| gcc -x c -shared -o npm/esbuild-wasm/exit0/linux-x64-LE.node -
+	strip npm/esbuild-wasm/exit0/linux-x64-LE.node
+	ls -l npm/esbuild-wasm/exit0/linux-x64-LE.node
+
+wasm-napi-exit0-windows:
+	# This isn't meant to be run directly but is a rough overview of the instructions
+	echo '__declspec(dllexport) void* napi_register_module_v1(void* a, void* b) { ExitProcess(0); }' > main.c
+	echo 'setlocal' > main.bat
+	echo 'call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvarsall.bat" x64' >> main.bat
+	echo 'cl.exe /LD main.c /link /DLL /NODEFAULTLIB /NOENTRY kernel32.lib /OUT:npm/esbuild-wasm/exit0/win32-x64-LE.node' >> main.bat
+	main.bat
+	rm -f main.*
+
+platform-all: cmd/esbuild/version.go test-all
+	make -j8 \
 		platform-windows \
 		platform-windows-32 \
+		platform-android-arm64 \
 		platform-darwin \
+		platform-darwin-arm64 \
 		platform-freebsd \
 		platform-freebsd-arm64 \
 		platform-linux \
 		platform-linux-32 \
+		platform-linux-arm \
 		platform-linux-arm64 \
+		platform-linux-mips64le \
 		platform-linux-ppc64le \
 		platform-wasm \
 		platform-neutral
@@ -75,8 +130,14 @@ platform-unixlike:
 	cd "$(NPMDIR)" && npm version "$(ESBUILD_VERSION)" --allow-same-version
 	GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build "-ldflags=-s -w" -o "$(NPMDIR)/bin/esbuild" ./cmd/esbuild
 
+platform-android-arm64:
+	make GOOS=android GOARCH=arm64 NPMDIR=npm/esbuild-android-arm64 platform-unixlike
+
 platform-darwin:
 	make GOOS=darwin GOARCH=amd64 NPMDIR=npm/esbuild-darwin-64 platform-unixlike
+
+platform-darwin-arm64:
+	make GOOS=darwin GOARCH=arm64 NPMDIR=npm/esbuild-darwin-arm64 platform-unixlike
 
 platform-freebsd:
 	make GOOS=freebsd GOARCH=amd64 NPMDIR=npm/esbuild-freebsd-64 platform-unixlike
@@ -90,41 +151,56 @@ platform-linux:
 platform-linux-32:
 	make GOOS=linux GOARCH=386 NPMDIR=npm/esbuild-linux-32 platform-unixlike
 
+platform-linux-arm:
+	make GOOS=linux GOARCH=arm NPMDIR=npm/esbuild-linux-arm platform-unixlike
+
 platform-linux-arm64:
 	make GOOS=linux GOARCH=arm64 NPMDIR=npm/esbuild-linux-arm64 platform-unixlike
+
+platform-linux-mips64le:
+	make GOOS=linux GOARCH=mips64le NPMDIR=npm/esbuild-linux-mips64le platform-unixlike
 
 platform-linux-ppc64le:
 	make GOOS=linux GOARCH=ppc64le NPMDIR=npm/esbuild-linux-ppc64le platform-unixlike
 
-platform-wasm: esbuild npm/esbuild-wasm/esbuild.wasm | scripts/node_modules npm/esbuild-wasm/wasm_exec.js
+platform-wasm: esbuild | scripts/node_modules
 	cd npm/esbuild-wasm && npm version "$(ESBUILD_VERSION)" --allow-same-version
-	mkdir -p npm/esbuild-wasm/lib
 	node scripts/esbuild.js ./esbuild --wasm
 
-platform-neutral: esbuild | scripts/node_modules
+platform-neutral: esbuild lib-typecheck | scripts/node_modules
 	cd npm/esbuild && npm version "$(ESBUILD_VERSION)" --allow-same-version
 	node scripts/esbuild.js ./esbuild
 
 test-otp:
 	test -n "$(OTP)" && echo publish --otp="$(OTP)"
 
-publish-all: update-version-go test-all test-extra
+publish-all: cmd/esbuild/version.go test-prepublish
+	@test master = "`git rev-parse --abbrev-ref HEAD`" || (echo "Refusing to publish from non-master branch `git rev-parse --abbrev-ref HEAD`" && false)
+	@echo "Checking for unpushed commits..." && git fetch
+	@test "" = "`git cherry`" || (echo "Refusing to publish with unpushed commits" && false)
 	rm -fr npm && git checkout npm
 	@echo Enter one-time password:
-	@read OTP && OTP="$$OTP" make -j5 \
+	@read OTP && OTP="$$OTP" make -j4 \
 		publish-windows \
 		publish-windows-32 \
-		publish-darwin \
 		publish-freebsd \
-		publish-freebsd-arm64
+		publish-freebsd-arm64 \
+		publish-darwin \
+		publish-darwin-arm64
 	@echo Enter one-time password:
-	@read OTP && OTP="$$OTP" make -j5 \
+	@read OTP && OTP="$$OTP" make -j4 \
+		publish-android-arm64 \
 		publish-linux \
 		publish-linux-32 \
+		publish-linux-arm \
 		publish-linux-arm64 \
-		publish-linux-ppc64le \
+		publish-linux-mips64le \
+		publish-linux-ppc64le
+	# Do these last to avoid race conditions
+	@echo Enter one-time password:
+	@read OTP && OTP="$$OTP" make -j2 \
+		publish-neutral \
 		publish-wasm
-	make publish-neutral # Do this after to avoid race conditions
 	git commit -am "publish $(ESBUILD_VERSION) to npm"
 	git tag "v$(ESBUILD_VERSION)"
 	git push origin master "v$(ESBUILD_VERSION)"
@@ -135,8 +211,14 @@ publish-windows: platform-windows
 publish-windows-32: platform-windows-32
 	test -n "$(OTP)" && cd npm/esbuild-windows-32 && npm publish --otp="$(OTP)"
 
+publish-android-arm64: platform-android-arm64
+	test -n "$(OTP)" && cd npm/esbuild-android-arm64 && npm publish --otp="$(OTP)"
+
 publish-darwin: platform-darwin
 	test -n "$(OTP)" && cd npm/esbuild-darwin-64 && npm publish --otp="$(OTP)"
+
+publish-darwin-arm64: platform-darwin-arm64
+	test -n "$(OTP)" && cd npm/esbuild-darwin-arm64 && npm publish --otp="$(OTP)"
 
 publish-freebsd: platform-freebsd
 	test -n "$(OTP)" && cd npm/esbuild-freebsd-64 && npm publish --otp="$(OTP)"
@@ -150,8 +232,14 @@ publish-linux: platform-linux
 publish-linux-32: platform-linux-32
 	test -n "$(OTP)" && cd npm/esbuild-linux-32 && npm publish --otp="$(OTP)"
 
+publish-linux-arm: platform-linux-arm
+	test -n "$(OTP)" && cd npm/esbuild-linux-arm && npm publish --otp="$(OTP)"
+
 publish-linux-arm64: platform-linux-arm64
 	test -n "$(OTP)" && cd npm/esbuild-linux-arm64 && npm publish --otp="$(OTP)"
+
+publish-linux-mips64le: platform-linux-mips64le
+	test -n "$(OTP)" && cd npm/esbuild-linux-mips64le && npm publish --otp="$(OTP)"
 
 publish-linux-ppc64le: platform-linux-ppc64le
 	test -n "$(OTP)" && cd npm/esbuild-linux-ppc64le && npm publish --otp="$(OTP)"
@@ -160,22 +248,29 @@ publish-wasm: platform-wasm
 	test -n "$(OTP)" && cd npm/esbuild-wasm && npm publish --otp="$(OTP)"
 
 publish-neutral: platform-neutral
-	cd npm/esbuild && npm publish
+	test -n "$(OTP)" && cd npm/esbuild && npm publish --otp="$(OTP)"
 
 clean:
 	rm -f esbuild
 	rm -f npm/esbuild-windows-32/esbuild.exe
 	rm -f npm/esbuild-windows-64/esbuild.exe
+	rm -rf npm/esbuild-android-arm64/bin
 	rm -rf npm/esbuild-darwin-64/bin
+	rm -rf npm/esbuild-darwin-arm64/bin
 	rm -rf npm/esbuild-freebsd-64/bin
 	rm -rf npm/esbuild-freebsd-amd64/bin
 	rm -rf npm/esbuild-linux-32/bin
 	rm -rf npm/esbuild-linux-64/bin
+	rm -rf npm/esbuild-linux-arm/bin
 	rm -rf npm/esbuild-linux-arm64/bin
+	rm -rf npm/esbuild-linux-mips64le/bin
 	rm -rf npm/esbuild-linux-ppc64le/bin
 	rm -f npm/esbuild-wasm/esbuild.wasm npm/esbuild-wasm/wasm_exec.js
 	rm -rf npm/esbuild/lib
 	rm -rf npm/esbuild-wasm/lib
+	rm -rf require/*/bench/
+	rm -rf require/*/demo/
+	rm -rf require/*/node_modules/
 	go clean -testcache ./internal/...
 
 # This also cleans directories containing cached code from other projects
@@ -183,45 +278,36 @@ clean-all: clean
 	rm -fr github demo bench
 
 ################################################################################
-# These npm packages are used for benchmarks. Instal them in subdirectories
+# These npm packages are used for benchmarks. Install them in subdirectories
 # because we want to install the same package name at multiple versions
 
 require/webpack/node_modules:
-	mkdir -p require/webpack
-	echo '{}' > require/webpack/package.json
-	cd require/webpack && npm install webpack@4.43.0 webpack-cli@3.3.11 ts-loader@7.0.5 typescript@3.9.3
+	cd require/webpack && npm ci
 
 require/webpack5/node_modules:
-	mkdir -p require/webpack5
-	echo '{}' > require/webpack5/package.json
-	cd require/webpack5 && npm install webpack@5.0.0-beta.25 webpack-cli@3.3.12
+	cd require/webpack5 && npm ci
 
 require/rollup/node_modules:
-	mkdir -p require/rollup
-	echo '{}' > require/rollup/package.json
-	cd require/rollup && npm install rollup@2.10.9 rollup-plugin-terser@6.1.0
+	cd require/rollup && npm ci
 
 require/parcel/node_modules:
-	mkdir -p require/parcel
-	echo '{}' > require/parcel/package.json
-	cd require/parcel && npm install parcel@1.12.4
+	cd require/parcel && npm ci
 
 	# Fix a bug where parcel doesn't know about one specific node builtin module
 	mkdir -p require/parcel/node_modules/inspector
 	touch require/parcel/node_modules/inspector/index.js
 
-require/fusebox/node_modules:
-	mkdir -p require/fusebox
-	echo '{}' > require/fusebox/package.json
-	cd require/fusebox && npm install fuse-box@4.0.0-next.435
-
 require/parcel2/node_modules:
-	mkdir -p require/parcel2
-	echo '{}' > require/parcel2/package.json
-	cd require/parcel2 && npm install parcel@2.0.0-beta.1 @parcel/transformer-typescript-tsc@2.0.0-beta.1 typescript@3.9.5
+	cd require/parcel2 && npm ci
+
+lib/node_modules:
+	cd lib && npm ci
 
 scripts/node_modules:
 	cd scripts && npm ci
+
+scripts/browser/node_modules:
+	cd scripts/browser && npm ci
 
 ################################################################################
 # This downloads the kangax compat-table and generates browser support mappings
@@ -391,7 +477,7 @@ demo/three: | github/three
 	mkdir -p demo/three
 	cp -r github/three/src demo/three/src
 
-demo-three: demo-three-esbuild demo-three-rollup demo-three-webpack demo-three-webpack5 demo-three-parcel demo-three-parcel2 demo-three-fusebox
+demo-three: demo-three-esbuild demo-three-rollup demo-three-webpack demo-three-webpack5 demo-three-parcel demo-three-parcel2
 
 demo-three-esbuild: esbuild | demo/three
 	rm -fr demo/three/esbuild
@@ -399,7 +485,7 @@ demo-three-esbuild: esbuild | demo/three
 	du -h demo/three/esbuild/Three.esbuild.js*
 	shasum demo/three/esbuild/Three.esbuild.js*
 
-demo-three-eswasm: npm/esbuild-wasm/esbuild.wasm | demo/three npm/esbuild-wasm/wasm_exec.js
+demo-three-eswasm: platform-wasm | demo/three
 	rm -fr demo/three/eswasm
 	time -p ./npm/esbuild-wasm/bin/esbuild --bundle --global-name=THREE \
 		--sourcemap --minify demo/three/src/Three.js --outfile=demo/three/eswasm/Three.eswasm.js
@@ -442,7 +528,7 @@ demo-three-webpack5: | require/webpack5/node_modules demo/three
 	mkdir -p require/webpack5/demo/three demo/three/webpack5
 	ln -s ../../../../demo/three/src require/webpack5/demo/three/src
 	ln -s ../../../../demo/three/webpack5 require/webpack5/demo/three/out
-	cd require/webpack5/demo/three && time -p ../../node_modules/.bin/webpack src/Three.js $(THREE_WEBPACK5_FLAGS) -o out/Three.webpack5.js
+	cd require/webpack5/demo/three && time -p ../../node_modules/.bin/webpack --entry ./src/Three.js $(THREE_WEBPACK5_FLAGS) -o out/Three.webpack5.js
 	du -h demo/three/webpack5/Three.webpack5.js*
 
 THREE_PARCEL_FLAGS += --global THREE
@@ -461,30 +547,14 @@ demo-three-parcel: | require/parcel/node_modules demo/three
 demo-three-parcel2: | require/parcel2/node_modules demo/three
 	rm -fr require/parcel2/demo/three demo/three/parcel2
 	mkdir -p require/parcel2/demo/three demo/three/parcel2
-	ln -s ../../../../demo/three/src require/parcel2/demo/three/src
+
+	# Copy the whole source tree since symlinks mess up Parcel's internal package lookup for "@babel/core"
+	cp -r demo/three/src require/parcel2/demo/three/src
+
 	echo 'import * as THREE from "./src/Three.js"; window.THREE = THREE' > require/parcel2/demo/three/Three.parcel2.js
-	cd require/parcel2/demo/three && time -p ../../node_modules/.bin/parcel build --no-autoinstall Three.parcel2.js \
-		--dist-dir ../../../../demo/three/parcel2 --cache-dir .cache
+	cd require/parcel2/demo/three && time -p ../../node_modules/.bin/parcel build \
+		Three.parcel2.js --dist-dir ../../../../demo/three/parcel2 --cache-dir .cache
 	du -h demo/three/parcel2/Three.parcel2.js*
-
-THREE_FUSEBOX_RUN += require('fuse-box').fusebox({
-THREE_FUSEBOX_RUN +=   target: 'browser',
-THREE_FUSEBOX_RUN +=   entry: './fusebox-entry.js',
-THREE_FUSEBOX_RUN +=   useSingleBundle: true,
-THREE_FUSEBOX_RUN +=   output: './dist',
-THREE_FUSEBOX_RUN += }).runProd({
-THREE_FUSEBOX_RUN +=   bundles: { app: './app.js' },
-THREE_FUSEBOX_RUN += });
-
-demo-three-fusebox: | require/fusebox/node_modules demo/three
-	rm -fr require/fusebox/demo/three demo/three/fusebox
-	mkdir -p require/fusebox/demo/three demo/three/fusebox
-	echo "$(THREE_FUSEBOX_RUN)" > require/fusebox/demo/three/run.js
-	ln -s ../../../../demo/three/src require/fusebox/demo/three/src
-	ln -s ../../../../demo/three/fusebox require/fusebox/demo/three/dist
-	echo 'import * as THREE from "./src/Three.js"; window.THREE = THREE' > require/fusebox/demo/three/fusebox-entry.js
-	cd require/fusebox/demo/three && time -p node run.js
-	du -h demo/three/fusebox/app.js*
 
 ################################################################################
 # three.js benchmark (measures JavaScript performance, same as three.js demo but 10x bigger)
@@ -496,7 +566,7 @@ bench/three: | github/three
 	for i in 1 2 3 4 5 6 7 8 9 10; do echo "import * as copy$$i from './copy$$i/Three.js'; export {copy$$i}" >> bench/three/src/entry.js; done
 	echo 'Line count:' && find bench/three/src -name '*.js' | xargs wc -l | tail -n 1
 
-bench-three: bench-three-esbuild bench-three-rollup bench-three-webpack bench-three-webpack5 bench-three-parcel bench-three-fusebox
+bench-three: bench-three-esbuild bench-three-rollup bench-three-webpack bench-three-webpack5 bench-three-parcel bench-three-parcel2
 
 bench-three-esbuild: esbuild | bench/three
 	rm -fr bench/three/esbuild
@@ -504,7 +574,7 @@ bench-three-esbuild: esbuild | bench/three
 	du -h bench/three/esbuild/entry.esbuild.js*
 	shasum bench/three/esbuild/entry.esbuild.js*
 
-bench-three-eswasm: npm/esbuild-wasm/esbuild.wasm | bench/three npm/esbuild-wasm/wasm_exec.js
+bench-three-eswasm: platform-wasm | bench/three
 	rm -fr bench/three/eswasm
 	time -p ./npm/esbuild-wasm/bin/esbuild --bundle --global-name=THREE \
 		--sourcemap --minify bench/three/src/entry.js --outfile=bench/three/eswasm/entry.eswasm.js
@@ -533,8 +603,7 @@ bench-three-webpack5: | require/webpack5/node_modules bench/three
 	mkdir -p require/webpack5/bench/three bench/three/webpack5
 	ln -s ../../../../bench/three/src require/webpack5/bench/three/src
 	ln -s ../../../../bench/three/webpack5 require/webpack5/bench/three/out
-	cd require/webpack5/bench/three && time -p node --max-old-space-size=8192 \
-		../../node_modules/.bin/webpack src/entry.js $(THREE_WEBPACK5_FLAGS) -o out/entry.webpack5.js
+	cd require/webpack5/bench/three && time -p ../../node_modules/.bin/webpack --entry ./src/entry.js $(THREE_WEBPACK5_FLAGS) -o out/entry.webpack5.js
 	du -h bench/three/webpack5/entry.webpack5.js*
 
 bench-three-parcel: | require/parcel/node_modules bench/three
@@ -545,26 +614,17 @@ bench-three-parcel: | require/parcel/node_modules bench/three
 	cd require/parcel/bench/three && time -p ../../node_modules/.bin/parcel build src/entry.js $(THREE_PARCEL_FLAGS) --out-file entry.parcel.js
 	du -h bench/three/parcel/entry.parcel.js*
 
-# Note: This is currently broken because it runs out of memory. See
-# https://github.com/parcel-bundler/parcel/issues/4795 for details.
 bench-three-parcel2: | require/parcel2/node_modules bench/three
 	rm -fr require/parcel2/bench/three bench/three/parcel2
 	mkdir -p require/parcel2/bench/three bench/three/parcel2
-	ln -s ../../../../bench/three/src require/parcel2/bench/three/src
-	echo 'import * as THREE from "./src/entry.js"; window.THREE = THREE' > require/parcel2/bench/three/entry.parcel2.js
-	cd require/parcel2/bench/three && time -p ../../node_modules/.bin/parcel build --no-autoinstall entry.parcel2.js \
-		--dist-dir ../../../../bench/three/parcel2 --cache-dir .cache
-	du -h bench/three/parcel2/entry.parcel2.js*
 
-bench-three-fusebox: | require/fusebox/node_modules bench/three
-	rm -fr require/fusebox/bench/three bench/three/fusebox
-	mkdir -p require/fusebox/bench/three bench/three/fusebox
-	echo "$(THREE_FUSEBOX_RUN)" > require/fusebox/bench/three/run.js
-	ln -s ../../../../bench/three/src require/fusebox/bench/three/src
-	ln -s ../../../../bench/three/fusebox require/fusebox/bench/three/dist
-	echo 'import * as THREE from "./src/entry.js"; window.THREE = THREE' > require/fusebox/bench/three/fusebox-entry.js
-	cd require/fusebox/bench/three && time -p node --max-old-space-size=8192 run.js
-	du -h bench/three/fusebox/app.js*
+	# Copy the whole source tree since symlinks mess up Parcel's internal package lookup for "@babel/core"
+	cp -r bench/three/src require/parcel2/bench/three/src
+
+	echo 'import * as THREE from "./src/entry.js"; window.THREE = THREE' > require/parcel2/bench/three/entry.parcel2.js
+	cd require/parcel2/bench/three && time -p node ../../node_modules/.bin/parcel build \
+		entry.parcel2.js --dist-dir ../../../../bench/three/parcel2 --cache-dir .cache
+	du -h bench/three/parcel2/entry.parcel2.js*
 
 ################################################################################
 # Rome benchmark (measures TypeScript performance)
@@ -597,10 +657,11 @@ bench/rome: | github/rome
 	sed "/createHook/d" bench/rome/src/@romejs/js-compiler/index.ts >> .temp
 	mv .temp bench/rome/src/@romejs/js-compiler/index.ts
 
-	# These aliases are required to fix parcel path resolution
-	echo '{ "alias": {' > bench/rome/src/package.json
-	ls bench/rome/src/@romejs | sed 's/.*/"\@romejs\/&": ".\/@romejs\/&",/g' >> bench/rome/src/package.json
-	echo '"rome": "./rome" }}' >> bench/rome/src/package.json
+	# Replace "import fs = require('fs')" with "const fs = require('fs')" because
+	# the TypeScript compiler strips these statements when targeting "esnext",
+	# which breaks Parcel 2 when scope hoisting is enabled.
+	find bench/rome/src -name '*.ts' -type f -print0 | xargs -L1 -0 sed -i '' 's/import \([A-Za-z0-9_]*\) =/const \1 =/g'
+	find bench/rome/src -name '*.tsx' -type f -print0 | xargs -L1 -0 sed -i '' 's/import \([A-Za-z0-9_]*\) =/const \1 =/g'
 
 	# Get an approximate line count
 	rm -r bench/rome/src/@romejs/js-parser/test-fixtures
@@ -614,7 +675,7 @@ bench/rome-verify: | github/rome
 	cp -r github/rome/packages bench/rome-verify/packages
 	cp github/rome/package.json bench/rome-verify/package.json
 
-bench-rome: bench-rome-esbuild bench-rome-webpack bench-rome-parcel
+bench-rome: bench-rome-esbuild bench-rome-webpack bench-rome-webpack5 bench-rome-parcel bench-rome-parcel2
 
 bench-rome-esbuild: esbuild | bench/rome bench/rome-verify
 	rm -fr bench/rome/esbuild
@@ -646,18 +707,55 @@ bench-rome-webpack: | require/webpack/node_modules bench/rome bench/rome-verify
 	du -h bench/rome/webpack/rome.webpack.js*
 	cd bench/rome-verify && rm -fr webpack && ROME_CACHE=0 node ../rome/webpack/rome.webpack.js bundle packages/rome webpack
 
+ROME_WEBPACK5_CONFIG += module.exports = {
+ROME_WEBPACK5_CONFIG +=   entry: './src/entry.ts',
+ROME_WEBPACK5_CONFIG +=   mode: 'production',
+ROME_WEBPACK5_CONFIG +=   target: 'node',
+ROME_WEBPACK5_CONFIG +=   devtool: 'source-map',
+ROME_WEBPACK5_CONFIG +=   module: { rules: [{ test: /\.ts$$/, loader: 'ts-loader', options: { transpileOnly: true } }] },
+ROME_WEBPACK5_CONFIG +=   resolve: {
+ROME_WEBPACK5_CONFIG +=     extensions: ['.ts', '.js'],
+ROME_WEBPACK5_CONFIG +=     alias: { rome: __dirname + '/src/rome', '@romejs': __dirname + '/src/@romejs' },
+ROME_WEBPACK5_CONFIG +=   },
+ROME_WEBPACK5_CONFIG +=   output: { filename: 'rome.webpack.js', path: __dirname + '/out' },
+ROME_WEBPACK5_CONFIG += };
+
+bench-rome-webpack5: | require/webpack5/node_modules bench/rome bench/rome-verify
+	rm -fr require/webpack5/bench/rome bench/rome/webpack5
+	mkdir -p require/webpack5/bench/rome bench/rome/webpack5
+	echo "$(ROME_WEBPACK5_CONFIG)" > require/webpack5/bench/rome/webpack.config.js
+	ln -s ../../../../bench/rome/src require/webpack5/bench/rome/src
+	ln -s ../../../../bench/rome/webpack5 require/webpack5/bench/rome/out
+	cd require/webpack5/bench/rome && time -p ../../node_modules/.bin/webpack
+	du -h bench/rome/webpack5/rome.webpack.js*
+	cd bench/rome-verify && rm -fr webpack5 && ROME_CACHE=0 node ../rome/webpack5/rome.webpack.js bundle packages/rome webpack5
+
 ROME_PARCEL_FLAGS += --bundle-node-modules
 ROME_PARCEL_FLAGS += --no-autoinstall
-ROME_PARCEL_FLAGS += --out-dir out
+ROME_PARCEL_FLAGS += --out-dir .
 ROME_PARCEL_FLAGS += --public-url ./
 ROME_PARCEL_FLAGS += --target node
 
+ROME_PARCEL_ALIASES += "alias": {
+ROME_PARCEL_ALIASES +=   $(shell ls bench/rome/src/@romejs | sed 's/.*/"\@romejs\/&": ".\/@romejs\/&",/g')
+ROME_PARCEL_ALIASES +=   "rome": "./rome"
+ROME_PARCEL_ALIASES += }
+
 bench-rome-parcel: | require/parcel/node_modules bench/rome bench/rome-verify
-	rm -fr require/parcel/bench/rome bench/rome/parcel
-	mkdir -p require/parcel/bench/rome bench/rome/parcel
-	ln -s ../../../../bench/rome/src require/parcel/bench/rome/src
-	ln -s ../../../../bench/rome/parcel require/parcel/bench/rome/out
-	cd require/parcel/bench/rome && time -p ../../node_modules/.bin/parcel build src/entry.ts $(ROME_PARCEL_FLAGS) --out-file rome.parcel.js
+	rm -fr bench/rome/parcel
+	cp -r bench/rome/src bench/rome/parcel
+	rm -fr bench/rome/parcel/node_modules
+	cp -RP require/parcel/node_modules bench/rome/parcel/node_modules
+
+	# Inject aliases into "package.json" to fix Parcel ignoring "tsconfig.json".
+	cat require/parcel/package.json | sed '/^\}/d' > bench/rome/parcel/package.json
+	echo ', $(ROME_PARCEL_ALIASES) }' >> bench/rome/parcel/package.json
+
+	# Work around a bug that causes the resulting bundle to crash when run.
+	# See https://github.com/parcel-bundler/parcel/issues/1762 for more info.
+	echo 'import "regenerator-runtime/runtime"; import "./entry.ts"' > bench/rome/parcel/rome.parcel.ts
+
+	cd bench/rome/parcel && time -p node_modules/.bin/parcel build rome.parcel.ts $(ROME_PARCEL_FLAGS) --out-file rome.parcel.js
 	du -h bench/rome/parcel/rome.parcel.js*
 	cd bench/rome-verify && rm -fr parcel && ROME_CACHE=0 node ../rome/parcel/rome.parcel.js bundle packages/rome parcel
 
@@ -678,25 +776,24 @@ PARCELRC +=     "*.ts": ["@parcel/transformer-typescript-tsc"]
 PARCELRC +=   }
 PARCELRC += }
 
-# Note: This is currently broken. The resulting bundle crashes when run because
-# TypeScript statements of the form "import os = require('os')" are omitted.
-# I'm not sure why this happens, and I'm also not sure if this is a bug or if
-# Parcel needs some additional configuration to use this TypeScript syntax.
 bench-rome-parcel2: | require/parcel2/node_modules bench/rome bench/rome-verify
-	rm -fr require/parcel2/bench/rome bench/rome/parcel2
-	mkdir -p require/parcel2/bench/rome bench/rome/parcel2
-	cp -r bench/rome/src require/parcel2/bench/rome/src # Can't use a symbolic link or ".parcelrc" breaks
-	echo '$(PARCELRC)' > require/parcel2/bench/rome/.parcelrc
+	rm -fr bench/rome/parcel2
+	cp -r bench/rome/src bench/rome/parcel2 # Can't use a symbolic link or ".parcelrc" breaks
+	rm -fr bench/rome/parcel2/node_modules
+	cp -RP require/parcel2/node_modules bench/rome/parcel2/node_modules
+	echo '$(PARCELRC)' > bench/rome/parcel2/.parcelrc
+
+	# Inject aliases into "package.json" to fix Parcel 2 ignoring "tsconfig.json".
+	# Also inject "engines": "node" to avoid Parcel 2 mangling node globals.
+	cat require/parcel2/package.json | sed '/^\}/d' > bench/rome/parcel2/package.json
+	echo ', "engines": { "node": "0.0.0" }' >> bench/rome/parcel2/package.json
+	echo ', $(ROME_PARCEL_ALIASES) }' >> bench/rome/parcel2/package.json
 
 	# Work around a bug that causes the resulting bundle to crash when run.
 	# See https://github.com/parcel-bundler/parcel/issues/1762 for more info.
-	echo 'import "regenerator-runtime/runtime"; import "./entry.ts"' > require/parcel2/bench/rome/src/rome.parcel.ts
+	echo 'import "regenerator-runtime/runtime"; import "./entry.ts"' > bench/rome/parcel2/rome.parcel.ts
 
-	# This uses --no-scope-hoist because otherwise Parcel 2 can't handle TypeScript files
-	# that re-export types. See https://github.com/parcel-bundler/parcel/issues/4796.
-	cd require/parcel2/bench/rome && time -p ../../node_modules/.bin/parcel build --no-autoinstall \
-		src/rome.parcel.ts --dist-dir ../../../../bench/rome/parcel2 --no-scope-hoist --cache-dir .cache
-
+	cd bench/rome/parcel2 && time -p node_modules/.bin/parcel build rome.parcel.ts --dist-dir . --cache-dir .cache
 	du -h bench/rome/parcel2/rome.parcel.js*
 	cd bench/rome-verify && rm -fr parcel2 && ROME_CACHE=0 node ../rome/parcel2/rome.parcel.js bundle packages/rome parcel2
 
@@ -717,19 +814,23 @@ bench/readmin: | github/react-admin
 
 bench-readmin: bench-readmin-esbuild
 
+READMIN_ESBUILD_FLAGS += --bundle
+READMIN_ESBUILD_FLAGS += --define:global=window
+READMIN_ESBUILD_FLAGS += --define:process.env.NODE_ENV='"production"'
+READMIN_ESBUILD_FLAGS += --loader:.js=jsx
+READMIN_ESBUILD_FLAGS += --minify
+READMIN_ESBUILD_FLAGS += --sourcemap
+
 bench-readmin-esbuild: esbuild | bench/readmin
 	rm -fr bench/readmin/esbuild
-	time -p ./esbuild --bundle --minify --loader:.js=jsx --define:process.env.NODE_ENV='"production"' \
-		--define:global=window --sourcemap --outfile=bench/readmin/esbuild/main.js bench/readmin/repo/src/index.js
+	time -p ./esbuild $(READMIN_ESBUILD_FLAGS) --outfile=bench/readmin/esbuild/main.js bench/readmin/repo/src/index.js
 	echo "$(READMIN_HTML)" > bench/readmin/esbuild/index.html
 	du -h bench/readmin/esbuild/main.js*
 	shasum bench/readmin/esbuild/main.js*
 
-bench-readmin-eswasm: npm/esbuild-wasm/esbuild.wasm | bench/readmin npm/esbuild-wasm/wasm_exec.js
+bench-readmin-eswasm: platform-wasm | bench/readmin
 	rm -fr bench/readmin/eswasm
-	time -p ./npm/esbuild-wasm/bin/esbuild \
-		--bundle --minify --loader:.js=jsx --define:process.env.NODE_ENV='"production"' \
-		--define:global=window --sourcemap --outfile=bench/readmin/eswasm/main.js bench/readmin/repo/src/index.js
+	time -p ./npm/esbuild-wasm/bin/esbuild $(READMIN_ESBUILD_FLAGS) --outfile=bench/readmin/eswasm/main.js bench/readmin/repo/src/index.js
 	echo "$(READMIN_HTML)" > bench/readmin/eswasm/index.html
 	du -h bench/readmin/eswasm/main.js*
 	shasum bench/readmin/eswasm/main.js*

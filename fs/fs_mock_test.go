@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestBasic(t *testing.T) {
+func TestMockFSBasic(t *testing.T) {
 	fs := MockFS(map[string]string{
 		"/README.md":    "// README.md",
 		"/package.json": "// package.json",
@@ -48,7 +48,11 @@ func TestBasic(t *testing.T) {
 	if err != nil {
 		t.Fatal("Expected to find /src")
 	}
-	if len(src) != 2 || src["index.js"].Kind() != FileEntry || src["util.js"].Kind() != FileEntry {
+	indexEntry, _ := src.Get("index.js")
+	utilEntry, _ := src.Get("util.js")
+	if len(src.data) != 2 ||
+		indexEntry == nil || indexEntry.Kind(fs) != FileEntry ||
+		utilEntry == nil || utilEntry.Kind(fs) != FileEntry {
 		t.Fatalf("Incorrect contents for /src: %v", src)
 	}
 
@@ -57,12 +61,18 @@ func TestBasic(t *testing.T) {
 	if err != nil {
 		t.Fatal("Expected to find /")
 	}
-	if len(slash) != 3 || slash["src"].Kind() != DirEntry || slash["README.md"].Kind() != FileEntry || slash["package.json"].Kind() != FileEntry {
+	srcEntry, _ := slash.Get("src")
+	readmeEntry, _ := slash.Get("README.md")
+	packageEntry, _ := slash.Get("package.json")
+	if len(slash.data) != 3 ||
+		srcEntry == nil || srcEntry.Kind(fs) != DirEntry ||
+		readmeEntry == nil || readmeEntry.Kind(fs) != FileEntry ||
+		packageEntry == nil || packageEntry.Kind(fs) != FileEntry {
 		t.Fatalf("Incorrect contents for /: %v", slash)
 	}
 }
 
-func TestRel(t *testing.T) {
+func TestMockFSRel(t *testing.T) {
 	fs := MockFS(map[string]string{})
 
 	expect := func(a string, b string, c string) {
@@ -88,4 +98,11 @@ func TestRel(t *testing.T) {
 	expect("/a/b/c/d", "/a/b/x", "../../x")
 	expect("/a/b/c", "/a/b/x/y", "../x/y")
 	expect("/a/b/c/d", "/a/b/x/y", "../../x/y")
+
+	expect("a/b", "a/c", "../c")
+	expect("./a/b", "./a/c", "../c")
+	expect(".", "./a/b", "a/b")
+	expect(".", ".//a/b", "a/b")
+	expect(".", "././a/b", "a/b")
+	expect(".", "././/a/b", "a/b")
 }

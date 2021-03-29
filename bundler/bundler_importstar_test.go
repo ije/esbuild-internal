@@ -512,7 +512,148 @@ func TestImportExportStarAmbiguousError(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/out.js",
 		},
-		expectedCompileLog: "/entry.js: error: Ambiguous import \"y\" has multiple matching exports\n",
+		expectedCompileLog: `entry.js: error: Ambiguous import "y" has multiple matching exports
+foo.js: note: One matching export is here
+bar.js: note: Another matching export is here
+`,
+	})
+}
+
+func TestImportExportStarAmbiguousWarning(t *testing.T) {
+	importstar_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import * as ns from './common'
+				console.log(ns.x, ns.y, ns.z)
+			`,
+			"/common.js": `
+				export * from './foo'
+				export * from './bar'
+			`,
+			"/foo.js": `
+				export const x = 1
+				export const y = 2
+			`,
+			"/bar.js": `
+				export const y = 3
+				export const z = 4
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+		},
+		expectedCompileLog: `entry.js: warning: Import "y" will always be undefined because there are multiple matching exports
+foo.js: note: One matching export is here
+bar.js: note: Another matching export is here
+`,
+	})
+}
+
+func TestReExportStarNameCollisionNotAmbiguousImport(t *testing.T) {
+	importstar_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import {x, y} from './common'
+				console.log(x, y)
+			`,
+			"/common.js": `
+				export * from './a'
+				export * from './b'
+			`,
+			"/a.js": `
+				export * from './c'
+			`,
+			"/b.js": `
+				export {x} from './c'
+			`,
+			"/c.js": `
+				export let x = 1, y = 2
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+		},
+	})
+}
+
+func TestReExportStarNameCollisionNotAmbiguousExport(t *testing.T) {
+	importstar_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				export * from './a'
+				export * from './b'
+			`,
+			"/a.js": `
+				export * from './c'
+			`,
+			"/b.js": `
+				export {x} from './c'
+			`,
+			"/c.js": `
+				export let x = 1, y = 2
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			OutputFormat:  config.FormatESModule,
+			AbsOutputFile: "/out.js",
+		},
+	})
+}
+
+func TestReExportStarNameShadowingNotAmbiguous(t *testing.T) {
+	importstar_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import {x} from './a'
+				console.log(x)
+			`,
+			"/a.js": `
+				export * from './b'
+				export let x = 1
+			`,
+			"/b.js": `
+				export let x = 2
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			OutputFormat:  config.FormatESModule,
+			AbsOutputFile: "/out.js",
+		},
+	})
+}
+
+func TestReExportStarNameShadowingNotAmbiguousReExport(t *testing.T) {
+	importstar_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import {x} from './a'
+				console.log(x)
+			`,
+			"/a.js": `
+				export * from './b'
+			`,
+			"/b.js": `
+				export * from './c'
+				export let x = 1
+			`,
+			"/c.js": `
+				export let x = 2
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			OutputFormat:  config.FormatESModule,
+			AbsOutputFile: "/out.js",
+		},
 	})
 }
 
@@ -608,6 +749,24 @@ func TestExportSelfIIFE(t *testing.T) {
 			Mode:          config.ModeBundle,
 			OutputFormat:  config.FormatIIFE,
 			AbsOutputFile: "/out.js",
+		},
+	})
+}
+
+func TestExportSelfIIFEWithName(t *testing.T) {
+	importstar_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				export const foo = 123
+				export * from './entry'
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			OutputFormat:  config.FormatIIFE,
+			AbsOutputFile: "/out.js",
+			GlobalName:    []string{"someName"},
 		},
 	})
 }
@@ -906,7 +1065,7 @@ func TestNamespaceImportMissingES6(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/out.js",
 		},
-		expectedCompileLog: `/entry.js: warning: No matching export for import "foo"
+		expectedCompileLog: `entry.js: warning: Import "foo" will always be undefined because there is no matching export
 `,
 	})
 }
@@ -968,7 +1127,7 @@ func TestNamespaceImportUnusedMissingES6(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/out.js",
 		},
-		expectedCompileLog: `/entry.js: warning: No matching export for import "foo"
+		expectedCompileLog: `entry.js: warning: Import "foo" will always be undefined because there is no matching export
 `,
 	})
 }
@@ -1074,8 +1233,8 @@ func TestNamespaceImportReExportMissingES6(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/out.js",
 		},
-		expectedCompileLog: `/foo.js: error: No matching export for import "foo"
-/foo.js: error: No matching export for import "foo"
+		expectedCompileLog: `foo.js: error: No matching export in "bar.js" for import "foo"
+foo.js: error: No matching export in "bar.js" for import "foo"
 `,
 	})
 }
@@ -1099,8 +1258,8 @@ func TestNamespaceImportReExportUnusedMissingES6(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/out.js",
 		},
-		expectedCompileLog: `/foo.js: error: No matching export for import "foo"
-/foo.js: error: No matching export for import "foo"
+		expectedCompileLog: `foo.js: error: No matching export in "bar.js" for import "foo"
+foo.js: error: No matching export in "bar.js" for import "foo"
 `,
 	})
 }
@@ -1124,7 +1283,7 @@ func TestNamespaceImportReExportStarMissingES6(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/out.js",
 		},
-		expectedCompileLog: `/entry.js: warning: No matching export for import "foo"
+		expectedCompileLog: `entry.js: warning: Import "foo" will always be undefined because there is no matching export
 `,
 	})
 }
@@ -1148,7 +1307,7 @@ func TestNamespaceImportReExportStarUnusedMissingES6(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/out.js",
 		},
-		expectedCompileLog: `/entry.js: warning: No matching export for import "foo"
+		expectedCompileLog: `entry.js: warning: Import "foo" will always be undefined because there is no matching export
 `,
 	})
 }
@@ -1210,7 +1369,7 @@ func TestReExportStarExternalIIFE(t *testing.T) {
 			Mode:          config.ModeBundle,
 			OutputFormat:  config.FormatIIFE,
 			AbsOutputFile: "/out.js",
-			ModuleName:    "mod",
+			GlobalName:    []string{"mod"},
 			ExternalModules: config.ExternalModules{
 				NodeModules: map[string]bool{
 					"foo": true,
@@ -1274,7 +1433,7 @@ func TestReExportStarIIFENoBundle(t *testing.T) {
 			Mode:          config.ModeConvertFormat,
 			OutputFormat:  config.FormatIIFE,
 			AbsOutputFile: "/out.js",
-			ModuleName:    "mod",
+			GlobalName:    []string{"mod"},
 		},
 	})
 }
@@ -1323,7 +1482,7 @@ func TestReExportStarAsExternalIIFE(t *testing.T) {
 			Mode:          config.ModeBundle,
 			OutputFormat:  config.FormatIIFE,
 			AbsOutputFile: "/out.js",
-			ModuleName:    "mod",
+			GlobalName:    []string{"mod"},
 			ExternalModules: config.ExternalModules{
 				NodeModules: map[string]bool{
 					"foo": true,
@@ -1387,7 +1546,7 @@ func TestReExportStarAsIIFENoBundle(t *testing.T) {
 			Mode:          config.ModeConvertFormat,
 			OutputFormat:  config.FormatIIFE,
 			AbsOutputFile: "/out.js",
-			ModuleName:    "mod",
+			GlobalName:    []string{"mod"},
 		},
 	})
 }
@@ -1502,8 +1661,8 @@ func TestImportDefaultNamespaceComboIssue446(t *testing.T) {
 				},
 			},
 		},
-		expectedCompileLog: `/internal-def.js: warning: No matching export for import "def"
-/internal-ns-def.js: warning: No matching export for import "def"
+		expectedCompileLog: `internal-def.js: warning: Import "def" will always be undefined because there is no matching export
+internal-ns-def.js: warning: Import "def" will always be undefined because there is no matching export
 `,
 	})
 }
@@ -1534,13 +1693,13 @@ func TestImportDefaultNamespaceComboNoDefault(t *testing.T) {
 				},
 			},
 		},
-		expectedCompileLog: `/entry-default-ns-prop.js: error: No matching export for import "default"
-/entry-default-ns-prop.js: warning: No matching export for import "default"
-/entry-default-ns.js: error: No matching export for import "default"
-/entry-default-prop.js: error: No matching export for import "default"
-/entry-default-prop.js: warning: No matching export for import "default"
-/entry-default.js: error: No matching export for import "default"
-/entry-prop.js: warning: No matching export for import "default"
+		expectedCompileLog: `entry-default-ns-prop.js: error: No matching export in "foo.js" for import "default"
+entry-default-ns-prop.js: warning: Import "default" will always be undefined because there is no matching export
+entry-default-ns.js: error: No matching export in "foo.js" for import "default"
+entry-default-prop.js: error: No matching export in "foo.js" for import "default"
+entry-default-prop.js: warning: Import "default" will always be undefined because there is no matching export
+entry-default.js: error: No matching export in "foo.js" for import "default"
+entry-prop.js: warning: Import "default" will always be undefined because there is no matching export
 `,
 	})
 }

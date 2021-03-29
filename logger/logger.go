@@ -8,15 +8,26 @@ package logger
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
+	"time"
+	"unicode/utf8"
 )
+
+const defaultTerminalWidth = 80
 
 type Log struct {
 	AddMsg    func(Msg)
 	HasErrors func() bool
-	Done      func() []Msg
+
+	// This is called after the build has finished but before writing to stdout.
+	// It exists to ensure that deferred warning messages end up in the terminal
+	// before the data written to stdout.
+	AlmostDone func()
+
+	Done func() []Msg
 }
 
 type LogLevel int8
@@ -34,20 +45,44 @@ type MsgKind uint8
 const (
 	Error MsgKind = iota
 	Warning
+	Note
 )
 
+func (kind MsgKind) String() string {
+	switch kind {
+	case Error:
+		return "error"
+	case Warning:
+		return "warning"
+	case Note:
+		return "note"
+	default:
+		panic("Internal error")
+	}
+}
+
 type Msg struct {
-	Kind     MsgKind
+	Kind  MsgKind
+	Data  MsgData
+	Notes []MsgData
+}
+
+type MsgData struct {
 	Text     string
 	Location *MsgLocation
+
+	// Optional user-specified data that is passed through unmodified
+	UserDetail interface{}
 }
 
 type MsgLocation struct {
-	File     string
-	Line     int // 1-based
-	Column   int // 0-based, in bytes
-	Length   int // in bytes
-	LineText string
+	File       string
+	Namespace  string
+	Line       int // 1-based
+	Column     int // 0-based, in bytes
+	Length     int // in bytes
+	LineText   string
+	Suggestion string
 }
 
 type Loc struct {
@@ -65,70 +100,32 @@ func (r Range) End() int32 {
 }
 
 // This type is just so we can use Go's native sort function
-type msgsArray []Msg
+type SortableMsgs []Msg
 
-func (a msgsArray) Len() int          { return len(a) }
-func (a msgsArray) Swap(i int, j int) { a[i], a[j] = a[j], a[i] }
+func (a SortableMsgs) Len() int          { return len(a) }
+func (a SortableMsgs) Swap(i int, j int) { a[i], a[j] = a[j], a[i] }
 
-func (a msgsArray) Less(i int, j int) bool {
+func (a SortableMsgs) Less(i int, j int) bool {
 	ai := a[i]
 	aj := a[j]
-
-	li := ai.Location
-	lj := aj.Location
-
-	// Location
-	if li == nil && lj != nil {
-		return true
+	aiLoc := ai.Data.Location
+	ajLoc := aj.Data.Location
+	if aiLoc == nil || ajLoc == nil {
+		return aiLoc == nil && ajLoc != nil
 	}
-	if li != nil && lj == nil {
-		return false
+	if aiLoc.File != ajLoc.File {
+		return aiLoc.File < ajLoc.File
 	}
-
-	if li != nil && lj != nil {
-		// File
-		if li.File < lj.File {
-			return true
-		}
-		if li.File > lj.File {
-			return false
-		}
-
-		// Line
-		if li.Line < lj.Line {
-			return true
-		}
-		if li.Line > lj.Line {
-			return false
-		}
-
-		// Column
-		if li.Column < lj.Column {
-			return true
-		}
-		if li.Column > lj.Column {
-			return false
-		}
-
-		// Length
-		if li.Length < lj.Length {
-			return true
-		}
-		if li.Length > lj.Length {
-			return false
-		}
+	if aiLoc.Line != ajLoc.Line {
+		return aiLoc.Line < ajLoc.Line
 	}
-
-	// Kind
-	if ai.Kind < aj.Kind {
-		return true
+	if aiLoc.Column != ajLoc.Column {
+		return aiLoc.Column < ajLoc.Column
 	}
-	if ai.Kind > aj.Kind {
-		return false
+	if ai.Kind != aj.Kind {
+		return ai.Kind < aj.Kind
 	}
-
-	// Text
-	return ai.Text < aj.Text
+	return ai.Data.Text < aj.Data.Text
 }
 
 // This is used to represent both file system paths (Namespace == "file") and
@@ -138,10 +135,63 @@ func (a msgsArray) Less(i int, j int) bool {
 type Path struct {
 	Text      string
 	Namespace string
+
+	// This feature was added to support ancient CSS libraries that append things
+	// like "?#iefix" and "#icons" to some of their import paths as a hack for IE6.
+	// The intent is for these suffix parts to be ignored but passed through to
+	// the output. This is supported by other bundlers, so we also support this.
+	IgnoredSuffix string
+
+	Flags PathFlags
+}
+
+type PathFlags uint8
+
+const (
+	// This corresponds to a value of "false' in the "browser" package.json field
+	PathDisabled PathFlags = 1 << iota
+)
+
+func (p Path) IsDisabled() bool {
+	return (p.Flags & PathDisabled) != 0
 }
 
 func (a Path) ComesBeforeInSortedOrder(b Path) bool {
-	return a.Namespace > b.Namespace || (a.Namespace == b.Namespace && a.Text < b.Text)
+	return a.Namespace > b.Namespace ||
+		(a.Namespace == b.Namespace && (a.Text < b.Text ||
+			(a.Text == b.Text && (a.Flags < b.Flags ||
+				(a.Flags == b.Flags && a.IgnoredSuffix < b.IgnoredSuffix)))))
+}
+
+// This has a custom implementation instead of using "filepath.Dir/Base/Ext"
+// because it should work the same on Unix and Windows. These names end up in
+// the generated output and the generated output should not depend on the OS.
+func PlatformIndependentPathDirBaseExt(path string) (dir string, base string, ext string) {
+	for {
+		i := strings.LastIndexAny(path, "/\\")
+
+		// Stop if there are no more slashes
+		if i < 0 {
+			base = path
+			break
+		}
+
+		// Stop if we found a non-trailing slash
+		if i+1 != len(path) {
+			dir, base = path[:i], path[i+1:]
+			break
+		}
+
+		// Ignore trailing slashes
+		path = path[:i]
+	}
+
+	// Strip off the extension
+	if dot := strings.LastIndexByte(base, '.'); dot >= 0 {
+		base, ext = base[:dot], base[dot:]
+	}
+
+	return
 }
 
 type Source struct {
@@ -240,23 +290,49 @@ func (s *Source) RangeOfNumber(loc Loc) (r Range) {
 	return
 }
 
-func plural(prefix string, count int) string {
-	if count == 1 {
-		return fmt.Sprintf("%d %s", count, prefix)
+func (s *Source) RangeOfLegacyOctalEscape(loc Loc) (r Range) {
+	text := s.Contents[loc.Start:]
+	r = Range{Loc: loc, Len: 0}
+
+	if len(text) >= 2 && text[0] == '\\' {
+		r.Len = 2
+		for r.Len < 4 && int(r.Len) < len(text) {
+			c := text[r.Len]
+			if c < '0' || c > '9' {
+				break
+			}
+			r.Len++
+		}
 	}
-	return fmt.Sprintf("%d %ss", count, prefix)
+	return
 }
 
-func errorAndWarningSummary(errors int, warnings int) string {
+func plural(prefix string, count int, shown int, someAreMissing bool) string {
+	var text string
+	if count == 1 {
+		text = fmt.Sprintf("%d %s", count, prefix)
+	} else {
+		text = fmt.Sprintf("%d %ss", count, prefix)
+	}
+	if shown < count {
+		text = fmt.Sprintf("%d of %s", shown, text)
+	} else if someAreMissing && count > 1 {
+		text = "all " + text
+	}
+	return text
+}
+
+func errorAndWarningSummary(errors int, warnings int, shownErrors int, shownWarnings int) string {
+	someAreMissing := shownWarnings < warnings || shownErrors < errors
 	switch {
 	case errors == 0:
-		return plural("warning", warnings)
+		return plural("warning", warnings, shownWarnings, someAreMissing)
 	case warnings == 0:
-		return plural("error", errors)
+		return plural("error", errors, shownErrors, someAreMissing)
 	default:
 		return fmt.Sprintf("%s and %s",
-			plural("warning", warnings),
-			plural("error", errors))
+			plural("warning", warnings, shownWarnings, someAreMissing),
+			plural("error", errors, shownErrors, someAreMissing))
 	}
 }
 
@@ -264,15 +340,48 @@ type TerminalInfo struct {
 	IsTTY           bool
 	UseColorEscapes bool
 	Width           int
+	Height          int
 }
 
-func NewStderrLog(options StderrOptions) Log {
+func NewStderrLog(options OutputOptions) Log {
 	var mutex sync.Mutex
-	var msgs msgsArray
+	var msgs SortableMsgs
 	terminalInfo := GetTerminalInfo(os.Stderr)
 	errors := 0
 	warnings := 0
-	errorLimitWasHit := false
+	shownErrors := 0
+	shownWarnings := 0
+	hasErrors := false
+	remainingMessagesBeforeLimit := options.MessageLimit
+	if remainingMessagesBeforeLimit == 0 {
+		remainingMessagesBeforeLimit = 0x7FFFFFFF
+	}
+	var deferredWarnings []Msg
+	didFinalizeLog := false
+
+	finalizeLog := func() {
+		if didFinalizeLog {
+			return
+		}
+		didFinalizeLog = true
+
+		// Print the deferred warning now if there was no error after all
+		for remainingMessagesBeforeLimit > 0 && len(deferredWarnings) > 0 {
+			shownWarnings++
+			writeStringWithColor(os.Stderr, deferredWarnings[0].String(options, terminalInfo))
+			deferredWarnings = deferredWarnings[1:]
+			remainingMessagesBeforeLimit--
+		}
+
+		// Print out a summary
+		if options.MessageLimit > 0 && errors+warnings > options.MessageLimit {
+			writeStringWithColor(os.Stderr, fmt.Sprintf("%s shown (disable the message limit with --log-limit=0)\n",
+				errorAndWarningSummary(errors, warnings, shownErrors, shownWarnings)))
+		} else if options.LogLevel <= LevelInfo && (warnings != 0 || errors != 0) {
+			writeStringWithColor(os.Stderr, fmt.Sprintf("%s\n",
+				errorAndWarningSummary(errors, warnings, shownErrors, shownWarnings)))
+		}
+	}
 
 	switch options.Color {
 	case ColorNever:
@@ -287,47 +396,63 @@ func NewStderrLog(options StderrOptions) Log {
 			defer mutex.Unlock()
 			msgs = append(msgs, msg)
 
+			switch msg.Kind {
+			case Error:
+				hasErrors = true
+				if options.LogLevel <= LevelError {
+					errors++
+				}
+			case Warning:
+				if options.LogLevel <= LevelWarning {
+					warnings++
+				}
+			}
+
 			// Be silent if we're past the limit so we don't flood the terminal
-			if errorLimitWasHit {
+			if remainingMessagesBeforeLimit == 0 {
 				return
 			}
 
 			switch msg.Kind {
 			case Error:
-				errors++
 				if options.LogLevel <= LevelError {
+					shownErrors++
 					writeStringWithColor(os.Stderr, msg.String(options, terminalInfo))
+					remainingMessagesBeforeLimit--
 				}
-			case Warning:
-				warnings++
-				if options.LogLevel <= LevelWarning {
-					writeStringWithColor(os.Stderr, msg.String(options, terminalInfo))
-				}
-			}
 
-			// Silence further output if we reached the error limit
-			if options.ErrorLimit != 0 && errors >= options.ErrorLimit {
-				errorLimitWasHit = true
-				if options.LogLevel <= LevelError {
-					writeStringWithColor(os.Stderr, fmt.Sprintf(
-						"%s reached (disable error limit with --error-limit=0)\n", errorAndWarningSummary(errors, warnings)))
+			case Warning:
+				if options.LogLevel <= LevelWarning {
+					if remainingMessagesBeforeLimit > (options.MessageLimit+1)/2 {
+						shownWarnings++
+						writeStringWithColor(os.Stderr, msg.String(options, terminalInfo))
+						remainingMessagesBeforeLimit--
+					} else {
+						// If we have less than half of the slots left, wait for potential
+						// future errors instead of using up all of the slots with warnings.
+						// We want the log for a failed build to always have at least one
+						// error in it.
+						deferredWarnings = append(deferredWarnings, msg)
+					}
 				}
 			}
 		},
 		HasErrors: func() bool {
 			mutex.Lock()
 			defer mutex.Unlock()
-			return errors > 0
+			return hasErrors
+		},
+		AlmostDone: func() {
+			mutex.Lock()
+			defer mutex.Unlock()
+
+			finalizeLog()
 		},
 		Done: func() []Msg {
 			mutex.Lock()
 			defer mutex.Unlock()
 
-			// Print out a summary if the error limit wasn't hit
-			if !errorLimitWasHit && options.LogLevel <= LevelInfo && (warnings != 0 || errors != 0) {
-				writeStringWithColor(os.Stderr, fmt.Sprintf("%s\n", errorAndWarningSummary(errors, warnings)))
-			}
-
+			finalizeLog()
 			sort.Stable(msgs)
 			return msgs
 		},
@@ -335,11 +460,11 @@ func NewStderrLog(options StderrOptions) Log {
 }
 
 func PrintErrorToStderr(osArgs []string, text string) {
-	PrintMessageToStderr(osArgs, Msg{Kind: Error, Text: text})
+	PrintMessageToStderr(osArgs, Msg{Kind: Error, Data: MsgData{Text: text}})
 }
 
-func PrintMessageToStderr(osArgs []string, msg Msg) {
-	options := StderrOptions{IncludeSource: true}
+func OutputOptionsForArgs(osArgs []string) OutputOptions {
+	options := OutputOptions{IncludeSource: true}
 
 	// Implement a mini argument parser so these options always work even if we
 	// haven't yet gotten to the general-purpose argument parsing code
@@ -360,13 +485,284 @@ func PrintMessageToStderr(osArgs []string, msg Msg) {
 		}
 	}
 
-	log := NewStderrLog(options)
+	return options
+}
+
+func PrintMessageToStderr(osArgs []string, msg Msg) {
+	log := NewStderrLog(OutputOptionsForArgs(osArgs))
 	log.AddMsg(msg)
 	log.Done()
 }
 
+type Colors struct {
+	Reset     string
+	Bold      string
+	Dim       string
+	Underline string
+
+	Red   string
+	Green string
+	Blue  string
+
+	Cyan    string
+	Magenta string
+	Yellow  string
+}
+
+var TerminalColors = Colors{
+	Reset:     "\033[0m",
+	Bold:      "\033[1m",
+	Dim:       "\033[37m",
+	Underline: "\033[4m",
+
+	Red:   "\033[31m",
+	Green: "\033[32m",
+	Blue:  "\033[34m",
+
+	Cyan:    "\033[36m",
+	Magenta: "\033[35m",
+	Yellow:  "\033[33m",
+}
+
+func PrintText(file *os.File, level LogLevel, osArgs []string, callback func(Colors) string) {
+	options := OutputOptionsForArgs(osArgs)
+
+	// Skip logging these if these logs are disabled
+	if options.LogLevel > level {
+		return
+	}
+
+	PrintTextWithColor(file, options.Color, callback)
+}
+
+func PrintTextWithColor(file *os.File, useColor UseColor, callback func(Colors) string) {
+	var useColorEscapes bool
+	switch useColor {
+	case ColorNever:
+		useColorEscapes = false
+	case ColorAlways:
+		useColorEscapes = SupportsColorEscapes
+	case ColorIfTerminal:
+		useColorEscapes = GetTerminalInfo(file).UseColorEscapes
+	}
+
+	var colors Colors
+	if useColorEscapes {
+		colors = TerminalColors
+	}
+	writeStringWithColor(file, callback(colors))
+}
+
+type SummaryTableEntry struct {
+	Dir         string
+	Base        string
+	Size        string
+	Bytes       int
+	IsSourceMap bool
+}
+
+// This type is just so we can use Go's native sort function
+type SummaryTable []SummaryTableEntry
+
+func (t SummaryTable) Len() int          { return len(t) }
+func (t SummaryTable) Swap(i int, j int) { t[i], t[j] = t[j], t[i] }
+
+func (t SummaryTable) Less(i int, j int) bool {
+	ti := t[i]
+	tj := t[j]
+
+	// Sort source maps last
+	if !ti.IsSourceMap && tj.IsSourceMap {
+		return true
+	}
+	if ti.IsSourceMap && !tj.IsSourceMap {
+		return false
+	}
+
+	// Sort by size first
+	if ti.Bytes > tj.Bytes {
+		return true
+	}
+	if ti.Bytes < tj.Bytes {
+		return false
+	}
+
+	// Sort alphabetically by directory first
+	if ti.Dir < tj.Dir {
+		return true
+	}
+	if ti.Dir > tj.Dir {
+		return false
+	}
+
+	// Then sort alphabetically by file name
+	return ti.Base < tj.Base
+}
+
+// Show a warning icon next to output files that are 1mb or larger
+const sizeWarningThreshold = 1024 * 1024
+
+func PrintSummary(useColor UseColor, table SummaryTable, start *time.Time) {
+	PrintTextWithColor(os.Stderr, useColor, func(colors Colors) string {
+		isProbablyWindowsCommandPrompt := false
+		sb := strings.Builder{}
+
+		// Assume we are running in Windows Command Prompt if we're on Windows. If
+		// so, we can't use emoji because it won't be supported. Except we can
+		// still use emoji if the WT_SESSION environment variable is present
+		// because that means we're running in the new Windows Terminal instead.
+		if runtime.GOOS == "windows" {
+			isProbablyWindowsCommandPrompt = true
+			for _, env := range os.Environ() {
+				if strings.HasPrefix(env, "WT_SESSION=") {
+					isProbablyWindowsCommandPrompt = false
+					break
+				}
+			}
+		}
+
+		if len(table) > 0 {
+			info := GetTerminalInfo(os.Stderr)
+
+			// Truncate the table in case it's really long
+			maxLength := info.Height / 2
+			if info.Height == 0 {
+				maxLength = 20
+			} else if maxLength < 5 {
+				maxLength = 5
+			}
+			length := len(table)
+			sort.Sort(table)
+			if length > maxLength {
+				table = table[:maxLength]
+			}
+
+			// Compute the maximum width of the size column
+			spacingBetweenColumns := 2
+			hasSizeWarning := false
+			maxPath := 0
+			maxSize := 0
+			for _, entry := range table {
+				path := len(entry.Dir) + len(entry.Base)
+				size := len(entry.Size) + spacingBetweenColumns
+				if path > maxPath {
+					maxPath = path
+				}
+				if size > maxSize {
+					maxSize = size
+				}
+				if !entry.IsSourceMap && entry.Bytes >= sizeWarningThreshold {
+					hasSizeWarning = true
+				}
+			}
+
+			margin := "  "
+			layoutWidth := info.Width
+			if layoutWidth < 1 {
+				layoutWidth = defaultTerminalWidth
+			}
+			layoutWidth -= 2 * len(margin)
+			if hasSizeWarning {
+				// Add space for the warning icon
+				layoutWidth -= 2
+			}
+			if layoutWidth > maxPath+maxSize {
+				layoutWidth = maxPath + maxSize
+			}
+			sb.WriteByte('\n')
+
+			for _, entry := range table {
+				dir, base := entry.Dir, entry.Base
+				pathWidth := layoutWidth - maxSize
+
+				// Truncate the path with "..." to fit on one line
+				if len(dir)+len(base) > pathWidth {
+					// Trim the directory from the front, leaving the trailing slash
+					if len(dir) > 0 {
+						n := pathWidth - len(base) - 3
+						if n < 1 {
+							n = 1
+						}
+						dir = "..." + dir[len(dir)-n:]
+					}
+
+					// Trim the file name from the back
+					if len(dir)+len(base) > pathWidth {
+						n := pathWidth - len(dir) - 3
+						if n < 0 {
+							n = 0
+						}
+						base = base[:n] + "..."
+					}
+				}
+
+				spacer := layoutWidth - len(entry.Size) - len(dir) - len(base)
+				if spacer < 0 {
+					spacer = 0
+				}
+
+				// Put a warning next to the size if it's above a certain threshold
+				sizeColor := colors.Cyan
+				sizeWarning := ""
+				if !entry.IsSourceMap && entry.Bytes >= sizeWarningThreshold {
+					sizeColor = colors.Yellow
+
+					// Emoji don't work in Windows Command Prompt
+					if !isProbablyWindowsCommandPrompt {
+						sizeWarning = " ⚠️"
+					}
+				}
+
+				sb.WriteString(fmt.Sprintf("%s%s%s%s%s%s%s%s%s%s%s%s\n",
+					margin,
+					colors.Dim,
+					dir,
+					colors.Reset,
+					colors.Bold,
+					base,
+					colors.Reset,
+					strings.Repeat(" ", spacer),
+					sizeColor,
+					entry.Size,
+					sizeWarning,
+					colors.Reset,
+				))
+			}
+
+			// Say how many remaining files are not shown
+			if length > maxLength {
+				plural := "s"
+				if length == maxLength+1 {
+					plural = ""
+				}
+				sb.WriteString(fmt.Sprintf("%s%s...and %d more output file%s...%s\n", margin, colors.Dim, length-maxLength, plural, colors.Reset))
+			}
+		}
+		sb.WriteByte('\n')
+
+		lightningSymbol := "⚡ "
+
+		// Emoji don't work in Windows Command Prompt
+		if isProbablyWindowsCommandPrompt {
+			lightningSymbol = ""
+		}
+
+		// Printing the time taken is optional
+		if start != nil {
+			sb.WriteString(fmt.Sprintf("%s%sDone in %dms%s\n",
+				lightningSymbol,
+				colors.Green,
+				time.Since(*start).Milliseconds(),
+				colors.Reset,
+			))
+		}
+
+		return sb.String()
+	})
+}
+
 func NewDeferLog() Log {
-	var msgs msgsArray
+	var msgs SortableMsgs
 	var mutex sync.Mutex
 	var hasErrors bool
 
@@ -384,6 +780,8 @@ func NewDeferLog() Log {
 			defer mutex.Unlock()
 			return hasErrors
 		},
+		AlmostDone: func() {
+		},
 		Done: func() []Msg {
 			mutex.Lock()
 			defer mutex.Unlock()
@@ -393,93 +791,158 @@ func NewDeferLog() Log {
 	}
 }
 
-const colorReset = "\033[0m"
-const colorRed = "\033[31m"
-const colorGreen = "\033[32m"
-const colorMagenta = "\033[35m"
-const colorBold = "\033[1m"
-const colorResetBold = "\033[0;1m"
-
-type StderrColor uint8
+type UseColor uint8
 
 const (
-	ColorIfTerminal StderrColor = iota
+	ColorIfTerminal UseColor = iota
 	ColorNever
 	ColorAlways
 )
 
-type StderrOptions struct {
+type OutputOptions struct {
 	IncludeSource bool
-	ErrorLimit    int
-	Color         StderrColor
+	MessageLimit  int
+	Color         UseColor
 	LogLevel      LogLevel
 }
 
-func (msg Msg) String(options StderrOptions, terminalInfo TerminalInfo) string {
-	kind := "error"
-	kindColor := colorRed
-
-	if msg.Kind == Warning {
-		kind = "warning"
-		kindColor = colorMagenta
-	}
-
-	if msg.Location == nil {
-		if terminalInfo.UseColorEscapes {
-			return fmt.Sprintf("%s%s%s: %s%s%s\n",
-				colorBold, kindColor, kind,
-				colorResetBold, msg.Text,
-				colorReset)
+func (msg Msg) String(options OutputOptions, terminalInfo TerminalInfo) string {
+	// Compute the maximum margin
+	maxMargin := 0
+	if options.IncludeSource {
+		if msg.Data.Location != nil {
+			maxMargin = len(fmt.Sprintf("%d", msg.Data.Location.Line))
 		}
-
-		return fmt.Sprintf("%s: %s\n", kind, msg.Text)
-	}
-
-	if !options.IncludeSource {
-		if terminalInfo.UseColorEscapes {
-			return fmt.Sprintf("%s%s: %s%s: %s%s%s\n",
-				colorBold, msg.Location.File,
-				kindColor, kind,
-				colorResetBold, msg.Text,
-				colorReset)
+		for _, note := range msg.Notes {
+			if note.Location != nil {
+				margin := len(fmt.Sprintf("%d", note.Location.Line))
+				if margin > maxMargin {
+					maxMargin = margin
+				}
+			}
 		}
-
-		return fmt.Sprintf("%s: %s: %s\n", msg.Location.File, kind, msg.Text)
 	}
 
-	d := detailStruct(msg, terminalInfo)
+	// Format the message
+	text := msgString(options.IncludeSource, terminalInfo, msg.Kind, msg.Data, maxMargin)
 
+	// Put a blank line between the message and the notes if the message has a stack trace
+	gap := ""
+	if loc := msg.Data.Location; loc != nil && strings.ContainsRune(loc.LineText, '\n') {
+		gap = "\n"
+	}
+
+	// Format the notes
+	for _, note := range msg.Notes {
+		text += gap
+		text += msgString(options.IncludeSource, terminalInfo, Note, note, maxMargin)
+	}
+
+	// Add extra spacing between messages if source code is present
+	if options.IncludeSource {
+		text += "\n"
+	}
+	return text
+}
+
+// The number of margin characters in addition to the line number
+const extraMarginChars = 7
+
+func marginWithLineText(maxMargin int, line int) string {
+	number := fmt.Sprintf("%d", line)
+	return fmt.Sprintf("    %s%s │ ", strings.Repeat(" ", maxMargin-len(number)), number)
+}
+
+func emptyMarginText(maxMargin int, isLast bool) string {
+	space := strings.Repeat(" ", maxMargin)
+	if isLast {
+		return fmt.Sprintf("    %s ╵ ", space)
+	}
+	return fmt.Sprintf("    %s │ ", space)
+}
+
+func msgString(includeSource bool, terminalInfo TerminalInfo, kind MsgKind, data MsgData, maxMargin int) string {
+	var colors Colors
 	if terminalInfo.UseColorEscapes {
-		return fmt.Sprintf("%s%s:%d:%d: %s%s: %s%s\n%s%s%s%s%s%s\n%s%s%s%s%s\n",
-			colorBold, d.Path,
-			d.Line,
-			d.Column,
-			kindColor, d.Kind,
-			colorResetBold, d.Message,
-			colorReset, d.SourceBefore, colorGreen, d.SourceMarked, colorReset, d.SourceAfter,
-			colorGreen, d.Indent, d.Marker,
-			colorReset, d.ContentAfter)
+		colors = TerminalColors
 	}
 
-	return fmt.Sprintf("%s:%d:%d: %s: %s\n%s\n%s%s%s\n",
-		d.Path, d.Line, d.Column, d.Kind, d.Message, d.Source, d.Indent, d.Marker, d.ContentAfter)
+	var kindColor string
+	prefixColor := colors.Bold
+	messageColor := colors.Bold
+	textIndent := ""
+
+	if includeSource {
+		textIndent = " > "
+	}
+
+	switch kind {
+	case Error:
+		kindColor = colors.Red
+
+	case Warning:
+		kindColor = colors.Magenta
+
+	case Note:
+		prefixColor = colors.Reset
+		kindColor = colors.Bold
+		messageColor = ""
+		if includeSource {
+			textIndent = "   "
+		}
+
+	default:
+		panic("Internal error")
+	}
+
+	if data.Location == nil {
+		return fmt.Sprintf("%s%s%s%s: %s%s%s\n%s",
+			prefixColor, textIndent, kindColor, kind.String(),
+			colors.Reset, messageColor, data.Text,
+			colors.Reset)
+	}
+
+	if !includeSource {
+		return fmt.Sprintf("%s%s%s: %s%s: %s%s%s\n%s",
+			prefixColor, textIndent, data.Location.File,
+			kindColor, kind.String(),
+			colors.Reset, messageColor, data.Text,
+			colors.Reset)
+	}
+
+	d := detailStruct(data, terminalInfo, maxMargin)
+
+	callout := d.Marker
+	calloutPrefix := ""
+
+	if d.Suggestion != "" {
+		callout = d.Suggestion
+		calloutPrefix = fmt.Sprintf("%s%s%s%s%s\n",
+			emptyMarginText(maxMargin, false), d.Indent, colors.Green, d.Marker, colors.Dim)
+	}
+
+	return fmt.Sprintf("%s%s%s:%d:%d: %s%s: %s%s%s\n%s%s%s%s%s%s%s\n%s%s%s%s%s%s%s\n%s",
+		prefixColor, textIndent, d.Path, d.Line, d.Column,
+		kindColor, kind.String(),
+		colors.Reset, messageColor, d.Message,
+		colors.Reset, colors.Dim, d.SourceBefore, colors.Green, d.SourceMarked, colors.Dim, d.SourceAfter,
+		calloutPrefix, emptyMarginText(maxMargin, true), d.Indent, colors.Green, callout, colors.Dim, d.ContentAfter,
+		colors.Reset)
 }
 
 type MsgDetail struct {
 	Path    string
 	Line    int
 	Column  int
-	Kind    string
 	Message string
 
-	// Source == SourceBefore + SourceMarked + SourceAfter
-	Source       string
 	SourceBefore string
 	SourceMarked string
 	SourceAfter  string
 
-	Indent string
-	Marker string
+	Indent     string
+	Marker     string
+	Suggestion string
 
 	ContentAfter string
 }
@@ -523,7 +986,7 @@ loop:
 	return
 }
 
-func locationOrNil(source *Source, r Range) *MsgLocation {
+func LocationOrNil(source *Source, r Range) *MsgLocation {
 	if source == nil {
 		return nil
 	}
@@ -540,9 +1003,9 @@ func locationOrNil(source *Source, r Range) *MsgLocation {
 	}
 }
 
-func detailStruct(msg Msg, terminalInfo TerminalInfo) MsgDetail {
+func detailStruct(data MsgData, terminalInfo TerminalInfo, maxMargin int) MsgDetail {
 	// Only highlight the first line of the line text
-	loc := *msg.Location
+	loc := *data.Location
 	endOfFirstLine := len(loc.LineText)
 	for i, c := range loc.LineText {
 		if c == '\r' || c == '\n' || c == '\u2028' || c == '\u2029' {
@@ -572,10 +1035,11 @@ func detailStruct(msg Msg, terminalInfo TerminalInfo) MsgDetail {
 
 	spacesPerTab := 2
 	lineText := renderTabStops(firstLine, spacesPerTab)
-	indent := strings.Repeat(" ", len(renderTabStops(firstLine[:loc.Column], spacesPerTab)))
+	textUpToLoc := renderTabStops(firstLine[:loc.Column], spacesPerTab)
+	markerStart := len(textUpToLoc)
+	markerEnd := markerStart
+	indent := strings.Repeat(" ", estimateWidthInTerminal(textUpToLoc))
 	marker := "^"
-	markerStart := len(indent)
-	markerEnd := len(indent)
 
 	// Extend markers to cover the full range of the error
 	if loc.Length > 0 {
@@ -596,7 +1060,11 @@ func detailStruct(msg Msg, terminalInfo TerminalInfo) MsgDetail {
 	// Trim the line to fit the terminal width
 	width := terminalInfo.Width
 	if width < 1 {
-		width = 80
+		width = defaultTerminalWidth
+	}
+	width -= maxMargin + extraMarginChars
+	if width < 1 {
+		width = 1
 	}
 	if loc.Column == endOfFirstLine {
 		// If the marker is at the very end of the line, the marker will be a "^"
@@ -647,37 +1115,51 @@ func detailStruct(msg Msg, terminalInfo TerminalInfo) MsgDetail {
 		}
 
 		// Now we can compute the indent
-		indent = strings.Repeat(" ", markerStart)
 		lineText = slicedLine
+		indent = strings.Repeat(" ", estimateWidthInTerminal(lineText[:markerStart]))
 	}
 
 	// If marker is still multi-character after clipping, make the marker wider
 	if markerEnd-markerStart > 1 {
-		marker = strings.Repeat("~", markerEnd-markerStart)
+		marker = strings.Repeat("~", estimateWidthInTerminal(lineText[markerStart:markerEnd]))
 	}
 
-	kind := "error"
-	if msg.Kind == Warning {
-		kind = "warning"
-	}
+	// Put a margin before the marker indent
+	margin := marginWithLineText(maxMargin, loc.Line)
 
 	return MsgDetail{
 		Path:    loc.File,
 		Line:    loc.Line,
 		Column:  loc.Column,
-		Kind:    kind,
-		Message: msg.Text,
+		Message: data.Text,
 
-		Source:       lineText,
-		SourceBefore: lineText[:markerStart],
+		SourceBefore: margin + lineText[:markerStart],
 		SourceMarked: lineText[markerStart:markerEnd],
 		SourceAfter:  lineText[markerEnd:],
 
-		Indent: indent,
-		Marker: marker,
+		Indent:     indent,
+		Marker:     marker,
+		Suggestion: loc.Suggestion,
 
 		ContentAfter: afterFirstLine,
 	}
+}
+
+// Estimate the number of columns this string will take when printed
+func estimateWidthInTerminal(text string) int {
+	// For now just assume each code point is one column. This is wrong but is
+	// less wrong than assuming each code unit is one column.
+	width := 0
+	for text != "" {
+		c, size := utf8.DecodeRuneInString(text)
+		text = text[size:]
+
+		// Ignore the Zero Width No-Break Space character (UTF-8 BOM)
+		if c != 0xFEFF {
+			width++
+		}
+	}
+	return width
 }
 
 func renderTabStops(withTabs string, spacesPerTab int) string {
@@ -706,32 +1188,59 @@ func renderTabStops(withTabs string, spacesPerTab int) string {
 
 func (log Log) AddError(source *Source, loc Loc, text string) {
 	log.AddMsg(Msg{
-		Kind:     Error,
-		Text:     text,
-		Location: locationOrNil(source, Range{Loc: loc}),
+		Kind: Error,
+		Data: RangeData(source, Range{Loc: loc}, text),
+	})
+}
+
+func (log Log) AddErrorWithNotes(source *Source, loc Loc, text string, notes []MsgData) {
+	log.AddMsg(Msg{
+		Kind:  Error,
+		Data:  RangeData(source, Range{Loc: loc}, text),
+		Notes: notes,
 	})
 }
 
 func (log Log) AddWarning(source *Source, loc Loc, text string) {
 	log.AddMsg(Msg{
-		Kind:     Warning,
-		Text:     text,
-		Location: locationOrNil(source, Range{Loc: loc}),
+		Kind: Warning,
+		Data: RangeData(source, Range{Loc: loc}, text),
 	})
 }
 
 func (log Log) AddRangeError(source *Source, r Range, text string) {
 	log.AddMsg(Msg{
-		Kind:     Error,
-		Text:     text,
-		Location: locationOrNil(source, r),
+		Kind: Error,
+		Data: RangeData(source, r, text),
 	})
 }
 
 func (log Log) AddRangeWarning(source *Source, r Range, text string) {
 	log.AddMsg(Msg{
-		Kind:     Warning,
-		Text:     text,
-		Location: locationOrNil(source, r),
+		Kind: Warning,
+		Data: RangeData(source, r, text),
 	})
+}
+
+func (log Log) AddRangeErrorWithNotes(source *Source, r Range, text string, notes []MsgData) {
+	log.AddMsg(Msg{
+		Kind:  Error,
+		Data:  RangeData(source, r, text),
+		Notes: notes,
+	})
+}
+
+func (log Log) AddRangeWarningWithNotes(source *Source, r Range, text string, notes []MsgData) {
+	log.AddMsg(Msg{
+		Kind:  Warning,
+		Data:  RangeData(source, r, text),
+		Notes: notes,
+	})
+}
+
+func RangeData(source *Source, r Range, text string) MsgData {
+	return MsgData{
+		Text:     text,
+		Location: LocationOrNil(source, r),
+	}
 }

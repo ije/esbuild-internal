@@ -3,7 +3,6 @@ package css_printer
 import (
 	"testing"
 
-	"github.com/ije/esbuild-internal/config"
 	"github.com/ije/esbuild-internal/css_parser"
 	"github.com/ije/esbuild-internal/logger"
 	"github.com/ije/esbuild-internal/test"
@@ -21,12 +20,14 @@ func expectPrintedCommon(t *testing.T, name string, contents string, expected st
 	t.Run(name, func(t *testing.T) {
 		t.Helper()
 		log := logger.NewDeferLog()
-		tree := css_parser.Parse(log, test.SourceForTest(contents), config.Options{})
+		tree := css_parser.Parse(log, test.SourceForTest(contents), css_parser.Options{
+			RemoveWhitespace: options.RemoveWhitespace,
+		})
 		msgs := log.Done()
 		text := ""
 		for _, msg := range msgs {
 			if msg.Kind == logger.Error {
-				text += msg.String(logger.StderrOptions{}, logger.TerminalInfo{})
+				text += msg.String(logger.OutputOptions{}, logger.TerminalInfo{})
 			}
 		}
 		assertEqual(t, text, "")
@@ -44,6 +45,13 @@ func expectPrintedMinify(t *testing.T, contents string, expected string) {
 	t.Helper()
 	expectPrintedCommon(t, contents+" [minified]", contents, expected, Options{
 		RemoveWhitespace: true,
+	})
+}
+
+func expectPrintedASCII(t *testing.T, contents string, expected string) {
+	t.Helper()
+	expectPrintedCommon(t, contents+" [ascii]", contents, expected, Options{
+		ASCIIOnly: true,
 	})
 }
 
@@ -76,7 +84,6 @@ func TestStringQuote(t *testing.T) {
 	expectPrintedString(t, "f\nF", "\"f\\a F\"")
 	expectPrintedString(t, "f\ng", "\"f\\ag\"")
 	expectPrintedString(t, "f\nG", "\"f\\aG\"")
-	expectPrintedString(t, "f\x00o", "\"f\\0o\"")
 	expectPrintedString(t, "f\x01o", "\"f\x01o\"")
 	expectPrintedString(t, "f\to", "\"f\to\"")
 }
@@ -158,6 +165,109 @@ func TestDeclaration(t *testing.T) {
 	expectPrintedMinify(t, "* { unknown: x ( a + b ) }", "*{unknown:x (a + b)}")
 	expectPrintedMinify(t, "* { unknown: x ( a - b ) }", "*{unknown:x (a - b)}")
 	expectPrintedMinify(t, "* { unknown: x ( a , b ) }", "*{unknown:x (a,b)}")
+
+	// Pretty-print long lists in declarations
+	expectPrinted(t, "a { b: c, d }", "a {\n  b: c, d;\n}\n")
+	expectPrinted(t, "a { b: c, (d, e) }", "a {\n  b: c, (d, e);\n}\n")
+	expectPrinted(t, "a { b: c, d, e }", "a {\n  b:\n    c,\n    d,\n    e;\n}\n")
+	expectPrinted(t, "a { b: c, (d, e), f }", "a {\n  b:\n    c,\n    (d, e),\n    f;\n}\n")
+
+	expectPrintedMinify(t, "a { b: c, d }", "a{b:c,d}")
+	expectPrintedMinify(t, "a { b: c, (d, e) }", "a{b:c,(d,e)}")
+	expectPrintedMinify(t, "a { b: c, d, e }", "a{b:c,d,e}")
+	expectPrintedMinify(t, "a { b: c, (d, e), f }", "a{b:c,(d,e),f}")
+}
+
+func TestVerbatimWhitespace(t *testing.T) {
+	expectPrinted(t, "*{--x:}", "* {\n  --x:;\n}\n")
+	expectPrinted(t, "*{--x: }", "* {\n  --x: ;\n}\n")
+	expectPrinted(t, "* { --x:; }", "* {\n  --x:;\n}\n")
+	expectPrinted(t, "* { --x: ; }", "* {\n  --x: ;\n}\n")
+
+	expectPrintedMinify(t, "*{--x:}", "*{--x:}")
+	expectPrintedMinify(t, "*{--x: }", "*{--x: }")
+	expectPrintedMinify(t, "* { --x:; }", "*{--x:}")
+	expectPrintedMinify(t, "* { --x: ; }", "*{--x: }")
+
+	expectPrinted(t, "*{--x:!important}", "* {\n  --x:!important;\n}\n")
+	expectPrinted(t, "*{--x: !important}", "* {\n  --x: !important;\n}\n")
+	expectPrinted(t, "*{ --x:!important }", "* {\n  --x:!important;\n}\n")
+	expectPrinted(t, "*{ --x: !important }", "* {\n  --x: !important;\n}\n")
+	expectPrinted(t, "* { --x:!important; }", "* {\n  --x:!important;\n}\n")
+	expectPrinted(t, "* { --x: !important; }", "* {\n  --x: !important;\n}\n")
+	expectPrinted(t, "* { --x:! important ; }", "* {\n  --x:!important;\n}\n")
+	expectPrinted(t, "* { --x: ! important ; }", "* {\n  --x: !important;\n}\n")
+
+	expectPrintedMinify(t, "*{--x:!important}", "*{--x:!important}")
+	expectPrintedMinify(t, "*{--x: !important}", "*{--x: !important}")
+	expectPrintedMinify(t, "*{ --x:!important }", "*{--x:!important}")
+	expectPrintedMinify(t, "*{ --x: !important }", "*{--x: !important}")
+	expectPrintedMinify(t, "* { --x:!important; }", "*{--x:!important}")
+	expectPrintedMinify(t, "* { --x: !important; }", "*{--x: !important}")
+	expectPrintedMinify(t, "* { --x:! important ; }", "*{--x:!important}")
+	expectPrintedMinify(t, "* { --x: ! important ; }", "*{--x: !important}")
+
+	expectPrinted(t, "* { --x:y; }", "* {\n  --x:y;\n}\n")
+	expectPrinted(t, "* { --x: y; }", "* {\n  --x: y;\n}\n")
+	expectPrinted(t, "* { --x:y ; }", "* {\n  --x:y ;\n}\n")
+	expectPrinted(t, "* { --x:y, ; }", "* {\n  --x:y, ;\n}\n")
+	expectPrinted(t, "* { --x: var(y,); }", "* {\n  --x: var(y,);\n}\n")
+	expectPrinted(t, "* { --x: var(y, ); }", "* {\n  --x: var(y, );\n}\n")
+
+	expectPrintedMinify(t, "* { --x:y; }", "*{--x:y}")
+	expectPrintedMinify(t, "* { --x: y; }", "*{--x: y}")
+	expectPrintedMinify(t, "* { --x:y ; }", "*{--x:y }")
+	expectPrintedMinify(t, "* { --x:y, ; }", "*{--x:y, }")
+	expectPrintedMinify(t, "* { --x: var(y,); }", "*{--x: var(y,)}")
+	expectPrintedMinify(t, "* { --x: var(y, ); }", "*{--x: var(y, )}")
+
+	expectPrinted(t, "* { --x:(y); }", "* {\n  --x:(y);\n}\n")
+	expectPrinted(t, "* { --x:(y) ; }", "* {\n  --x:(y) ;\n}\n")
+	expectPrinted(t, "* { --x: (y); }", "* {\n  --x: (y);\n}\n")
+	expectPrinted(t, "* { --x:(y ); }", "* {\n  --x:(y );\n}\n")
+	expectPrinted(t, "* { --x:( y); }", "* {\n  --x:( y);\n}\n")
+
+	expectPrintedMinify(t, "* { --x:(y); }", "*{--x:(y)}")
+	expectPrintedMinify(t, "* { --x:(y) ; }", "*{--x:(y) }")
+	expectPrintedMinify(t, "* { --x: (y); }", "*{--x: (y)}")
+	expectPrintedMinify(t, "* { --x:(y ); }", "*{--x:(y )}")
+	expectPrintedMinify(t, "* { --x:( y); }", "*{--x:( y)}")
+
+	expectPrinted(t, "* { --x:f(y); }", "* {\n  --x:f(y);\n}\n")
+	expectPrinted(t, "* { --x:f(y) ; }", "* {\n  --x:f(y) ;\n}\n")
+	expectPrinted(t, "* { --x: f(y); }", "* {\n  --x: f(y);\n}\n")
+	expectPrinted(t, "* { --x:f(y ); }", "* {\n  --x:f(y );\n}\n")
+	expectPrinted(t, "* { --x:f( y); }", "* {\n  --x:f( y);\n}\n")
+
+	expectPrintedMinify(t, "* { --x:f(y); }", "*{--x:f(y)}")
+	expectPrintedMinify(t, "* { --x:f(y) ; }", "*{--x:f(y) }")
+	expectPrintedMinify(t, "* { --x: f(y); }", "*{--x: f(y)}")
+	expectPrintedMinify(t, "* { --x:f(y ); }", "*{--x:f(y )}")
+	expectPrintedMinify(t, "* { --x:f( y); }", "*{--x:f( y)}")
+
+	expectPrinted(t, "* { --x:[y]; }", "* {\n  --x:[y];\n}\n")
+	expectPrinted(t, "* { --x:[y] ; }", "* {\n  --x:[y] ;\n}\n")
+	expectPrinted(t, "* { --x: [y]; }", "* {\n  --x: [y];\n}\n")
+	expectPrinted(t, "* { --x:[y ]; }", "* {\n  --x:[y ];\n}\n")
+	expectPrinted(t, "* { --x:[ y]; }", "* {\n  --x:[ y];\n}\n")
+
+	expectPrintedMinify(t, "* { --x:[y]; }", "*{--x:[y]}")
+	expectPrintedMinify(t, "* { --x:[y] ; }", "*{--x:[y] }")
+	expectPrintedMinify(t, "* { --x: [y]; }", "*{--x: [y]}")
+	expectPrintedMinify(t, "* { --x:[y ]; }", "*{--x:[y ]}")
+	expectPrintedMinify(t, "* { --x:[ y]; }", "*{--x:[ y]}")
+
+	expectPrinted(t, "* { --x:{y}; }", "* {\n  --x:{y};\n}\n")
+	expectPrinted(t, "* { --x:{y} ; }", "* {\n  --x:{y} ;\n}\n")
+	expectPrinted(t, "* { --x: {y}; }", "* {\n  --x: {y};\n}\n")
+	expectPrinted(t, "* { --x:{y }; }", "* {\n  --x:{y };\n}\n")
+	expectPrinted(t, "* { --x:{ y}; }", "* {\n  --x:{ y};\n}\n")
+
+	expectPrintedMinify(t, "* { --x:{y}; }", "*{--x:{y}}")
+	expectPrintedMinify(t, "* { --x:{y} ; }", "*{--x:{y} }")
+	expectPrintedMinify(t, "* { --x: {y}; }", "*{--x: {y}}")
+	expectPrintedMinify(t, "* { --x:{y }; }", "*{--x:{y }}")
+	expectPrintedMinify(t, "* { --x:{ y}; }", "*{--x:{ y}}")
 }
 
 func TestAtRule(t *testing.T) {
@@ -184,36 +294,18 @@ func TestAtCharset(t *testing.T) {
 	expectPrintedMinify(t, "@charset \"UTF-8\";", "@charset \"UTF-8\";")
 }
 
-func TestAtNamespace(t *testing.T) {
-	expectPrinted(t, "@namespace\"http://www.com\";", "@namespace \"http://www.com\";\n")
-	expectPrinted(t, "@namespace \"http://www.com\";", "@namespace \"http://www.com\";\n")
-	expectPrinted(t, "@namespace url(http://www.com);", "@namespace \"http://www.com\";\n")
-	expectPrinted(t, "@namespace url(\"http://www.com\");", "@namespace \"http://www.com\";\n")
-	expectPrinted(t, "@namespace ns\"http://www.com\";", "@namespace ns \"http://www.com\";\n")
-	expectPrinted(t, "@namespace ns \"http://www.com\";", "@namespace ns \"http://www.com\";\n")
-	expectPrinted(t, "@namespace ns url(http://www.com);", "@namespace ns \"http://www.com\";\n")
-	expectPrinted(t, "@namespace ns url(\"http://www.com\");", "@namespace ns \"http://www.com\";\n")
-
-	expectPrintedMinify(t, "@namespace\"http://www.com\";", "@namespace\"http://www.com\";")
-	expectPrintedMinify(t, "@namespace \"http://www.com\";", "@namespace\"http://www.com\";")
-	expectPrintedMinify(t, "@namespace url(http://www.com);", "@namespace\"http://www.com\";")
-	expectPrintedMinify(t, "@namespace url(\"http://www.com\");", "@namespace\"http://www.com\";")
-	expectPrintedMinify(t, "@namespace ns\"http://www.com\";", "@namespace ns\"http://www.com\";")
-	expectPrintedMinify(t, "@namespace ns \"http://www.com\";", "@namespace ns\"http://www.com\";")
-	expectPrintedMinify(t, "@namespace ns url(http://www.com);", "@namespace ns\"http://www.com\";")
-	expectPrintedMinify(t, "@namespace ns url(\"http://www.com\");", "@namespace ns\"http://www.com\";")
-}
-
 func TestAtImport(t *testing.T) {
 	expectPrinted(t, "@import\"foo.css\";", "@import \"foo.css\";\n")
 	expectPrinted(t, "@import \"foo.css\";", "@import \"foo.css\";\n")
 	expectPrinted(t, "@import url(foo.css);", "@import \"foo.css\";\n")
 	expectPrinted(t, "@import url(\"foo.css\");", "@import \"foo.css\";\n")
+	expectPrinted(t, "@import url(\"foo.css\") print;", "@import \"foo.css\" print;\n")
 
 	expectPrintedMinify(t, "@import\"foo.css\";", "@import\"foo.css\";")
 	expectPrintedMinify(t, "@import \"foo.css\";", "@import\"foo.css\";")
 	expectPrintedMinify(t, "@import url(foo.css);", "@import\"foo.css\";")
 	expectPrintedMinify(t, "@import url(\"foo.css\");", "@import\"foo.css\";")
+	expectPrintedMinify(t, "@import url(\"foo.css\") print;", "@import\"foo.css\"print;")
 }
 
 func TestAtKeyframes(t *testing.T) {
@@ -250,4 +342,53 @@ func TestMsGridColumnsWhitespace(t *testing.T) {
 	expectPrinted(t, "div { -ms-grid-columns: 1fr (20px 1fr)[3] }", "div {\n  -ms-grid-columns: 1fr (20px 1fr)[3];\n}\n")
 	expectPrintedMinify(t, "div { -ms-grid-columns: (1fr)[3] }", "div{-ms-grid-columns:(1fr)[3]}")
 	expectPrintedMinify(t, "div { -ms-grid-columns: 1fr (20px 1fr)[3] }", "div{-ms-grid-columns:1fr (20px 1fr)[3]}")
+}
+
+func TestASCII(t *testing.T) {
+	expectPrintedASCII(t, "* { background: url(🐈) }", "* {\n  background: url(\\1f408);\n}\n")
+	expectPrintedASCII(t, "* { background: url(🐈6) }", "* {\n  background: url(\\1f408 6);\n}\n")
+	expectPrintedASCII(t, "* { background: url('🐈') }", "* {\n  background: url(\\1f408);\n}\n")
+	expectPrintedASCII(t, "* { background: url('🐈6') }", "* {\n  background: url(\\1f408 6);\n}\n")
+	expectPrintedASCII(t, "* { background: url('(🐈)') }", "* {\n  background: url(\"(\\1f408)\");\n}\n")
+	expectPrintedASCII(t, "* { background: url('(🐈6)') }", "* {\n  background: url(\"(\\1f408 6)\");\n}\n")
+
+	expectPrintedASCII(t, "div { 🐈: 🐈('🐈') }", "div {\n  \\1f408: \\1f408(\"\\1f408\");\n}\n")
+	expectPrintedASCII(t, "div { 🐈 : 🐈 ('🐈 ') }", "div {\n  \\1f408: \\1f408  (\"\\1f408  \");\n}\n")
+	expectPrintedASCII(t, "div { 🐈6: 🐈6('🐈6') }", "div {\n  \\1f408 6: \\1f408 6(\"\\1f408 6\");\n}\n")
+
+	expectPrintedASCII(t, "@🐈;", "@\\1f408;\n")
+	expectPrintedASCII(t, "@🐈 {}", "@\\1f408 {}\n")
+	expectPrintedASCII(t, "@🐈 x {}", "@\\1f408  x {}\n")
+
+	expectPrintedASCII(t, "#🐈#x {}", "#\\1f408#x {\n}\n")
+	expectPrintedASCII(t, "#🐈 #x {}", "#\\1f408  #x {\n}\n")
+	expectPrintedASCII(t, "#🐈::x {}", "#\\1f408::x {\n}\n")
+	expectPrintedASCII(t, "#🐈 ::x {}", "#\\1f408  ::x {\n}\n")
+
+	expectPrintedASCII(t, ".🐈.x {}", ".\\1f408.x {\n}\n")
+	expectPrintedASCII(t, ".🐈 .x {}", ".\\1f408  .x {\n}\n")
+	expectPrintedASCII(t, ".🐈::x {}", ".\\1f408::x {\n}\n")
+	expectPrintedASCII(t, ".🐈 ::x {}", ".\\1f408  ::x {\n}\n")
+
+	expectPrintedASCII(t, "🐈|🐈.x {}", "\\1f408|\\1f408.x {\n}\n")
+	expectPrintedASCII(t, "🐈|🐈 .x {}", "\\1f408|\\1f408  .x {\n}\n")
+	expectPrintedASCII(t, "🐈|🐈::x {}", "\\1f408|\\1f408::x {\n}\n")
+	expectPrintedASCII(t, "🐈|🐈 ::x {}", "\\1f408|\\1f408  ::x {\n}\n")
+
+	expectPrintedASCII(t, "::🐈:x {}", "::\\1f408:x {\n}\n")
+	expectPrintedASCII(t, "::🐈 :x {}", "::\\1f408  :x {\n}\n")
+
+	expectPrintedASCII(t, "[🐈] {}", "[\\1f408] {\n}\n")
+	expectPrintedASCII(t, "[🐈=🐈] {}", "[\\1f408=\\1f408] {\n}\n")
+	expectPrintedASCII(t, "[🐈|🐈=🐈] {}", "[\\1f408|\\1f408=\\1f408] {\n}\n")
+
+	// A space must be consumed after an escaped code point even with six digits
+	expectPrintedASCII(t, ".\\10FFF abc:after { content: '\\10FFF abc' }", ".\\10fff abc:after {\n  content: \"\\10fff abc\";\n}\n")
+	expectPrintedASCII(t, ".\U00010FFFabc:after { content: '\U00010FFFabc' }", ".\\10fff abc:after {\n  content: \"\\10fff abc\";\n}\n")
+	expectPrintedASCII(t, ".\\10FFFFabc:after { content: '\\10FFFFabc' }", ".\\10ffffabc:after {\n  content: \"\\10ffffabc\";\n}\n")
+	expectPrintedASCII(t, ".\\10FFFF abc:after { content: '\\10FFFF abc' }", ".\\10ffffabc:after {\n  content: \"\\10ffffabc\";\n}\n")
+	expectPrintedASCII(t, ".\U0010FFFFabc:after { content: '\U0010FFFFabc' }", ".\\10ffffabc:after {\n  content: \"\\10ffffabc\";\n}\n")
+
+	// This character should always be escaped
+	expectPrinted(t, ".\\FEFF:after { content: '\uFEFF' }", ".\\feff:after {\n  content: \"\\feff\";\n}\n")
 }

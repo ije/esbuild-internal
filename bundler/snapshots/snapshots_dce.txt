@@ -1,238 +1,600 @@
 TestBase64LoaderRemoveUnused
 ---------- /out.js ----------
-// /entry.js
+// entry.js
 console.log("unused import");
 
 ================================================================================
 TestDataURLLoaderRemoveUnused
 ---------- /out.js ----------
-// /entry.js
+// entry.js
 console.log("unused import");
+
+================================================================================
+TestDeadCodeFollowingJump
+---------- /out.js ----------
+// entry.js
+function testReturn() {
+  return y + z();
+  if (x)
+    var y;
+  function z() {
+    KEEP_ME();
+  }
+}
+function testThrow() {
+  throw y + z();
+  if (x)
+    var y;
+  function z() {
+    KEEP_ME();
+  }
+}
+function testBreak() {
+  for (; ; ) {
+    let z2 = function() {
+      KEEP_ME();
+    };
+    var z = z2;
+    y + z2();
+    break;
+    if (x)
+      var y;
+  }
+}
+function testContinue() {
+  for (; ; ) {
+    let z2 = function() {
+      KEEP_ME();
+    };
+    var z = z2;
+    y + z2();
+    continue;
+    if (x)
+      var y;
+  }
+}
+function testStmts() {
+  return [a, b, c, d, e, f, g, h, i];
+  for (; x; )
+    var a;
+  do
+    var b;
+  while (x);
+  for (var c; ; )
+    ;
+  for (var d in x)
+    ;
+  for (var e of x)
+    ;
+  if (x)
+    var f;
+  if (!x)
+    var g;
+  var h;
+  x:
+    var i;
+}
+testReturn();
+testThrow();
+testBreak();
+testContinue();
+testStmts();
+
+================================================================================
+TestDisableTreeShaking
+---------- /out.js ----------
+// keep-me/index.js
+console.log("side effects");
+
+// entry.jsx
+function KeepMe1() {
+}
+var keepMe2 = React.createElement(KeepMe1, null);
+function keepMe3() {
+  console.log("side effects");
+}
+var keepMe4 = keepMe3();
+var keepMe5 = pure();
+var keepMe6 = some.fn();
 
 ================================================================================
 TestFileLoaderRemoveUnused
 ---------- /out.js ----------
-// /entry.js
+// entry.js
 console.log("unused import");
+
+================================================================================
+TestImportReExportOfNamespaceImport
+---------- /out.js ----------
+// Users/user/project/node_modules/pkg/foo.js
+var require_foo = __commonJS((exports, module) => {
+  module.exports = 123;
+});
+
+// Users/user/project/node_modules/pkg/index.js
+var import_foo = __toModule(require_foo());
+
+// Users/user/project/entry.js
+console.log(import_foo.default);
 
 ================================================================================
 TestJSONLoaderRemoveUnused
 ---------- /out.js ----------
-// /entry.js
+// entry.js
 console.log("unused import");
+
+================================================================================
+TestPackageJsonSideEffectsArrayGlob
+---------- /out.js ----------
+// Users/user/project/node_modules/demo-pkg/keep/this/file.js
+console.log("this should be kept");
 
 ================================================================================
 TestPackageJsonSideEffectsArrayKeep
 ---------- /out.js ----------
-// /Users/user/project/node_modules/demo-pkg/index.js
+// Users/user/project/node_modules/demo-pkg/index.js
 console.log("hello");
 
-// /Users/user/project/src/entry.js
+// Users/user/project/src/entry.js
+console.log("unused import");
+
+================================================================================
+TestPackageJsonSideEffectsArrayKeepMainImplicitMain
+---------- /out.js ----------
+// Users/user/project/node_modules/demo-pkg/index-main.js
+var index_main_exports = {};
+__export(index_main_exports, {
+  foo: () => foo
+});
+var foo;
+var init_index_main = __esm(() => {
+  foo = 123;
+  console.log("this should be kept");
+});
+
+// Users/user/project/src/entry.js
+init_index_main();
+
+// Users/user/project/src/require-demo-pkg.js
+init_index_main();
+
+// Users/user/project/src/entry.js
+console.log("unused import");
+
+================================================================================
+TestPackageJsonSideEffectsArrayKeepMainImplicitModule
+---------- /out.js ----------
+// Users/user/project/src/entry.js
+console.log("unused import");
+
+================================================================================
+TestPackageJsonSideEffectsArrayKeepMainUseMain
+---------- /out.js ----------
+// Users/user/project/node_modules/demo-pkg/index-main.js
+console.log("this should be kept");
+
+// Users/user/project/src/entry.js
+console.log("unused import");
+
+================================================================================
+TestPackageJsonSideEffectsArrayKeepMainUseModule
+---------- /out.js ----------
+// Users/user/project/src/entry.js
+console.log("unused import");
+
+================================================================================
+TestPackageJsonSideEffectsArrayKeepModuleImplicitMain
+---------- /out.js ----------
+// Users/user/project/node_modules/demo-pkg/index-main.js
+var index_main_exports = {};
+__export(index_main_exports, {
+  foo: () => foo
+});
+var foo;
+var init_index_main = __esm(() => {
+  foo = 123;
+  console.log("this should be kept");
+});
+
+// Users/user/project/src/require-demo-pkg.js
+init_index_main();
+
+// Users/user/project/src/entry.js
+console.log("unused import");
+
+================================================================================
+TestPackageJsonSideEffectsArrayKeepModuleImplicitModule
+---------- /out.js ----------
+// Users/user/project/node_modules/demo-pkg/index-module.js
+console.log("this should be kept");
+
+// Users/user/project/src/entry.js
+console.log("unused import");
+
+================================================================================
+TestPackageJsonSideEffectsArrayKeepModuleUseMain
+---------- /out.js ----------
+// Users/user/project/src/entry.js
+console.log("unused import");
+
+================================================================================
+TestPackageJsonSideEffectsArrayKeepModuleUseModule
+---------- /out.js ----------
+// Users/user/project/node_modules/demo-pkg/index-module.js
+console.log("this should be kept");
+
+// Users/user/project/src/entry.js
 console.log("unused import");
 
 ================================================================================
 TestPackageJsonSideEffectsArrayRemove
 ---------- /out.js ----------
-// /Users/user/project/src/entry.js
+// Users/user/project/src/entry.js
 console.log("unused import");
 
 ================================================================================
 TestPackageJsonSideEffectsFalseKeepBareImportAndRequireCommonJS
 ---------- /out.js ----------
-// /Users/user/project/node_modules/demo-pkg/index.js
+// Users/user/project/node_modules/demo-pkg/index.js
 var require_demo_pkg = __commonJS((exports) => {
   exports.foo = 123;
   console.log("hello");
 });
 
-// /Users/user/project/src/entry.js
+// Users/user/project/src/entry.js
 require_demo_pkg();
 console.log("unused import");
 
 ================================================================================
 TestPackageJsonSideEffectsFalseKeepBareImportAndRequireES6
 ---------- /out.js ----------
-// /Users/user/project/node_modules/demo-pkg/index.js
-var require_demo_pkg = __commonJS((exports) => {
-  __export(exports, {
-    foo: () => foo
-  });
-  const foo = 123;
+// Users/user/project/node_modules/demo-pkg/index.js
+var demo_pkg_exports = {};
+__export(demo_pkg_exports, {
+  foo: () => foo
+});
+var foo;
+var init_demo_pkg = __esm(() => {
+  foo = 123;
   console.log("hello");
 });
 
-// /Users/user/project/src/entry.js
-require_demo_pkg();
+// Users/user/project/src/entry.js
+init_demo_pkg();
 console.log("unused import");
 
 ================================================================================
 TestPackageJsonSideEffectsFalseKeepNamedImportCommonJS
 ---------- /out.js ----------
-// /Users/user/project/node_modules/demo-pkg/index.js
+// Users/user/project/node_modules/demo-pkg/index.js
 var require_demo_pkg = __commonJS((exports) => {
   exports.foo = 123;
   console.log("hello");
 });
 
-// /Users/user/project/src/entry.js
-const demo_pkg = __toModule(require_demo_pkg());
-console.log(demo_pkg.foo);
+// Users/user/project/src/entry.js
+var import_demo_pkg = __toModule(require_demo_pkg());
+console.log(import_demo_pkg.foo);
 
 ================================================================================
 TestPackageJsonSideEffectsFalseKeepNamedImportES6
 ---------- /out.js ----------
-// /Users/user/project/node_modules/demo-pkg/index.js
-const foo = 123;
+// Users/user/project/node_modules/demo-pkg/index.js
+var foo = 123;
 console.log("hello");
 
-// /Users/user/project/src/entry.js
+// Users/user/project/src/entry.js
 console.log(foo);
 
 ================================================================================
 TestPackageJsonSideEffectsFalseKeepStarImportCommonJS
 ---------- /out.js ----------
-// /Users/user/project/node_modules/demo-pkg/index.js
+// Users/user/project/node_modules/demo-pkg/index.js
 var require_demo_pkg = __commonJS((exports) => {
   exports.foo = 123;
   console.log("hello");
 });
 
-// /Users/user/project/src/entry.js
-const ns = __toModule(require_demo_pkg());
+// Users/user/project/src/entry.js
+var ns = __toModule(require_demo_pkg());
 console.log(ns);
 
 ================================================================================
 TestPackageJsonSideEffectsFalseKeepStarImportES6
 ---------- /out.js ----------
-// /Users/user/project/node_modules/demo-pkg/index.js
-const demo_pkg_exports = {};
+// Users/user/project/node_modules/demo-pkg/index.js
+var demo_pkg_exports = {};
 __export(demo_pkg_exports, {
   foo: () => foo
 });
-const foo = 123;
+var foo = 123;
 console.log("hello");
 
-// /Users/user/project/src/entry.js
+// Users/user/project/src/entry.js
 console.log(demo_pkg_exports);
+
+================================================================================
+TestPackageJsonSideEffectsFalseNoWarningInNodeModulesIssue999
+---------- /out.js ----------
+// Users/user/project/node_modules/demo-pkg/index.js
+console.log("unused import");
+
+// Users/user/project/src/entry.js
+console.log("used import");
 
 ================================================================================
 TestPackageJsonSideEffectsFalseRemoveBareImportCommonJS
 ---------- /out.js ----------
-// /Users/user/project/src/entry.js
+// Users/user/project/src/entry.js
 console.log("unused import");
 
 ================================================================================
 TestPackageJsonSideEffectsFalseRemoveBareImportES6
 ---------- /out.js ----------
-// /Users/user/project/src/entry.js
+// Users/user/project/src/entry.js
 console.log("unused import");
 
 ================================================================================
 TestPackageJsonSideEffectsFalseRemoveNamedImportCommonJS
 ---------- /out.js ----------
-// /Users/user/project/src/entry.js
+// Users/user/project/src/entry.js
 console.log("unused import");
 
 ================================================================================
 TestPackageJsonSideEffectsFalseRemoveNamedImportES6
 ---------- /out.js ----------
-// /Users/user/project/src/entry.js
+// Users/user/project/src/entry.js
 console.log("unused import");
 
 ================================================================================
 TestPackageJsonSideEffectsFalseRemoveStarImportCommonJS
 ---------- /out.js ----------
-// /Users/user/project/src/entry.js
+// Users/user/project/src/entry.js
 console.log("unused import");
 
 ================================================================================
 TestPackageJsonSideEffectsFalseRemoveStarImportES6
 ---------- /out.js ----------
-// /Users/user/project/src/entry.js
+// Users/user/project/src/entry.js
 console.log("unused import");
 
 ================================================================================
 TestPackageJsonSideEffectsKeepExportDefaultExpr
 ---------- /out.js ----------
-// /Users/user/project/node_modules/demo-pkg/index.js
+// Users/user/project/node_modules/demo-pkg/index.js
 var demo_pkg_default = exprWithSideEffects();
 
-// /Users/user/project/src/entry.js
+// Users/user/project/src/entry.js
 console.log(demo_pkg_default);
 
 ================================================================================
 TestPackageJsonSideEffectsNestedDirectoryRemove
 ---------- /out.js ----------
-// /Users/user/project/src/entry.js
+// Users/user/project/src/entry.js
 console.log("unused import");
 
 ================================================================================
 TestPackageJsonSideEffectsTrueKeepCommonJS
 ---------- /out.js ----------
-// /Users/user/project/node_modules/demo-pkg/index.js
+// Users/user/project/node_modules/demo-pkg/index.js
 var require_demo_pkg = __commonJS((exports) => {
   exports.foo = 123;
   console.log("hello");
 });
 
-// /Users/user/project/src/entry.js
-const demo_pkg = __toModule(require_demo_pkg());
+// Users/user/project/src/entry.js
+var import_demo_pkg = __toModule(require_demo_pkg());
 console.log("unused import");
 
 ================================================================================
 TestPackageJsonSideEffectsTrueKeepES6
 ---------- /out.js ----------
-// /Users/user/project/node_modules/demo-pkg/index.js
+// Users/user/project/node_modules/demo-pkg/index.js
 console.log("hello");
 
-// /Users/user/project/src/entry.js
+// Users/user/project/src/entry.js
 console.log("unused import");
+
+================================================================================
+TestRemoveTrailingReturn
+---------- /out.js ----------
+// entry.js
+function foo() {
+  a && b();
+}
+function bar() {
+  return a && b(), KEEP_ME;
+}
+var entry_default = [
+  foo,
+  bar,
+  function() {
+    a && b();
+  },
+  function() {
+    return a && b(), KEEP_ME;
+  },
+  () => {
+    a && b();
+  },
+  () => (a && b(), KEEP_ME)
+];
+export {
+  entry_default as default
+};
 
 ================================================================================
 TestRemoveUnusedImportMeta
 ---------- /out.js ----------
-// /entry.js
+// entry.js
 console.log("foo is unused");
 
 ================================================================================
 TestRemoveUnusedPureCommentCalls
 ---------- /out.js ----------
-// /entry.js
+// entry.js
 function bar() {
 }
-let bare = foo(bar);
-let at_no = /* @__PURE__ */ foo(bar());
-let new_at_no = /* @__PURE__ */ new foo(bar());
-let num_no = /* @__PURE__ */ foo(bar());
-let new_num_no = /* @__PURE__ */ new foo(bar());
-let dot_no = /* @__PURE__ */ foo(sideEffect()).dot(bar());
-let new_dot_no = /* @__PURE__ */ new foo(sideEffect()).dot(bar());
-let nested_no = [1, /* @__PURE__ */ foo(bar()), 2];
-let new_nested_no = [1, /* @__PURE__ */ new foo(bar()), 2];
-let single_at_no = /* @__PURE__ */ foo(bar());
-let new_single_at_no = /* @__PURE__ */ new foo(bar());
-let single_num_no = /* @__PURE__ */ foo(bar());
-let new_single_num_no = /* @__PURE__ */ new foo(bar());
-let bad_no = foo(bar);
-let new_bad_no = new foo(bar);
-let parens_no = foo(bar);
-let new_parens_no = new foo(bar);
-let exp_no = /* @__PURE__ */ foo() ** foo();
-let new_exp_no = /* @__PURE__ */ new foo() ** foo();
+var bare = foo(bar);
+var at_no = /* @__PURE__ */ foo(bar());
+var new_at_no = /* @__PURE__ */ new foo(bar());
+var nospace_at_no = /* @__PURE__ */ foo(bar());
+var nospace_new_at_no = /* @__PURE__ */ new foo(bar());
+var num_no = /* @__PURE__ */ foo(bar());
+var new_num_no = /* @__PURE__ */ new foo(bar());
+var nospace_num_no = /* @__PURE__ */ foo(bar());
+var nospace_new_num_no = /* @__PURE__ */ new foo(bar());
+var dot_no = /* @__PURE__ */ foo(sideEffect()).dot(bar());
+var new_dot_no = /* @__PURE__ */ new foo(sideEffect()).dot(bar());
+var nested_no = [1, /* @__PURE__ */ foo(bar()), 2];
+var new_nested_no = [1, /* @__PURE__ */ new foo(bar()), 2];
+var single_at_no = /* @__PURE__ */ foo(bar());
+var new_single_at_no = /* @__PURE__ */ new foo(bar());
+var single_num_no = /* @__PURE__ */ foo(bar());
+var new_single_num_no = /* @__PURE__ */ new foo(bar());
+var bad_no = foo(bar);
+var new_bad_no = new foo(bar);
+var parens_no = foo(bar);
+var new_parens_no = new foo(bar);
+var exp_no = /* @__PURE__ */ foo() ** foo();
+var new_exp_no = /* @__PURE__ */ new foo() ** foo();
 
 ================================================================================
 TestTextLoaderRemoveUnused
 ---------- /out.js ----------
-// /entry.js
+// entry.js
 console.log("unused import");
+
+================================================================================
+TestTreeShakingBinaryOperators
+---------- /out.js ----------
+// entry.js
+var keep;
+var keep2;
+keep + keep2;
+keep - keep2;
+keep * keep2;
+keep / keep2;
+keep % keep2;
+keep ** keep2;
+keep < keep2;
+keep <= keep2;
+keep > keep2;
+keep >= keep2;
+keep in keep2;
+keep instanceof keep2;
+keep << keep2;
+keep >> keep2;
+keep >>> keep2;
+keep == keep2;
+keep != keep2;
+keep | keep2;
+keep & keep2;
+keep ^ keep2;
+keep = keep2;
+keep += keep2;
+keep -= keep2;
+keep *= keep2;
+keep /= keep2;
+keep %= keep2;
+keep **= keep2;
+keep <<= keep2;
+keep >>= keep2;
+keep >>>= keep2;
+keep |= keep2;
+keep &= keep2;
+keep ^= keep2;
+keep ??= keep2;
+keep ||= keep2;
+keep &&= keep2;
+
+================================================================================
+TestTreeShakingImportIdentifier
+---------- /out.js ----------
+// b.js
+var Base = class {
+};
+
+// a.js
+var Keep = class extends Base {
+};
+
+// entry.js
+new Keep();
+
+================================================================================
+TestTreeShakingInESMWrapper
+---------- /out.js ----------
+// lib.js
+var keep1, keep2;
+var init_lib = __esm(() => {
+  keep1 = () => "keep1";
+  keep2 = () => "keep2";
+});
+
+// cjs.js
+var cjs_exports = {};
+__export(cjs_exports, {
+  default: () => cjs_default
+});
+var cjs_default;
+var init_cjs = __esm(() => {
+  init_lib();
+  cjs_default = keep2();
+});
+
+// entry.js
+init_lib();
+console.log(keep1(), (init_cjs(), cjs_exports));
+
+================================================================================
+TestTreeShakingNoBundleCJS
+---------- /out.js ----------
+function keep() {
+}
+function unused() {
+}
+keep();
+
+================================================================================
+TestTreeShakingNoBundleESM
+---------- /out.js ----------
+function keep() {
+}
+function unused() {
+}
+keep();
+
+================================================================================
+TestTreeShakingNoBundleIIFE
+---------- /out.js ----------
+(() => {
+  function keep() {
+  }
+  keep();
+})();
 
 ================================================================================
 TestTreeShakingReactElements
 ---------- /out.js ----------
-// /entry.jsx
+// entry.jsx
 function Foo() {
 }
-let d = /* @__PURE__ */ React.createElement("div", null);
-let e = /* @__PURE__ */ React.createElement(Foo, null, d);
-let f = /* @__PURE__ */ React.createElement(React.Fragment, null, e);
+var d = /* @__PURE__ */ React.createElement("div", null);
+var e = /* @__PURE__ */ React.createElement(Foo, null, d);
+var f = /* @__PURE__ */ React.createElement(React.Fragment, null, e);
 console.log(f);
+
+================================================================================
+TestTreeShakingUnaryOperators
+---------- /out.js ----------
+// entry.js
+var keep;
++keep;
+-keep;
+~keep;
+delete keep;
+++keep;
+--keep;
+keep++;
+keep--;

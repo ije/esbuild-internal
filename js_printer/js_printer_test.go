@@ -19,18 +19,19 @@ func assertEqual(t *testing.T, a interface{}, b interface{}) {
 	}
 }
 
-func expectPrintedCommon(t *testing.T, name string, contents string, expected string, options PrintOptions) {
+func expectPrintedCommon(t *testing.T, name string, contents string, expected string, options Options) {
 	t.Helper()
 	t.Run(name, func(t *testing.T) {
 		t.Helper()
 		log := logger.NewDeferLog()
-		tree, ok := js_parser.Parse(log, test.SourceForTest(contents), config.Options{
+		tree, ok := js_parser.Parse(log, test.SourceForTest(contents), js_parser.OptionsFromConfig(&config.Options{
+			MangleSyntax:          options.MangleSyntax,
 			UnsupportedJSFeatures: options.UnsupportedFeatures,
-		})
+		}))
 		msgs := log.Done()
 		text := ""
 		for _, msg := range msgs {
-			text += msg.String(logger.StderrOptions{}, logger.TerminalInfo{})
+			text += msg.String(logger.OutputOptions{}, logger.TerminalInfo{})
 		}
 		assertEqual(t, text, "")
 		if !ok {
@@ -46,26 +47,49 @@ func expectPrintedCommon(t *testing.T, name string, contents string, expected st
 
 func expectPrinted(t *testing.T, contents string, expected string) {
 	t.Helper()
-	expectPrintedCommon(t, contents, contents, expected, PrintOptions{})
+	expectPrintedCommon(t, contents, contents, expected, Options{})
 }
 
 func expectPrintedMinify(t *testing.T, contents string, expected string) {
 	t.Helper()
-	expectPrintedCommon(t, contents+" [minified]", contents, expected, PrintOptions{
+	expectPrintedCommon(t, contents+" [minified]", contents, expected, Options{
 		RemoveWhitespace: true,
 	})
 }
 
 func expectPrintedMangle(t *testing.T, contents string, expected string) {
 	t.Helper()
-	expectPrintedCommon(t, contents+" [minified]", contents, expected, PrintOptions{
+	expectPrintedCommon(t, contents+" [mangled]", contents, expected, Options{
 		MangleSyntax: true,
+	})
+}
+
+func expectPrintedMangleMinify(t *testing.T, contents string, expected string) {
+	t.Helper()
+	expectPrintedCommon(t, contents+" [mangled, minified]", contents, expected, Options{
+		MangleSyntax:     true,
+		RemoveWhitespace: true,
+	})
+}
+
+func expectPrintedASCII(t *testing.T, contents string, expected string) {
+	t.Helper()
+	expectPrintedCommon(t, contents+" [ascii]", contents, expected, Options{
+		ASCIIOnly: true,
+	})
+}
+
+func expectPrintedMinifyASCII(t *testing.T, contents string, expected string) {
+	t.Helper()
+	expectPrintedCommon(t, contents+" [ascii]", contents, expected, Options{
+		RemoveWhitespace: true,
+		ASCIIOnly:        true,
 	})
 }
 
 func expectPrintedTarget(t *testing.T, esVersion int, contents string, expected string) {
 	t.Helper()
-	expectPrintedCommon(t, contents, contents, expected, PrintOptions{
+	expectPrintedCommon(t, contents, contents, expected, Options{
 		UnsupportedFeatures: compat.UnsupportedJSFeatures(map[compat.Engine][]int{
 			compat.ES: {esVersion},
 		}),
@@ -74,7 +98,7 @@ func expectPrintedTarget(t *testing.T, esVersion int, contents string, expected 
 
 func expectPrintedTargetMinify(t *testing.T, esVersion int, contents string, expected string) {
 	t.Helper()
-	expectPrintedCommon(t, contents+" [minified]", contents, expected, PrintOptions{
+	expectPrintedCommon(t, contents+" [minified]", contents, expected, Options{
 		UnsupportedFeatures: compat.UnsupportedJSFeatures(map[compat.Engine][]int{
 			compat.ES: {esVersion},
 		}),
@@ -84,11 +108,21 @@ func expectPrintedTargetMinify(t *testing.T, esVersion int, contents string, exp
 
 func expectPrintedTargetMangle(t *testing.T, esVersion int, contents string, expected string) {
 	t.Helper()
-	expectPrintedCommon(t, contents+" [minified]", contents, expected, PrintOptions{
+	expectPrintedCommon(t, contents+" [mangled]", contents, expected, Options{
 		UnsupportedFeatures: compat.UnsupportedJSFeatures(map[compat.Engine][]int{
 			compat.ES: {esVersion},
 		}),
 		MangleSyntax: true,
+	})
+}
+
+func expectPrintedTargetASCII(t *testing.T, esVersion int, contents string, expected string) {
+	t.Helper()
+	expectPrintedCommon(t, contents+" [ascii]", contents, expected, Options{
+		UnsupportedFeatures: compat.UnsupportedJSFeatures(map[compat.Engine][]int{
+			compat.ES: {esVersion},
+		}),
+		ASCIIOnly: true,
 	})
 }
 
@@ -252,16 +286,16 @@ func TestCall(t *testing.T) {
 	expectPrinted(t, "eval?.(x, y)", "eval?.(x, y);\n")
 	expectPrinted(t, "(1, eval)(x)", "(1, eval)(x);\n")
 	expectPrinted(t, "(1, eval)?.(x)", "(1, eval)?.(x);\n")
-	expectPrinted(t, "(1 ? eval : 2)(x)", "(0, eval)(x);\n")
-	expectPrinted(t, "(1 ? eval : 2)?.(x)", "(0, eval)?.(x);\n")
+	expectPrintedMangle(t, "(1 ? eval : 2)(x)", "(0, eval)(x);\n")
+	expectPrintedMangle(t, "(1 ? eval : 2)?.(x)", "(0, eval)?.(x);\n")
 
 	expectPrintedMinify(t, "eval?.(x)", "eval?.(x);")
 	expectPrintedMinify(t, "eval(x,y)", "eval(x,y);")
 	expectPrintedMinify(t, "eval?.(x,y)", "eval?.(x,y);")
 	expectPrintedMinify(t, "(1, eval)(x)", "(1,eval)(x);")
 	expectPrintedMinify(t, "(1, eval)?.(x)", "(1,eval)?.(x);")
-	expectPrintedMinify(t, "(1 ? eval : 2)(x)", "(0,eval)(x);")
-	expectPrintedMinify(t, "(1 ? eval : 2)?.(x)", "(0,eval)?.(x);")
+	expectPrintedMangleMinify(t, "(1 ? eval : 2)(x)", "(0,eval)(x);")
+	expectPrintedMangleMinify(t, "(1 ? eval : 2)?.(x)", "(0,eval)?.(x);")
 }
 
 func TestMember(t *testing.T) {
@@ -340,13 +374,13 @@ func TestString(t *testing.T) {
 }
 
 func TestTemplate(t *testing.T) {
-	expectPrinted(t, "let x = `\\1`", "let x = `\x01`;\n")
+	expectPrinted(t, "let x = `\\0`", "let x = `\\0`;\n")
 	expectPrinted(t, "let x = `\\x01`", "let x = `\x01`;\n")
-	expectPrinted(t, "let x = `\\1${0}`", "let x = `\x01${0}`;\n")
+	expectPrinted(t, "let x = `\\0${0}`", "let x = `\\0${0}`;\n")
 	expectPrinted(t, "let x = `\\x01${0}`", "let x = `\x01${0}`;\n")
-	expectPrinted(t, "let x = `${0}\\1`", "let x = `${0}\x01`;\n")
+	expectPrinted(t, "let x = `${0}\\0`", "let x = `${0}\\0`;\n")
 	expectPrinted(t, "let x = `${0}\\x01`", "let x = `${0}\x01`;\n")
-	expectPrinted(t, "let x = `${0}\\1${1}`", "let x = `${0}\x01${1}`;\n")
+	expectPrinted(t, "let x = `${0}\\0${1}`", "let x = `${0}\\0${1}`;\n")
 	expectPrinted(t, "let x = `${0}\\x01${1}`", "let x = `${0}\x01${1}`;\n")
 
 	expectPrinted(t, "let x = String.raw`\\1`", "let x = String.raw`\\1`;\n")
@@ -692,9 +726,9 @@ func TestMinify(t *testing.T) {
 	expectPrintedMinify(t, "export {a, b as c} from 'path'", "export{a,b as c}from\"path\";")
 
 	// Print some strings using template literals when minifying
-	expectPrinted(t, "'\\n'", "\"\\n\";\n")
-	expectPrintedMangle(t, "'\\n'", "`\n`;\n")
-	expectPrintedMangle(t, "({'\\n': 0})", "({\"\\n\": 0});\n")
+	expectPrinted(t, "x = '\\n'", "x = \"\\n\";\n")
+	expectPrintedMangle(t, "x = '\\n'", "x = `\n`;\n")
+	expectPrintedMangle(t, "x = {'\\n': 0}", "x = {\"\\n\": 0};\n")
 	expectPrintedMangle(t, "(class{'\\n' = 0})", "(class {\n  \"\\n\" = 0;\n});\n")
 	expectPrintedMangle(t, "class Foo{'\\n' = 0}", "class Foo {\n  \"\\n\" = 0;\n}\n")
 
@@ -726,4 +760,45 @@ func TestES5(t *testing.T) {
 
 	expectPrintedTargetMinify(t, 5, "() => {}", "(function(){});")
 	expectPrintedTargetMinify(t, 2015, "() => {}", "()=>{};")
+}
+
+func TestASCIIOnly(t *testing.T) {
+	expectPrinted(t, "let π = 'π'", "let π = \"π\";\n")
+	expectPrinted(t, "let π_ = 'π'", "let π_ = \"π\";\n")
+	expectPrinted(t, "let _π = 'π'", "let _π = \"π\";\n")
+	expectPrintedASCII(t, "let π = 'π'", "let \\u03C0 = \"\\u03C0\";\n")
+	expectPrintedASCII(t, "let π_ = 'π'", "let \\u03C0_ = \"\\u03C0\";\n")
+	expectPrintedASCII(t, "let _π = 'π'", "let _\\u03C0 = \"\\u03C0\";\n")
+
+	expectPrinted(t, "let 貓 = '🐈'", "let 貓 = \"🐈\";\n")
+	expectPrinted(t, "let 貓abc = '🐈'", "let 貓abc = \"🐈\";\n")
+	expectPrinted(t, "let abc貓 = '🐈'", "let abc貓 = \"🐈\";\n")
+	expectPrintedASCII(t, "let 貓 = '🐈'", "let \\u8C93 = \"\\u{1F408}\";\n")
+	expectPrintedASCII(t, "let 貓abc = '🐈'", "let \\u8C93abc = \"\\u{1F408}\";\n")
+	expectPrintedASCII(t, "let abc貓 = '🐈'", "let abc\\u8C93 = \"\\u{1F408}\";\n")
+
+	// Test a character outside the BMP
+	expectPrinted(t, "var 𐀀", "var 𐀀;\n")
+	expectPrinted(t, "var \\u{10000}", "var 𐀀;\n")
+	expectPrintedASCII(t, "var 𐀀", "var \\u{10000};\n")
+	expectPrintedASCII(t, "var \\u{10000}", "var \\u{10000};\n")
+	expectPrintedTargetASCII(t, 2015, "'𐀀'", "\"\\u{10000}\";\n")
+	expectPrintedTargetASCII(t, 5, "'𐀀'", "\"\\uD800\\uDC00\";\n")
+	expectPrintedTargetASCII(t, 2015, "x.𐀀", "x.\\u{10000};\n")
+	expectPrintedTargetASCII(t, 5, "x.𐀀", "x[\"\\uD800\\uDC00\"];\n")
+
+	// Escapes should use consistent case
+	expectPrintedASCII(t, "var \\u{100a} = {\\u100A: '\\u100A'}", "var \\u100A = {\\u100A: \"\\u100A\"};\n")
+	expectPrintedASCII(t, "var \\u{1000a} = {\\u{1000A}: '\\u{1000A}'}", "var \\u{1000A} = {\\u{1000A}: \"\\u{1000A}\"};\n")
+
+	// These characters should always be escaped
+	expectPrinted(t, "let x = '\u2028'", "let x = \"\\u2028\";\n")
+	expectPrinted(t, "let x = '\u2029'", "let x = \"\\u2029\";\n")
+	expectPrinted(t, "let x = '\uFEFF'", "let x = \"\\uFEFF\";\n")
+
+	// There should still be a space before "extends"
+	expectPrintedASCII(t, "class 𐀀 extends π {}", "class \\u{10000} extends \\u03C0 {\n}\n")
+	expectPrintedASCII(t, "(class 𐀀 extends π {})", "(class \\u{10000} extends \\u03C0 {\n});\n")
+	expectPrintedMinifyASCII(t, "class 𐀀 extends π {}", "class \\u{10000} extends \\u03C0{}")
+	expectPrintedMinifyASCII(t, "(class 𐀀 extends π {})", "(class \\u{10000} extends \\u03C0{});")
 }

@@ -272,7 +272,7 @@ func TestSplittingMissingLazyExport(t *testing.T) {
 			OutputFormat:  config.FormatESModule,
 			AbsOutputDir:  "/out",
 		},
-		expectedCompileLog: `/common.js: warning: No matching export for import "missing"
+		expectedCompileLog: `common.js: warning: Import "missing" will always be undefined because the file "empty.js" has no exports
 `,
 	})
 }
@@ -481,6 +481,47 @@ func TestSplittingMinifyIdentifiersCrashIssue437(t *testing.T) {
 			MinifyIdentifiers: true,
 			OutputFormat:      config.FormatESModule,
 			AbsOutputDir:      "/out",
+		},
+	})
+}
+
+func TestSplittingHybridESMAndCJSIssue617(t *testing.T) {
+	splitting_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/a.js": `
+				export let foo
+			`,
+			"/b.js": `
+				export let bar = require('./a')
+			`,
+		},
+		entryPaths: []string{"/a.js", "/b.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			CodeSplitting: true,
+			OutputFormat:  config.FormatESModule,
+			AbsOutputDir:  "/out",
+		},
+	})
+}
+
+func TestSplittingPublicPathEntryName(t *testing.T) {
+	splitting_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/a.js": `
+				import("./b")
+			`,
+			"/b.js": `
+				console.log('b')
+			`,
+		},
+		entryPaths: []string{"/a.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			CodeSplitting: true,
+			OutputFormat:  config.FormatESModule,
+			PublicPath:    "/www/",
+			AbsOutputDir:  "/out",
 		},
 	})
 }

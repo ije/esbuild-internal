@@ -23,66 +23,111 @@ func code(isES6 bool) string {
 	// Note: The "__rest" function has a for-of loop which requires ES6, but
 	// transforming destructuring to ES5 isn't even supported so it's ok.
 	text := `
-		var __defineProperty = Object.defineProperty
-		var __hasOwnProperty = Object.prototype.hasOwnProperty
-		var __getOwnPropertySymbols = Object.getOwnPropertySymbols
-		var __getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor
-		var __propertyIsEnumerable = Object.prototype.propertyIsEnumerable
+		var __create = Object.create
+		var __defProp = Object.defineProperty
+		var __getProtoOf = Object.getPrototypeOf
+		var __hasOwnProp = Object.prototype.hasOwnProperty
+		var __getOwnPropNames = Object.getOwnPropertyNames
+		var __getOwnPropDesc = Object.getOwnPropertyDescriptor // Note: can return "undefined" due to a Safari bug
+		var __getOwnPropSymbols = Object.getOwnPropertySymbols
+		var __propIsEnum = Object.prototype.propertyIsEnumerable
 
 		export var __pow = Math.pow
-		export var __assign = Object.assign
+
+		var __defNormalProp = (obj, key, value) => key in obj
+			? __defProp(obj, key, {enumerable: true, configurable: true, writable: true, value})
+			: obj[key] = value
+
+		export var __assign = (a, b) => {
+			for (var prop in b ||= {})
+				if (__hasOwnProp.call(b, prop))
+					__defNormalProp(a, prop, b[prop])
+			if (__getOwnPropSymbols)
+		`
+
+	// Avoid "of" when not using ES6
+	if isES6 {
+		text += `
+				for (var prop of __getOwnPropSymbols(b)) {
+		`
+	} else {
+		text += `
+				for (var props = __getOwnPropSymbols(b), i = 0, n = props.length, prop; i < n; i++) {
+					prop = props[i]
+		`
+	}
+
+	text += `
+					if (__propIsEnum.call(b, prop))
+						__defNormalProp(a, prop, b[prop])
+				}
+			return a
+		}
+
+		// Tells importing modules that this can be considered an ES6 module
+		var __markAsModule = target => __defProp(target, '__esModule', { value: true })
+
+		// Tells importing modules that this can be considered an ES6 module
+		export var __name = (target, value) => __defProp(target, 'name', { value, configurable: true })
 
 		// For object rest patterns
 		export var __restKey = key => typeof key === 'symbol' ? key : key + ''
 		export var __rest = (source, exclude) => {
 			var target = {}
 			for (var prop in source)
-				if (__hasOwnProperty.call(source, prop) && exclude.indexOf(prop) < 0)
+				if (__hasOwnProp.call(source, prop) && exclude.indexOf(prop) < 0)
 					target[prop] = source[prop]
-			if (source != null && __getOwnPropertySymbols)
-				for (var prop of __getOwnPropertySymbols(source))
-					if (exclude.indexOf(prop) < 0 && __propertyIsEnumerable.call(source, prop))
+			if (source != null && __getOwnPropSymbols)
+	`
+
+	// Avoid "of" when not using ES6
+	if isES6 {
+		text += `
+				for (var prop of __getOwnPropSymbols(source)) {
+		`
+	} else {
+		text += `
+				for (var props = __getOwnPropSymbols(source), i = 0, n = props.length, prop; i < n; i++) {
+					prop = props[i]
+		`
+	}
+
+	text += `
+					if (exclude.indexOf(prop) < 0 && __propIsEnum.call(source, prop))
 						target[prop] = source[prop]
+				}
 			return target
 		}
 
+		// This is for lazily-initialized ESM code
+		export var __esm = (fn, res) => () => (fn && (res = fn(fn = 0)), res)
+
 		// Wraps a CommonJS closure and returns a require() function
-		export var __commonJS = (callback, module) => () => {
-			if (!module) {
-				module = {exports: {}}
-				callback(module.exports, module)
-			}
-			return module.exports
-		}
+		export var __commonJS = (cb, mod) => () => (mod || cb((mod = {exports: {}}).exports, mod), mod.exports)
 
 		// Used to implement ES6 exports to CommonJS
-		var __markAsModule = target => {
-			return __defineProperty(target, '__esModule', { value: true })
-		}
 		export var __export = (target, all) => {
-			__markAsModule(target)
 			for (var name in all)
-				__defineProperty(target, name, { get: all[name], enumerable: true })
+				__defProp(target, name, { get: all[name], enumerable: true })
 		}
-		export var __exportStar = (target, module) => {
-			__markAsModule(target)
-			if (typeof module === 'object' || typeof module === 'function')
+		export var __exportStar = (target, module, desc) => {
+			if (module && typeof module === 'object' || typeof module === 'function')
 	`
 
 	// Avoid "let" when not using ES6
 	if isES6 {
 		text += `
-			for (let key in module)
-				if (!__hasOwnProperty.call(target, key) && key !== 'default')
-					__defineProperty(target, key, { get: () => module[key], enumerable: true })
+				for (let key of __getOwnPropNames(module))
+					if (!__hasOwnProp.call(target, key) && key !== 'default')
+						__defProp(target, key, { get: () => module[key], enumerable: !(desc = __getOwnPropDesc(module, key)) || desc.enumerable })
 		`
 	} else {
 		text += `
-			for (var key in module)
-				if (!__hasOwnProperty.call(target, key) && key !== 'default')
-					(k => {
-						__defineProperty(target, k, { get: () => module[k], enumerable: true })
-					})(key)
+				for (var keys = __getOwnPropNames(module), i = 0, n = keys.length, key; i < n; i++) {
+					key = keys[i]
+					if (!__hasOwnProp.call(target, key) && key !== 'default')
+						__defProp(target, key, { get: (k => module[k]).bind(null, key), enumerable: !(desc = __getOwnPropDesc(module, key)) || desc.enumerable })
+				}
 		`
 	}
 
@@ -92,11 +137,20 @@ func code(isES6 bool) string {
 
 		// Converts the module from CommonJS to ES6 if necessary
 		export var __toModule = module => {
-			if (module && module.__esModule)
-				return module
-			return __exportStar(
-				__defineProperty({}, 'default', { value: module, enumerable: true }),
-				module)
+			return __exportStar(__markAsModule(
+				__defProp(
+					module != null ? __create(__getProtoOf(module)) : {},
+					'default',
+
+					// If this is an ESM file that has been converted to a CommonJS file
+					// using a Babel-compatible transform (i.e. "__esModule" has been set)
+					// and there is already a "default" property, then forward "default"
+					// to that property. Otherwise set "default" to "module.exports" for
+					// node compatibility.
+					module && module.__esModule && 'default' in module
+						? { get: () => module.default, enumerable: true }
+						: { value: module, enumerable: true })
+			), module)
 		}
 
 		// For TypeScript decorators
@@ -104,20 +158,20 @@ func code(isES6 bool) string {
 		// - kind === 1: method, parameter
 		// - kind === 2: field
 		export var __decorate = (decorators, target, key, kind) => {
-			var result = kind > 1 ? void 0 : kind ? __getOwnPropertyDescriptor(target, key) : target
+			var result = kind > 1 ? void 0 : kind ? __getOwnPropDesc(target, key) : target
 			for (var i = decorators.length - 1, decorator; i >= 0; i--)
 				if (decorator = decorators[i])
 					result = (kind ? decorator(target, key, result) : decorator(result)) || result
 			if (kind && result)
-				__defineProperty(target, key, result)
+				__defProp(target, key, result)
 			return result
 		}
 		export var __param = (index, decorator) => (target, key) => decorator(target, key, index)
 
 		// For class members
 		export var __publicField = (obj, key, value) => {
-			if (key in obj) return __defineProperty(obj, key, {enumerable: true, configurable: true, writable: true, value})
-			else return obj[key] = value
+			__defNormalProp(obj, typeof key !== 'symbol' ? key + '' : key, value)
+			return value
 		}
 		var __accessCheck = (obj, member, msg) => {
 			if (!member.has(obj)) throw TypeError('Cannot ' + msg)
@@ -130,6 +184,9 @@ func code(isES6 bool) string {
 			__accessCheck(obj, member, 'write to private field')
 			setter ? setter.call(obj, value) : member.set(obj, value)
 			return value
+		}
+		export var __privateAssign = (obj, member, setter) => {
+			return { set _(value) { __privateSet(obj, member, value, setter) } }
 		}
 		export var __privateMethod = (obj, member, method) => {
 			__accessCheck(obj, member, 'access private method')
