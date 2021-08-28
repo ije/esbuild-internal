@@ -1,3 +1,5 @@
+> Expose amazing esbuild internal packages.
+
 <p align="center">
   <img src="./images/wordmark.svg" alt="esbuild: An extremely fast JavaScript bundler">
   <br>
@@ -13,7 +15,7 @@
 Our current build tools for the web are 10-100x slower than they could be:
 
 <p align="center">
-  <img src="images/benchmark.svg" alt="Bar chart with benchmark results">
+  <img src="./images/benchmark.svg" alt="Bar chart with benchmark results">
 </p>
 
 The main goal of the esbuild bundler project is to bring about a new era of build tool performance, and create an easy-to-use modern bundler along the way.

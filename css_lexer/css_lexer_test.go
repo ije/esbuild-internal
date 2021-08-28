@@ -8,17 +8,17 @@ import (
 )
 
 func lexToken(contents string) (T, string) {
-	log := logger.NewDeferLog()
-	tokens := Tokenize(log, test.SourceForTest(contents))
-	if len(tokens) > 0 {
-		t := tokens[0]
+	log := logger.NewDeferLog(logger.DeferLogNoVerboseOrDebug)
+	result := Tokenize(log, test.SourceForTest(contents))
+	if len(result.Tokens) > 0 {
+		t := result.Tokens[0]
 		return t.Kind, t.DecodedText(contents)
 	}
 	return TEndOfFile, ""
 }
 
 func lexerError(contents string) string {
-	log := logger.NewDeferLog()
+	log := logger.NewDeferLog(logger.DeferLogNoVerboseOrDebug)
 	Tokenize(log, test.SourceForTest(contents))
 	text := ""
 	for _, msg := range log.Done() {

@@ -14,7 +14,6 @@ import (
 type T uint8
 
 const eof = -1
-const replacementCharacter = 0xFFFD
 
 const (
 	TEndOfFile T = iota
@@ -101,6 +100,14 @@ func (t T) String() string {
 	return tokenToString[t]
 }
 
+func (t T) IsNumeric() bool {
+	return t == TNumber || t == TPercentage || t == TDimension
+}
+
+func (t T) IsNumericOrIdent() bool {
+	return t.IsNumeric() || t == TIdent
+}
+
 // This token struct is designed to be memory-efficient. It just references a
 // range in the input file instead of directly containing the substring of text
 // since a range takes up less memory than a string.
@@ -146,17 +153,27 @@ func (token Token) DecodedText(contents string) string {
 }
 
 type lexer struct {
-	log       logger.Log
-	source    logger.Source
-	current   int
-	codePoint rune
-	Token     Token
+	log                     logger.Log
+	source                  logger.Source
+	tracker                 logger.LineColumnTracker
+	current                 int
+	codePoint               rune
+	Token                   Token
+	approximateNewlineCount int
+	sourceMappingURL        logger.Span
 }
 
-func Tokenize(log logger.Log, source logger.Source) (tokens []Token) {
+type TokenizeResult struct {
+	Tokens               []Token
+	ApproximateLineCount int32
+	SourceMapComment     logger.Span
+}
+
+func Tokenize(log logger.Log, source logger.Source) TokenizeResult {
 	lexer := lexer{
-		log:    log,
-		source: source,
+		log:     log,
+		source:  source,
+		tracker: logger.MakeLineColumnTracker(&source),
 	}
 	lexer.step()
 
@@ -171,11 +188,16 @@ func Tokenize(log logger.Log, source logger.Source) (tokens []Token) {
 	}
 
 	lexer.next()
+	var tokens []Token
 	for lexer.Token.Kind != TEndOfFile {
 		tokens = append(tokens, lexer.Token)
 		lexer.next()
 	}
-	return
+	return TokenizeResult{
+		Tokens:               tokens,
+		ApproximateLineCount: int32(lexer.approximateNewlineCount) + 1,
+		SourceMapComment:     lexer.sourceMappingURL,
+	}
 }
 
 func (lexer *lexer) step() {
@@ -184,6 +206,16 @@ func (lexer *lexer) step() {
 	// Use -1 to indicate the end of the file
 	if width == 0 {
 		codePoint = eof
+	}
+
+	// Track the approximate number of newlines in the file so we can preallocate
+	// the line offset table in the printer for source maps. The line offset table
+	// is the #1 highest allocation in the heap profile, so this is worth doing.
+	// This count is approximate because it handles "\n" and "\r\n" (the common
+	// cases) but not "\r" or "\u2028" or "\u2029". Getting this wrong is harmless
+	// because it's only a preallocation. The array will just grow if it's too small.
+	if codePoint == '\n' {
+		lexer.approximateNewlineCount++
 	}
 
 	lexer.codePoint = codePoint
@@ -307,8 +339,7 @@ func (lexer *lexer) next() {
 				lexer.step()
 				lexer.Token.Kind = TCDC
 			} else if lexer.wouldStartIdentifier() {
-				lexer.consumeName()
-				lexer.Token.Kind = TIdent
+				lexer.Token.Kind = lexer.consumeIdentLike()
 			} else {
 				lexer.step()
 				lexer.Token.Kind = TDelim
@@ -340,7 +371,7 @@ func (lexer *lexer) next() {
 				lexer.Token.Kind = lexer.consumeIdentLike()
 			} else {
 				lexer.step()
-				lexer.log.AddRangeError(&lexer.source, lexer.Token.Range, "Invalid escape")
+				lexer.log.AddRangeError(&lexer.tracker, lexer.Token.Range, "Invalid escape")
 				lexer.Token.Kind = TDelim
 			}
 
@@ -397,18 +428,36 @@ func (lexer *lexer) next() {
 }
 
 func (lexer *lexer) consumeToEndOfMultiLineComment(startRange logger.Range) {
+	// Keep track of the contents of the "sourceMappingURL=" comment
+	startOfSourceMappingURL := 0
+	switch lexer.codePoint {
+	case '#', '@':
+		if strings.HasPrefix(lexer.source.Contents[lexer.current:], " sourceMappingURL=") {
+			startOfSourceMappingURL = lexer.current + len(" sourceMappingURL=")
+		}
+	}
+
 	for {
 		switch lexer.codePoint {
 		case '*':
+			endOfSourceMappingURL := lexer.current - 1
 			lexer.step()
 			if lexer.codePoint == '/' {
 				lexer.step()
+				if startOfSourceMappingURL != 0 {
+					r := logger.Range{Loc: logger.Loc{Start: int32(startOfSourceMappingURL)}}
+					text := lexer.source.Contents[startOfSourceMappingURL:endOfSourceMappingURL]
+					for int(r.Len) < len(text) && !isWhitespace(rune(text[r.Len])) {
+						r.Len++
+					}
+					lexer.sourceMappingURL = logger.Span{Text: text[:r.Len], Range: r}
+				}
 				return
 			}
 
 		case eof: // This indicates the end of the file
-			lexer.log.AddErrorWithNotes(&lexer.source, logger.Loc{Start: lexer.Token.Range.End()}, "Expected \"*/\" to terminate multi-line comment",
-				[]logger.MsgData{logger.RangeData(&lexer.source, startRange, "The multi-line comment starts here")})
+			lexer.log.AddErrorWithNotes(&lexer.tracker, logger.Loc{Start: lexer.Token.Range.End()}, "Expected \"*/\" to terminate multi-line comment",
+				[]logger.MsgData{logger.RangeData(&lexer.tracker, startRange, "The multi-line comment starts here")})
 			return
 
 		default:
@@ -421,7 +470,7 @@ func (lexer *lexer) consumeToEndOfSingleLineComment() {
 	for !isNewline(lexer.codePoint) && lexer.codePoint != eof {
 		lexer.step()
 	}
-	lexer.log.AddRangeWarning(&lexer.source, lexer.Token.Range, "Comments in CSS use \"/* ... */\" instead of \"//\"")
+	lexer.log.AddRangeWarning(&lexer.tracker, lexer.Token.Range, "Comments in CSS use \"/* ... */\" instead of \"//\"")
 }
 
 func (lexer *lexer) isValidEscape() bool {
@@ -438,13 +487,16 @@ func (lexer *lexer) wouldStartIdentifier() bool {
 	}
 
 	if lexer.codePoint == '-' {
-		c, w := utf8.DecodeRuneInString(lexer.source.Contents[lexer.current:])
+		c, width := utf8.DecodeRuneInString(lexer.source.Contents[lexer.current:])
+		if c == utf8.RuneError && width <= 1 {
+			return false // Decoding error
+		}
 		if IsNameStart(c) || c == '-' {
 			return true
 		}
 		if c == '\\' {
-			c, _ = utf8.DecodeRuneInString(lexer.source.Contents[lexer.current+w:])
-			return !isNewline(c)
+			c2, _ := utf8.DecodeRuneInString(lexer.source.Contents[lexer.current+width:])
+			return !isNewline(c2)
 		}
 		return false
 	}
@@ -453,14 +505,21 @@ func (lexer *lexer) wouldStartIdentifier() bool {
 }
 
 func WouldStartIdentifierWithoutEscapes(text string) bool {
-	if len(text) > 0 {
-		c, width := utf8.DecodeRuneInString(text)
-		if IsNameStart(c) {
+	c, width := utf8.DecodeRuneInString(text)
+	if c == utf8.RuneError && width <= 1 {
+		return false // Decoding error
+	}
+	if IsNameStart(c) {
+		return true
+	}
+
+	if c == '-' {
+		c2, width2 := utf8.DecodeRuneInString(text[width:])
+		if c2 == utf8.RuneError && width2 <= 1 {
+			return false // Decoding error
+		}
+		if IsNameStart(c2) || c2 == '-' {
 			return true
-		} else if c == '-' {
-			if c, _ := utf8.DecodeRuneInString(text[width:]); IsNameStart(c) || c == '-' {
-				return true
-			}
 		}
 	}
 	return false
@@ -537,13 +596,13 @@ func (lexer *lexer) consumeEscape() rune {
 			lexer.step()
 		}
 		if hex == 0 || (hex >= 0xD800 && hex <= 0xDFFF) || hex > 0x10FFFF {
-			return replacementCharacter
+			return utf8.RuneError
 		}
 		return rune(hex)
 	}
 
 	if c == eof {
-		return replacementCharacter
+		return utf8.RuneError
 	}
 
 	lexer.step()
@@ -582,7 +641,7 @@ validURL:
 
 		case eof:
 			loc := logger.Loc{Start: lexer.Token.Range.End()}
-			lexer.log.AddError(&lexer.source, loc, "Expected \")\" to end URL token")
+			lexer.log.AddError(&lexer.tracker, loc, "Expected \")\" to end URL token")
 			return TBadURL
 
 		case ' ', '\t', '\n', '\r', '\f':
@@ -592,7 +651,7 @@ validURL:
 			}
 			if lexer.codePoint != ')' {
 				loc := logger.Loc{Start: lexer.Token.Range.End()}
-				lexer.log.AddError(&lexer.source, loc, "Expected \")\" to end URL token")
+				lexer.log.AddError(&lexer.tracker, loc, "Expected \")\" to end URL token")
 				break validURL
 			}
 			lexer.step()
@@ -600,13 +659,13 @@ validURL:
 
 		case '"', '\'', '(':
 			r := logger.Range{Loc: logger.Loc{Start: lexer.Token.Range.End()}, Len: 1}
-			lexer.log.AddRangeError(&lexer.source, r, "Expected \")\" to end URL token")
+			lexer.log.AddRangeError(&lexer.tracker, r, "Expected \")\" to end URL token")
 			break validURL
 
 		case '\\':
 			if !lexer.isValidEscape() {
 				r := logger.Range{Loc: logger.Loc{Start: lexer.Token.Range.End()}, Len: 1}
-				lexer.log.AddRangeError(&lexer.source, r, "Invalid escape")
+				lexer.log.AddRangeError(&lexer.tracker, r, "Invalid escape")
 				break validURL
 			}
 			lexer.consumeEscape()
@@ -614,7 +673,7 @@ validURL:
 		default:
 			if isNonPrintable(lexer.codePoint) {
 				r := logger.Range{Loc: logger.Loc{Start: lexer.Token.Range.End()}, Len: 1}
-				lexer.log.AddRangeError(&lexer.source, r, "Unexpected non-printable character in URL token")
+				lexer.log.AddRangeError(&lexer.tracker, r, "Unexpected non-printable character in URL token")
 			}
 			lexer.step()
 		}
@@ -657,11 +716,11 @@ func (lexer *lexer) consumeString() T {
 			// Otherwise, fall through to ignore the character after the backslash
 
 		case eof:
-			lexer.log.AddError(&lexer.source, logger.Loc{Start: lexer.Token.Range.End()}, "Unterminated string token")
+			lexer.log.AddError(&lexer.tracker, logger.Loc{Start: lexer.Token.Range.End()}, "Unterminated string token")
 			return TBadString
 
 		case '\n', '\r', '\f':
-			lexer.log.AddError(&lexer.source, logger.Loc{Start: lexer.Token.Range.End()}, "Unterminated string token")
+			lexer.log.AddError(&lexer.tracker, logger.Loc{Start: lexer.Token.Range.End()}, "Unterminated string token")
 			return TBadString
 
 		case quote:
@@ -729,7 +788,7 @@ func (lexer *lexer) consumeNumeric() T {
 }
 
 func IsNameStart(c rune) bool {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c >= 0x80
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c >= 0x80 || c == '\x00'
 }
 
 func IsNameContinue(c rune) bool {
@@ -773,7 +832,7 @@ func decodeEscapesInToken(inner string) string {
 	i := 0
 
 	for i < len(inner) {
-		if inner[i] == '\\' {
+		if c := inner[i]; c == '\\' || c == '\x00' {
 			break
 		}
 		i++
@@ -792,12 +851,15 @@ func decodeEscapesInToken(inner string) string {
 		inner = inner[width:]
 
 		if c != '\\' {
+			if c == '\x00' {
+				c = utf8.RuneError
+			}
 			sb.WriteRune(c)
 			continue
 		}
 
 		if len(inner) == 0 {
-			sb.WriteRune(replacementCharacter)
+			sb.WriteRune(utf8.RuneError)
 			continue
 		}
 
@@ -844,7 +906,7 @@ func decodeEscapesInToken(inner string) string {
 		}
 
 		if hex == 0 || (hex >= 0xD800 && hex <= 0xDFFF) || hex > 0x10FFFF {
-			sb.WriteRune(replacementCharacter)
+			sb.WriteRune(utf8.RuneError)
 			continue
 		}
 

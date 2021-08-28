@@ -3,6 +3,7 @@ package bundler
 import (
 	"testing"
 
+	"github.com/ije/esbuild-internal/compat"
 	"github.com/ije/esbuild-internal/config"
 )
 
@@ -86,6 +87,48 @@ func TestTSDeclareClass(t *testing.T) {
 		options: config.Options{
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/out.js",
+		},
+	})
+}
+
+func TestTSDeclareClassFields(t *testing.T) {
+	// Note: this test uses arrow functions to validate that
+	// scopes inside "declare" fields are correctly discarded
+	ts_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.ts": `
+				import './define-false'
+				import './define-true'
+			`,
+			"/define-false/index.ts": `
+				class Foo {
+					a
+					declare b
+					c = () => this
+					declare d = () => this
+				}
+				(() => new Foo())()
+			`,
+			"/define-true/index.ts": `
+				class Bar {
+					a
+					declare b
+					c = () => this
+					declare d = () => this
+				}
+				(() => new Bar())()
+			`,
+			"/define-true/tsconfig.json": `{
+				"compilerOptions": {
+					"useDefineForClassFields": true
+				}
+			}`,
+		},
+		entryPaths: []string{"/entry.ts"},
+		options: config.Options{
+			Mode:                  config.ModeBundle,
+			AbsOutputFile:         "/out.js",
+			UnsupportedJSFeatures: compat.ClassField,
 		},
 	})
 }
@@ -453,6 +496,29 @@ func TestTSImportVsLocalCollisionMixed(t *testing.T) {
 	})
 }
 
+func TestTSImportEqualsEliminationTest(t *testing.T) {
+	ts_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.ts": `
+				import a = foo.a
+				import b = a.b
+				import c = b.c
+
+				import x = foo.x
+				import y = x.y
+				import z = y.z
+
+				export let bar = c
+			`,
+		},
+		entryPaths: []string{"/entry.ts"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+		},
+	})
+}
+
 func TestTSMinifiedBundleES6(t *testing.T) {
 	ts_suite.expectBundled(t, bundled{
 		files: map[string]string{
@@ -645,6 +711,23 @@ func TestTypeScriptDecorators(t *testing.T) {
 	})
 }
 
+func TestTypeScriptDecoratorsKeepNames(t *testing.T) {
+	ts_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.ts": `
+				@decoratorMustComeAfterName
+				class Foo {}
+			`,
+		},
+		entryPaths: []string{"/entry.ts"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+			KeepNames:     true,
+		},
+	})
+}
+
 func TestTSExportDefaultTypeIssue316(t *testing.T) {
 	ts_suite.expectBundled(t, bundled{
 		files: map[string]string{
@@ -665,13 +748,13 @@ func TestTSExportDefaultTypeIssue316(t *testing.T) {
 				import tone_def, { bar as tone } from './remove/type-only-namespace-exported'
 
 				export default [
-					dc,
-					dl,
-					im,
-					_in,
-					tn,
-					vn,
-					vnm,
+					dc_def, dc,
+					dl_def, dl,
+					im_def, im,
+					in_def, _in,
+					tn_def, tn,
+					vn_def, vn,
+					vnm_def, vnm,
 
 					i,
 					ie,
@@ -877,8 +960,237 @@ func TestExportTypeIssue379(t *testing.T) {
 		},
 		entryPaths: []string{"/entry.ts"},
 		options: config.Options{
-			Mode:          config.ModeBundle,
+			Mode:                    config.ModeBundle,
+			AbsOutputFile:           "/out.js",
+			UseDefineForClassFields: config.False,
+		},
+	})
+}
+
+func TestThisInsideFunctionTS(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.ts": `
+				function foo(x = this) { console.log(this) }
+				const objFoo = {
+					foo(x = this) { console.log(this) }
+				}
+				class Foo {
+					x = this
+					static y = this.z
+					foo(x = this) { console.log(this) }
+					static bar(x = this) { console.log(this) }
+				}
+				new Foo(foo(objFoo))
+				if (nested) {
+					function bar(x = this) { console.log(this) }
+					const objBar = {
+						foo(x = this) { console.log(this) }
+					}
+					class Bar {
+						x = this
+						static y = this.z
+						foo(x = this) { console.log(this) }
+						static bar(x = this) { console.log(this) }
+					}
+					new Bar(bar(objBar))
+				}
+			`,
+		},
+		entryPaths: []string{"/entry.ts"},
+		options: config.Options{
+			Mode:                    config.ModeBundle,
+			AbsOutputFile:           "/out.js",
+			UseDefineForClassFields: config.False,
+		},
+	})
+}
+
+func TestThisInsideFunctionTSUseDefineForClassFields(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.ts": `
+				function foo(x = this) { console.log(this) }
+				const objFoo = {
+					foo(x = this) { console.log(this) }
+				}
+				class Foo {
+					x = this
+					static y = this.z
+					foo(x = this) { console.log(this) }
+					static bar(x = this) { console.log(this) }
+				}
+				new Foo(foo(objFoo))
+				if (nested) {
+					function bar(x = this) { console.log(this) }
+					const objBar = {
+						foo(x = this) { console.log(this) }
+					}
+					class Bar {
+						x = this
+						static y = this.z
+						foo(x = this) { console.log(this) }
+						static bar(x = this) { console.log(this) }
+					}
+					new Bar(bar(objBar))
+				}
+			`,
+		},
+		entryPaths: []string{"/entry.ts"},
+		options: config.Options{
+			Mode:                    config.ModeBundle,
+			AbsOutputFile:           "/out.js",
+			UseDefineForClassFields: config.True,
+		},
+	})
+}
+
+func TestThisInsideFunctionTSNoBundle(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.ts": `
+				function foo(x = this) { console.log(this) }
+				const objFoo = {
+					foo(x = this) { console.log(this) }
+				}
+				class Foo {
+					x = this
+					static y = this.z
+					foo(x = this) { console.log(this) }
+					static bar(x = this) { console.log(this) }
+				}
+				new Foo(foo(objFoo))
+				if (nested) {
+					function bar(x = this) { console.log(this) }
+					const objBar = {
+						foo(x = this) { console.log(this) }
+					}
+					class Bar {
+						x = this
+						static y = this.z
+						foo(x = this) { console.log(this) }
+						static bar(x = this) { console.log(this) }
+					}
+					new Bar(bar(objBar))
+				}
+			`,
+		},
+		entryPaths: []string{"/entry.ts"},
+		options: config.Options{
+			Mode:          config.ModePassThrough,
 			AbsOutputFile: "/out.js",
+		},
+	})
+}
+
+func TestThisInsideFunctionTSNoBundleUseDefineForClassFields(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.ts": `
+				function foo(x = this) { console.log(this) }
+				const objFoo = {
+					foo(x = this) { console.log(this) }
+				}
+				class Foo {
+					x = this
+					static y = this.z
+					foo(x = this) { console.log(this) }
+					static bar(x = this) { console.log(this) }
+				}
+				new Foo(foo(objFoo))
+				if (nested) {
+					function bar(x = this) { console.log(this) }
+					const objBar = {
+						foo(x = this) { console.log(this) }
+					}
+					class Bar {
+						x = this
+						static y = this.z
+						foo(x = this) { console.log(this) }
+						static bar(x = this) { console.log(this) }
+					}
+					new Bar(bar(objBar))
+				}
+			`,
+		},
+		entryPaths: []string{"/entry.ts"},
+		options: config.Options{
+			Mode:                    config.ModePassThrough,
+			AbsOutputFile:           "/out.js",
+			UseDefineForClassFields: config.True,
+		},
+	})
+}
+
+func TestTSComputedClassFieldUseDefineFalse(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.ts": `
+				class Foo {
+					[q];
+					[r] = s;
+					@dec
+					[x];
+					@dec
+					[y] = z;
+				}
+				new Foo()
+			`,
+		},
+		entryPaths: []string{"/entry.ts"},
+		options: config.Options{
+			Mode:                    config.ModePassThrough,
+			AbsOutputFile:           "/out.js",
+			UseDefineForClassFields: config.False,
+		},
+	})
+}
+
+func TestTSComputedClassFieldUseDefineTrue(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.ts": `
+				class Foo {
+					[q];
+					[r] = s;
+					@dec
+					[x];
+					@dec
+					[y] = z;
+				}
+				new Foo()
+			`,
+		},
+		entryPaths: []string{"/entry.ts"},
+		options: config.Options{
+			Mode:                    config.ModePassThrough,
+			AbsOutputFile:           "/out.js",
+			UseDefineForClassFields: config.True,
+		},
+	})
+}
+
+func TestTSComputedClassFieldUseDefineTrueLower(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.ts": `
+				class Foo {
+					[q];
+					[r] = s;
+					@dec
+					[x];
+					@dec
+					[y] = z;
+				}
+				new Foo()
+			`,
+		},
+		entryPaths: []string{"/entry.ts"},
+		options: config.Options{
+			Mode:                    config.ModePassThrough,
+			AbsOutputFile:           "/out.js",
+			UseDefineForClassFields: config.True,
+			UnsupportedJSFeatures:   compat.ClassField,
 		},
 	})
 }

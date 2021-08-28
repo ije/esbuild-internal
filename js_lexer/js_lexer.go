@@ -18,7 +18,6 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
-	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/ije/esbuild-internal/js_ast"
@@ -218,29 +217,42 @@ type json struct {
 type Lexer struct {
 	log                             logger.Log
 	source                          logger.Source
+	tracker                         logger.LineColumnTracker
 	current                         int
 	start                           int
 	end                             int
 	ApproximateNewlineCount         int
 	LegacyOctalLoc                  logger.Loc
+	AwaitKeywordLoc                 logger.Loc
+	FnOrArrowStartLoc               logger.Loc
+	PreviousBackslashQuoteInJSX     logger.Range
+	LegacyHTMLCommentRange          logger.Range
 	Token                           T
 	HasNewlineBefore                bool
 	HasPureCommentBefore            bool
 	PreserveAllCommentsBefore       bool
 	IsLegacyOctalLiteral            bool
+	PrevTokenWasAwaitKeyword        bool
 	CommentsToPreserveBefore        []js_ast.Comment
 	AllOriginalComments             []js_ast.Comment
 	codePoint                       rune
-	StringLiteral                   []uint16
 	Identifier                      string
-	JSXFactoryPragmaComment         js_ast.Span
-	JSXFragmentPragmaComment        js_ast.Span
-	SourceMappingURL                js_ast.Span
+	JSXFactoryPragmaComment         logger.Span
+	JSXFragmentPragmaComment        logger.Span
+	SourceMappingURL                logger.Span
 	Number                          float64
 	rescanCloseBraceAsTemplateToken bool
 	forGlobalName                   bool
 	json                            json
 	prevErrorLoc                    logger.Loc
+
+	// Escape sequences in string literals are decoded lazily because they are
+	// not interpreted inside tagged templates, and tagged templates can contain
+	// invalid escape sequences. If the decoded array is nil, the encoded value
+	// should be passed to "tryToDecodeEscapeSequences" first.
+	decodedStringLiteralOrNil []uint16
+	encodedStringLiteralStart int
+	encodedStringLiteralText  string
 
 	// The log is disabled during speculative scans that may backtrack
 	IsLogDisabled bool
@@ -250,9 +262,11 @@ type LexerPanic struct{}
 
 func NewLexer(log logger.Log, source logger.Source) Lexer {
 	lexer := Lexer{
-		log:          log,
-		source:       source,
-		prevErrorLoc: logger.Loc{Start: -1},
+		log:               log,
+		source:            source,
+		tracker:           logger.MakeLineColumnTracker(&source),
+		prevErrorLoc:      logger.Loc{Start: -1},
+		FnOrArrowStartLoc: logger.Loc{Start: -1},
 	}
 	lexer.step()
 	lexer.Next()
@@ -261,10 +275,12 @@ func NewLexer(log logger.Log, source logger.Source) Lexer {
 
 func NewLexerGlobalName(log logger.Log, source logger.Source) Lexer {
 	lexer := Lexer{
-		log:           log,
-		source:        source,
-		prevErrorLoc:  logger.Loc{Start: -1},
-		forGlobalName: true,
+		log:               log,
+		source:            source,
+		tracker:           logger.MakeLineColumnTracker(&source),
+		prevErrorLoc:      logger.Loc{Start: -1},
+		FnOrArrowStartLoc: logger.Loc{Start: -1},
+		forGlobalName:     true,
 	}
 	lexer.step()
 	lexer.Next()
@@ -273,9 +289,11 @@ func NewLexerGlobalName(log logger.Log, source logger.Source) Lexer {
 
 func NewLexerJSON(log logger.Log, source logger.Source, allowComments bool) Lexer {
 	lexer := Lexer{
-		log:          log,
-		source:       source,
-		prevErrorLoc: logger.Loc{Start: -1},
+		log:               log,
+		source:            source,
+		tracker:           logger.MakeLineColumnTracker(&source),
+		prevErrorLoc:      logger.Loc{Start: -1},
+		FnOrArrowStartLoc: logger.Loc{Start: -1},
 		json: json{
 			parse:         true,
 			allowComments: allowComments,
@@ -298,54 +316,70 @@ func (lexer *Lexer) Raw() string {
 	return lexer.source.Contents[lexer.start:lexer.end]
 }
 
-func (lexer *Lexer) RawTemplateContents() string {
-	var text string
+func (lexer *Lexer) StringLiteral() []uint16 {
+	if lexer.decodedStringLiteralOrNil == nil {
+		// Lazily decode escape sequences if needed
+		if decoded, ok, end := lexer.tryToDecodeEscapeSequences(lexer.encodedStringLiteralStart, lexer.encodedStringLiteralText, true /* reportErrors */); !ok {
+			lexer.end = end
+			lexer.SyntaxError()
+		} else {
+			lexer.decodedStringLiteralOrNil = decoded
+		}
+	}
+	return lexer.decodedStringLiteralOrNil
+}
+
+func (lexer *Lexer) CookedAndRawTemplateContents() ([]uint16, string) {
+	var raw string
+
 	switch lexer.Token {
 	case TNoSubstitutionTemplateLiteral, TTemplateTail:
 		// "`x`" or "}x`"
-		text = lexer.source.Contents[lexer.start+1 : lexer.end-1]
+		raw = lexer.source.Contents[lexer.start+1 : lexer.end-1]
 
 	case TTemplateHead, TTemplateMiddle:
 		// "`x${" or "}x${"
-		text = lexer.source.Contents[lexer.start+1 : lexer.end-2]
+		raw = lexer.source.Contents[lexer.start+1 : lexer.end-2]
 	}
 
-	if strings.IndexByte(text, '\r') == -1 {
-		return text
-	}
+	if strings.IndexByte(raw, '\r') != -1 {
+		// From the specification:
+		//
+		// 11.8.6.1 Static Semantics: TV and TRV
+		//
+		// TV excludes the code units of LineContinuation while TRV includes
+		// them. <CR><LF> and <CR> LineTerminatorSequences are normalized to
+		// <LF> for both TV and TRV. An explicit EscapeSequence is needed to
+		// include a <CR> or <CR><LF> sequence.
 
-	// From the specification:
-	//
-	// 11.8.6.1 Static Semantics: TV and TRV
-	//
-	// TV excludes the code units of LineContinuation while TRV includes
-	// them. <CR><LF> and <CR> LineTerminatorSequences are normalized to
-	// <LF> for both TV and TRV. An explicit EscapeSequence is needed to
-	// include a <CR> or <CR><LF> sequence.
+		bytes := []byte(raw)
+		end := 0
+		i := 0
 
-	bytes := []byte(text)
-	end := 0
-	i := 0
+		for i < len(bytes) {
+			c := bytes[i]
+			i++
 
-	for i < len(bytes) {
-		c := bytes[i]
-		i++
+			if c == '\r' {
+				// Convert '\r\n' into '\n'
+				if i < len(bytes) && bytes[i] == '\n' {
+					i++
+				}
 
-		if c == '\r' {
-			// Convert '\r\n' into '\n'
-			if i < len(bytes) && bytes[i] == '\n' {
-				i++
+				// Convert '\r' into '\n'
+				c = '\n'
 			}
 
-			// Convert '\r' into '\n'
-			c = '\n'
+			bytes[end] = c
+			end++
 		}
 
-		bytes[end] = c
-		end++
+		raw = string(bytes[:end])
 	}
 
-	return string(bytes[:end])
+	// This will return nil on failure, which will become "undefined" for the tag
+	cooked, _, _ := lexer.tryToDecodeEscapeSequences(lexer.start+1, raw, false /* reportErrors */)
+	return cooked, raw
 }
 
 func (lexer *Lexer) IsIdentifierOrKeyword() bool {
@@ -383,6 +417,21 @@ func (lexer *Lexer) SyntaxError() {
 }
 
 func (lexer *Lexer) ExpectedString(text string) {
+	// Provide a friendly error message about "await" without "async"
+	if lexer.PrevTokenWasAwaitKeyword {
+		var notes []logger.MsgData
+		if lexer.FnOrArrowStartLoc.Start != -1 {
+			note := logger.RangeData(&lexer.tracker, logger.Range{Loc: lexer.FnOrArrowStartLoc},
+				"Consider adding the \"async\" keyword here")
+			note.Location.Suggestion = "async"
+			notes = []logger.MsgData{note}
+		}
+		lexer.addRangeErrorWithNotes(RangeOfIdentifier(lexer.source, lexer.AwaitKeywordLoc),
+			"\"await\" can only be used inside an \"async\" function",
+			notes)
+		panic(LexerPanic{})
+	}
+
 	found := fmt.Sprintf("%q", lexer.Raw())
 	if lexer.start == len(lexer.source.Contents) {
 		found = "end of file"
@@ -528,6 +577,24 @@ func IsIdentifier(text string) bool {
 	return true
 }
 
+func IsIdentifierES5(text string) bool {
+	if len(text) == 0 {
+		return false
+	}
+	for i, codePoint := range text {
+		if i == 0 {
+			if !IsIdentifierStartES5(codePoint) {
+				return false
+			}
+		} else {
+			if !IsIdentifierContinueES5(codePoint) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func ForceValidIdentifier(text string) string {
 	if IsIdentifier(text) {
 		return text
@@ -564,6 +631,7 @@ func IsIdentifierUTF16(text []uint16) bool {
 		return false
 	}
 	for i := 0; i < n; i++ {
+		isStart := i == 0
 		r1 := rune(text[i])
 		if r1 >= 0xD800 && r1 <= 0xDBFF && i+1 < n {
 			if r2 := rune(text[i+1]); r2 >= 0xDC00 && r2 <= 0xDFFF {
@@ -571,12 +639,40 @@ func IsIdentifierUTF16(text []uint16) bool {
 				i++
 			}
 		}
-		if i == 0 {
+		if isStart {
 			if !IsIdentifierStart(r1) {
 				return false
 			}
 		} else {
 			if !IsIdentifierContinue(r1) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// This does "IsIdentifierES5(UTF16ToString(text))" without any allocations
+func IsIdentifierES5UTF16(text []uint16) bool {
+	n := len(text)
+	if n == 0 {
+		return false
+	}
+	for i := 0; i < n; i++ {
+		isStart := i == 0
+		r1 := rune(text[i])
+		if r1 >= 0xD800 && r1 <= 0xDBFF && i+1 < n {
+			if r2 := rune(text[i+1]); r2 >= 0xDC00 && r2 <= 0xDFFF {
+				r1 = (r1 << 10) + r2 + (0x10000 - (0xD800 << 10) - 0xDC00)
+				i++
+			}
+		}
+		if isStart {
+			if !IsIdentifierStartES5(r1) {
+				return false
+			}
+		} else {
+			if !IsIdentifierContinueES5(r1) {
 				return false
 			}
 		}
@@ -623,6 +719,47 @@ func IsIdentifierContinue(codePoint rune) bool {
 	}
 
 	return unicode.Is(idContinue, codePoint)
+}
+
+func IsIdentifierStartES5(codePoint rune) bool {
+	switch codePoint {
+	case '_', '$',
+		'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
+		'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+		'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
+		'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z':
+		return true
+	}
+
+	// All ASCII identifier start code points are listed above
+	if codePoint < 0x7F {
+		return false
+	}
+
+	return unicode.Is(idStartES5, codePoint)
+}
+
+func IsIdentifierContinueES5(codePoint rune) bool {
+	switch codePoint {
+	case '_', '$', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+		'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
+		'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+		'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
+		'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z':
+		return true
+	}
+
+	// All ASCII identifier start code points are listed above
+	if codePoint < 0x7F {
+		return false
+	}
+
+	// ZWNJ and ZWJ are allowed in identifiers
+	if codePoint == 0x200C || codePoint == 0x200D {
+		return true
+	}
+
+	return unicode.Is(idContinueES5, codePoint)
 }
 
 // See the "White Space Code Points" table in the ECMAScript standard
@@ -765,10 +902,10 @@ func (lexer *Lexer) NextJSXElementChild() {
 
 			if needsFixing {
 				// Slow path
-				lexer.StringLiteral = fixWhitespaceAndDecodeJSXEntities(text)
+				lexer.decodedStringLiteralOrNil = fixWhitespaceAndDecodeJSXEntities(text)
 
 				// Skip this token if it turned out to be empty after trimming
-				if len(lexer.StringLiteral) == 0 {
+				if len(lexer.decodedStringLiteralOrNil) == 0 {
 					lexer.HasNewlineBefore = true
 					continue
 				}
@@ -779,7 +916,7 @@ func (lexer *Lexer) NextJSXElementChild() {
 				for i := 0; i < n; i++ {
 					copy[i] = uint16(text[i])
 				}
-				lexer.StringLiteral = copy
+				lexer.decodedStringLiteralOrNil = copy
 			}
 		}
 
@@ -876,7 +1013,7 @@ func (lexer *Lexer) NextInsideJSXElement() {
 					case -1: // This indicates the end of the file
 						lexer.start = lexer.end
 						lexer.addErrorWithNotes(lexer.Loc(), "Expected \"*/\" to terminate multi-line comment",
-							[]logger.MsgData{logger.RangeData(&lexer.source, startRange, "The multi-line comment starts here")})
+							[]logger.MsgData{logger.RangeData(&lexer.tracker, startRange, "The multi-line comment starts here")})
 						panic(LexerPanic{})
 
 					default:
@@ -890,6 +1027,7 @@ func (lexer *Lexer) NextInsideJSXElement() {
 			}
 
 		case '\'', '"':
+			var backslash logger.Range
 			quote := lexer.codePoint
 			needsDecode := false
 			lexer.step()
@@ -904,7 +1042,16 @@ func (lexer *Lexer) NextInsideJSXElement() {
 					needsDecode = true
 					lexer.step()
 
+				case '\\':
+					backslash = logger.Range{Loc: logger.Loc{Start: int32(lexer.end)}, Len: 1}
+					lexer.step()
+					continue
+
 				case quote:
+					if backslash.Len > 0 {
+						backslash.Len++
+						lexer.PreviousBackslashQuoteInJSX = backslash
+					}
 					lexer.step()
 					break stringLiteral
 
@@ -915,6 +1062,7 @@ func (lexer *Lexer) NextInsideJSXElement() {
 					}
 					lexer.step()
 				}
+				backslash = logger.Range{}
 			}
 
 			lexer.Token = TStringLiteral
@@ -922,7 +1070,7 @@ func (lexer *Lexer) NextInsideJSXElement() {
 
 			if needsDecode {
 				// Slow path
-				lexer.StringLiteral = decodeJSXEntities([]uint16{}, text)
+				lexer.decodedStringLiteralOrNil = decodeJSXEntities([]uint16{}, text)
 			} else {
 				// Fast path
 				n := len(text)
@@ -930,7 +1078,7 @@ func (lexer *Lexer) NextInsideJSXElement() {
 				for i := 0; i < n; i++ {
 					copy[i] = uint16(text[i])
 				}
-				lexer.StringLiteral = copy
+				lexer.decodedStringLiteralOrNil = copy
 			}
 
 		default:
@@ -979,6 +1127,7 @@ func (lexer *Lexer) NextInsideJSXElement() {
 func (lexer *Lexer) Next() {
 	lexer.HasNewlineBefore = lexer.end == 0
 	lexer.HasPureCommentBefore = false
+	lexer.PrevTokenWasAwaitKeyword = false
 	lexer.CommentsToPreserveBefore = nil
 
 	for {
@@ -1199,7 +1348,8 @@ func (lexer *Lexer) Next() {
 				// Handle legacy HTML-style comments
 				if lexer.codePoint == '>' && lexer.HasNewlineBefore {
 					lexer.step()
-					lexer.log.AddRangeWarning(&lexer.source, lexer.Range(),
+					lexer.LegacyHTMLCommentRange = lexer.Range()
+					lexer.log.AddRangeWarning(&lexer.tracker, lexer.Range(),
 						"Treating \"-->\" as the start of a legacy HTML single-line comment")
 				singleLineHTMLCloseComment:
 					for {
@@ -1254,7 +1404,6 @@ func (lexer *Lexer) Next() {
 			case '=':
 				lexer.step()
 				lexer.Token = TSlashEquals
-				break
 
 			case '/':
 			singleLineComment:
@@ -1294,7 +1443,7 @@ func (lexer *Lexer) Next() {
 					case -1: // This indicates the end of the file
 						lexer.start = lexer.end
 						lexer.addErrorWithNotes(lexer.Loc(), "Expected \"*/\" to terminate multi-line comment",
-							[]logger.MsgData{logger.RangeData(&lexer.source, startRange, "The multi-line comment starts here")})
+							[]logger.MsgData{logger.RangeData(&lexer.tracker, startRange, "The multi-line comment starts here")})
 						panic(LexerPanic{})
 
 					default:
@@ -1354,7 +1503,8 @@ func (lexer *Lexer) Next() {
 					lexer.step()
 					lexer.step()
 					lexer.step()
-					lexer.log.AddRangeWarning(&lexer.source, lexer.Range(),
+					lexer.LegacyHTMLCommentRange = lexer.Range()
+					lexer.log.AddRangeWarning(&lexer.tracker, lexer.Range(),
 						"Treating \"<!--\" as the start of a legacy HTML single-line comment")
 				singleLineHTMLOpenComment:
 					for {
@@ -1506,7 +1656,9 @@ func (lexer *Lexer) Next() {
 
 			if needsSlowPath {
 				// Slow path
-				lexer.StringLiteral = lexer.decodeEscapeSequences(lexer.start+1, text)
+				lexer.decodedStringLiteralOrNil = nil
+				lexer.encodedStringLiteralStart = lexer.start + 1
+				lexer.encodedStringLiteralText = text
 			} else {
 				// Fast path
 				n := len(text)
@@ -1514,7 +1666,7 @@ func (lexer *Lexer) Next() {
 				for i := 0; i < n; i++ {
 					copy[i] = uint16(text[i])
 				}
-				lexer.StringLiteral = copy
+				lexer.decodedStringLiteralOrNil = copy
 			}
 
 			if quote == '\'' && lexer.json.parse {
@@ -1634,7 +1786,12 @@ func (lexer *Lexer) scanIdentifierWithEscapes(kind identifierKind) (string, T) {
 	}
 
 	// Second pass: re-use our existing escape sequence parser
-	text := string(utf16.Decode(lexer.decodeEscapeSequences(lexer.start, lexer.Raw())))
+	decoded, ok, end := lexer.tryToDecodeEscapeSequences(lexer.start, lexer.Raw(), true /* reportErrors */)
+	if !ok {
+		lexer.end = end
+		lexer.SyntaxError()
+	}
+	text := string(UTF16ToString(decoded))
 
 	// Even though it was escaped, it must still be a valid identifier
 	identifier := text
@@ -1710,6 +1867,9 @@ func (lexer *Lexer) parseNumericLiteralOrDot() {
 
 		case '0', '1', '2', '3', '4', '5', '6', '7', '_':
 			base = 8
+			lexer.IsLegacyOctalLiteral = true
+
+		case '8', '9':
 			lexer.IsLegacyOctalLiteral = true
 		}
 	}
@@ -1984,9 +2144,25 @@ func (lexer *Lexer) ScanRegExp() {
 		switch lexer.codePoint {
 		case '/':
 			lexer.step()
+			bits := uint32(0)
 			for IsIdentifierContinue(lexer.codePoint) {
 				switch lexer.codePoint {
 				case 'g', 'i', 'm', 's', 'u', 'y':
+					bit := uint32(1) << uint32(lexer.codePoint-'a')
+					if (bit & bits) != 0 {
+						// Reject duplicate flags
+						r1 := logger.Range{Loc: logger.Loc{Start: int32(lexer.start)}, Len: 1}
+						r2 := logger.Range{Loc: logger.Loc{Start: int32(lexer.end)}, Len: 1}
+						for r1.Loc.Start < r2.Loc.Start && lexer.source.Contents[r1.Loc.Start] != byte(lexer.codePoint) {
+							r1.Loc.Start++
+						}
+						lexer.log.AddRangeErrorWithNotes(&lexer.tracker, r2,
+							fmt.Sprintf("Duplicate flag \"%c\" in regular expression", lexer.codePoint),
+							[]logger.MsgData{logger.RangeData(&lexer.tracker, r1,
+								fmt.Sprintf("The first \"%c\" was here", lexer.codePoint))})
+					} else {
+						bits |= bit
+					}
 					lexer.step()
 
 				default:
@@ -2103,7 +2279,9 @@ func fixWhitespaceAndDecodeJSXEntities(text string) []uint16 {
 	return decoded
 }
 
-func (lexer *Lexer) decodeEscapeSequences(start int, text string) []uint16 {
+// If this fails, this returns "nil, false, end" where "end" is the value to
+// store to "lexer.end" before calling "lexer.SyntaxError()" if relevant
+func (lexer *Lexer) tryToDecodeEscapeSequences(start int, text string, reportErrors bool) ([]uint16, bool, int) {
 	decoded := []uint16{}
 	i := 0
 
@@ -2158,8 +2336,7 @@ func (lexer *Lexer) decodeEscapeSequences(start int, text string) []uint16 {
 
 			case 'v':
 				if lexer.json.parse {
-					lexer.end = start + i - width2
-					lexer.SyntaxError()
+					return nil, false, start + i - width2
 				}
 
 				decoded = append(decoded, '\v')
@@ -2168,8 +2345,7 @@ func (lexer *Lexer) decodeEscapeSequences(start int, text string) []uint16 {
 			case '0', '1', '2', '3', '4', '5', '6', '7':
 				octalStart := i - 2
 				if lexer.json.parse {
-					lexer.end = start + i - width2
-					lexer.SyntaxError()
+					return nil, false, start + i - width2
 				}
 
 				// 1-3 digit octal
@@ -2209,8 +2385,7 @@ func (lexer *Lexer) decodeEscapeSequences(start int, text string) []uint16 {
 
 			case 'x':
 				if lexer.json.parse {
-					lexer.end = start + i - width2
-					lexer.SyntaxError()
+					return nil, false, start + i - width2
 				}
 
 				// 2-digit hexadecimal
@@ -2226,8 +2401,7 @@ func (lexer *Lexer) decodeEscapeSequences(start int, text string) []uint16 {
 					case 'A', 'B', 'C', 'D', 'E', 'F':
 						value = value*16 | (c3 + 10 - 'A')
 					default:
-						lexer.end = start + i - width3
-						lexer.SyntaxError()
+						return nil, false, start + i - width3
 					}
 				}
 				c = value
@@ -2242,8 +2416,7 @@ func (lexer *Lexer) decodeEscapeSequences(start int, text string) []uint16 {
 
 				if c3 == '{' {
 					if lexer.json.parse {
-						lexer.end = start + i - width2
-						lexer.SyntaxError()
+						return nil, false, start + i - width2
 					}
 
 					// Variable-length
@@ -2264,13 +2437,11 @@ func (lexer *Lexer) decodeEscapeSequences(start int, text string) []uint16 {
 							value = value*16 | (c3 + 10 - 'A')
 						case '}':
 							if isFirst {
-								lexer.end = start + i - width3
-								lexer.SyntaxError()
+								return nil, false, start + i - width3
 							}
 							break variableLength
 						default:
-							lexer.end = start + i - width3
-							lexer.SyntaxError()
+							return nil, false, start + i - width3
 						}
 
 						if value > utf8.MaxRune {
@@ -2280,7 +2451,7 @@ func (lexer *Lexer) decodeEscapeSequences(start int, text string) []uint16 {
 						isFirst = false
 					}
 
-					if isOutOfRange {
+					if isOutOfRange && reportErrors {
 						lexer.addRangeError(logger.Range{Loc: logger.Loc{Start: int32(start + hexStart)}, Len: int32(i - hexStart)},
 							"Unicode escape sequence is out of range")
 						panic(LexerPanic{})
@@ -2296,8 +2467,7 @@ func (lexer *Lexer) decodeEscapeSequences(start int, text string) []uint16 {
 						case 'A', 'B', 'C', 'D', 'E', 'F':
 							value = value*16 | (c3 + 10 - 'A')
 						default:
-							lexer.end = start + i - width3
-							lexer.SyntaxError()
+							return nil, false, start + i - width3
 						}
 
 						if j < 3 {
@@ -2310,8 +2480,7 @@ func (lexer *Lexer) decodeEscapeSequences(start int, text string) []uint16 {
 
 			case '\r':
 				if lexer.json.parse {
-					lexer.end = start + i - width2
-					lexer.SyntaxError()
+					return nil, false, start + i - width2
 				}
 
 				// Ignore line continuations. A line continuation is not an escaped newline.
@@ -2323,8 +2492,7 @@ func (lexer *Lexer) decodeEscapeSequences(start int, text string) []uint16 {
 
 			case '\n', '\u2028', '\u2029':
 				if lexer.json.parse {
-					lexer.end = start + i - width2
-					lexer.SyntaxError()
+					return nil, false, start + i - width2
 				}
 
 				// Ignore line continuations. A line continuation is not an escaped newline.
@@ -2336,8 +2504,7 @@ func (lexer *Lexer) decodeEscapeSequences(start int, text string) []uint16 {
 					case '"', '\\', '/':
 
 					default:
-						lexer.end = start + i - width2
-						lexer.SyntaxError()
+						return nil, false, start + i - width2
 					}
 				}
 
@@ -2353,7 +2520,7 @@ func (lexer *Lexer) decodeEscapeSequences(start int, text string) []uint16 {
 		}
 	}
 
-	return decoded
+	return decoded, true, 0
 }
 
 func (lexer *Lexer) RescanCloseBraceAsTemplateToken() {
@@ -2400,7 +2567,7 @@ func (lexer *Lexer) addError(loc logger.Loc, text string) {
 	lexer.prevErrorLoc = loc
 
 	if !lexer.IsLogDisabled {
-		lexer.log.AddError(&lexer.source, loc, text)
+		lexer.log.AddError(&lexer.tracker, loc, text)
 	}
 }
 
@@ -2412,7 +2579,7 @@ func (lexer *Lexer) addErrorWithNotes(loc logger.Loc, text string, notes []logge
 	lexer.prevErrorLoc = loc
 
 	if !lexer.IsLogDisabled {
-		lexer.log.AddErrorWithNotes(&lexer.source, loc, text, notes)
+		lexer.log.AddErrorWithNotes(&lexer.tracker, loc, text, notes)
 	}
 }
 
@@ -2424,7 +2591,19 @@ func (lexer *Lexer) addRangeError(r logger.Range, text string) {
 	lexer.prevErrorLoc = r.Loc
 
 	if !lexer.IsLogDisabled {
-		lexer.log.AddRangeError(&lexer.source, r, text)
+		lexer.log.AddRangeError(&lexer.tracker, r, text)
+	}
+}
+
+func (lexer *Lexer) addRangeErrorWithNotes(r logger.Range, text string, notes []logger.MsgData) {
+	// Don't report multiple errors in the same spot
+	if r.Loc == lexer.prevErrorLoc {
+		return
+	}
+	lexer.prevErrorLoc = r.Loc
+
+	if !lexer.IsLogDisabled {
+		lexer.log.AddRangeErrorWithNotes(&lexer.tracker, r, text, notes)
 	}
 }
 
@@ -2450,25 +2629,25 @@ const (
 	pragmaSkipSpaceFirst
 )
 
-func scanForPragmaArg(kind pragmaArg, start int, pragma string, text string) (js_ast.Span, bool) {
+func scanForPragmaArg(kind pragmaArg, start int, pragma string, text string) (logger.Span, bool) {
 	text = text[len(pragma):]
 	start += len(pragma)
 
 	if text == "" {
-		return js_ast.Span{}, false
+		return logger.Span{}, false
 	}
 
 	// One or more whitespace characters
 	c, width := utf8.DecodeRuneInString(text)
 	if kind == pragmaSkipSpaceFirst {
 		if !IsWhitespace(c) {
-			return js_ast.Span{}, false
+			return logger.Span{}, false
 		}
 		for IsWhitespace(c) {
 			text = text[width:]
 			start += width
 			if text == "" {
-				return js_ast.Span{}, false
+				return logger.Span{}, false
 			}
 			c, width = utf8.DecodeRuneInString(text)
 		}
@@ -2487,7 +2666,7 @@ func scanForPragmaArg(kind pragmaArg, start int, pragma string, text string) (js
 		}
 	}
 
-	return js_ast.Span{
+	return logger.Span{
 		Text: text[:i],
 		Range: logger.Range{
 			Loc: logger.Loc{Start: int32(start)},
@@ -2498,7 +2677,7 @@ func scanForPragmaArg(kind pragmaArg, start int, pragma string, text string) (js
 
 func (lexer *Lexer) scanCommentText() {
 	text := lexer.source.Contents[lexer.start:lexer.end]
-	hasPreserveAnnotation := len(text) > 2 && text[2] == '!'
+	hasLegalAnnotation := len(text) > 2 && text[2] == '!'
 	isMultiLineComment := text[1] == '*'
 
 	// Save the original comment text so we can subtract comments from the
@@ -2520,7 +2699,7 @@ func (lexer *Lexer) scanCommentText() {
 			rest := text[i+1 : endOfCommentText]
 			if hasPrefixWithWordBoundary(rest, "__PURE__") {
 				lexer.HasPureCommentBefore = true
-			} else if strings.HasPrefix(rest, " sourceMappingURL=") {
+			} else if i == 2 && strings.HasPrefix(rest, " sourceMappingURL=") {
 				if arg, ok := scanForPragmaArg(pragmaNoSpaceFirst, lexer.start+i+1, " sourceMappingURL=", rest); ok {
 					lexer.SourceMappingURL = arg
 				}
@@ -2531,7 +2710,7 @@ func (lexer *Lexer) scanCommentText() {
 			if hasPrefixWithWordBoundary(rest, "__PURE__") {
 				lexer.HasPureCommentBefore = true
 			} else if hasPrefixWithWordBoundary(rest, "preserve") || hasPrefixWithWordBoundary(rest, "license") {
-				hasPreserveAnnotation = true
+				hasLegalAnnotation = true
 			} else if hasPrefixWithWordBoundary(rest, "jsx") {
 				if arg, ok := scanForPragmaArg(pragmaSkipSpaceFirst, lexer.start+i+1, "jsx", rest); ok {
 					lexer.JSXFactoryPragmaComment = arg
@@ -2540,7 +2719,7 @@ func (lexer *Lexer) scanCommentText() {
 				if arg, ok := scanForPragmaArg(pragmaSkipSpaceFirst, lexer.start+i+1, "jsxFrag", rest); ok {
 					lexer.JSXFragmentPragmaComment = arg
 				}
-			} else if strings.HasPrefix(rest, " sourceMappingURL=") {
+			} else if i == 2 && strings.HasPrefix(rest, " sourceMappingURL=") {
 				if arg, ok := scanForPragmaArg(pragmaNoSpaceFirst, lexer.start+i+1, " sourceMappingURL=", rest); ok {
 					lexer.SourceMappingURL = arg
 				}
@@ -2548,7 +2727,7 @@ func (lexer *Lexer) scanCommentText() {
 		}
 	}
 
-	if hasPreserveAnnotation || lexer.PreserveAllCommentsBefore {
+	if hasLegalAnnotation || lexer.PreserveAllCommentsBefore {
 		if isMultiLineComment {
 			text = removeMultiLineCommentIndent(lexer.source.Contents[:lexer.start], text)
 		}
@@ -2648,7 +2827,7 @@ func ContainsNonBMPCodePointUTF16(text []uint16) bool {
 }
 
 func StringToUTF16(text string) []uint16 {
-	decoded := []uint16{}
+	decoded := make([]uint16, 0, len(text))
 	for _, c := range text {
 		if c <= 0xFFFF {
 			decoded = append(decoded, uint16(c))
@@ -2661,20 +2840,47 @@ func StringToUTF16(text string) []uint16 {
 }
 
 func UTF16ToString(text []uint16) string {
-	temp := make([]byte, utf8.UTFMax)
+	var temp [utf8.UTFMax]byte
 	b := strings.Builder{}
 	n := len(text)
 	for i := 0; i < n; i++ {
 		r1 := rune(text[i])
-		if utf16.IsSurrogate(r1) && i+1 < n {
-			r2 := rune(text[i+1])
-			r1 = (r1-0xD800)<<10 | (r2 - 0xDC00) + 0x10000
-			i++
+		if r1 >= 0xD800 && r1 <= 0xDBFF && i+1 < n {
+			if r2 := rune(text[i+1]); r2 >= 0xDC00 && r2 <= 0xDFFF {
+				r1 = (r1-0xD800)<<10 | (r2 - 0xDC00) + 0x10000
+				i++
+			}
 		}
-		width := encodeWTF8Rune(temp, r1)
+		width := encodeWTF8Rune(temp[:], r1)
 		b.Write(temp[:width])
 	}
 	return b.String()
+}
+
+func UTF16ToStringWithValidation(text []uint16) (string, uint16, bool) {
+	var temp [utf8.UTFMax]byte
+	b := strings.Builder{}
+	n := len(text)
+	for i := 0; i < n; i++ {
+		r1 := rune(text[i])
+		if r1 >= 0xD800 && r1 <= 0xDBFF {
+			if i+1 < n {
+				if r2 := rune(text[i+1]); r2 >= 0xDC00 && r2 <= 0xDFFF {
+					r1 = (r1-0xD800)<<10 | (r2 - 0xDC00) + 0x10000
+					i++
+				} else {
+					return "", uint16(r1), false
+				}
+			} else {
+				return "", uint16(r1), false
+			}
+		} else if r1 >= 0xDC00 && r1 <= 0xDFFF {
+			return "", uint16(r1), false
+		}
+		width := encodeWTF8Rune(temp[:], r1)
+		b.Write(temp[:width])
+	}
+	return b.String(), 0, true
 }
 
 // Does "UTF16ToString(text) == str" without a temporary allocation
@@ -2683,15 +2889,16 @@ func UTF16EqualsString(text []uint16, str string) bool {
 		// Strings can't be equal if UTF-16 encoding is longer than UTF-8 encoding
 		return false
 	}
-	temp := [utf8.UTFMax]byte{}
+	var temp [utf8.UTFMax]byte
 	n := len(text)
 	j := 0
 	for i := 0; i < n; i++ {
 		r1 := rune(text[i])
-		if utf16.IsSurrogate(r1) && i+1 < n {
-			r2 := rune(text[i+1])
-			r1 = (r1-0xD800)<<10 | (r2 - 0xDC00) + 0x10000
-			i++
+		if r1 >= 0xD800 && r1 <= 0xDBFF && i+1 < n {
+			if r2 := rune(text[i+1]); r2 >= 0xDC00 && r2 <= 0xDFFF {
+				r1 = (r1-0xD800)<<10 | (r2 - 0xDC00) + 0x10000
+				i++
+			}
 		}
 		width := encodeWTF8Rune(temp[:], r1)
 		if j+width > len(str) {

@@ -19,54 +19,56 @@ func assertEqual(t *testing.T, a interface{}, b interface{}) {
 	}
 }
 
-func expectPrintedCommon(t *testing.T, name string, contents string, expected string, options Options) {
+func expectPrintedCommon(t *testing.T, name string, contents string, expected string, options config.Options) {
 	t.Helper()
 	t.Run(name, func(t *testing.T) {
 		t.Helper()
-		log := logger.NewDeferLog()
-		tree, ok := js_parser.Parse(log, test.SourceForTest(contents), js_parser.OptionsFromConfig(&config.Options{
-			MangleSyntax:          options.MangleSyntax,
-			UnsupportedJSFeatures: options.UnsupportedFeatures,
-		}))
+		log := logger.NewDeferLog(logger.DeferLogNoVerboseOrDebug)
+		tree, ok := js_parser.Parse(log, test.SourceForTest(contents), js_parser.OptionsFromConfig(&options))
 		msgs := log.Done()
 		text := ""
 		for _, msg := range msgs {
 			text += msg.String(logger.OutputOptions{}, logger.TerminalInfo{})
 		}
-		assertEqual(t, text, "")
+		test.AssertEqualWithDiff(t, text, "")
 		if !ok {
 			t.Fatal("Parse error")
 		}
 		symbols := js_ast.NewSymbolMap(1)
-		symbols.Outer[0] = tree.Symbols
+		symbols.SymbolsForSource[0] = tree.Symbols
 		r := renamer.NewNoOpRenamer(symbols)
-		js := Print(tree, symbols, r, options).JS
-		assertEqual(t, string(js), expected)
+		js := Print(tree, symbols, r, Options{
+			ASCIIOnly:           options.ASCIIOnly,
+			MangleSyntax:        options.MangleSyntax,
+			RemoveWhitespace:    options.RemoveWhitespace,
+			UnsupportedFeatures: options.UnsupportedJSFeatures,
+		}).JS
+		test.AssertEqualWithDiff(t, string(js), expected)
 	})
 }
 
 func expectPrinted(t *testing.T, contents string, expected string) {
 	t.Helper()
-	expectPrintedCommon(t, contents, contents, expected, Options{})
+	expectPrintedCommon(t, contents, contents, expected, config.Options{})
 }
 
 func expectPrintedMinify(t *testing.T, contents string, expected string) {
 	t.Helper()
-	expectPrintedCommon(t, contents+" [minified]", contents, expected, Options{
+	expectPrintedCommon(t, contents+" [minified]", contents, expected, config.Options{
 		RemoveWhitespace: true,
 	})
 }
 
 func expectPrintedMangle(t *testing.T, contents string, expected string) {
 	t.Helper()
-	expectPrintedCommon(t, contents+" [mangled]", contents, expected, Options{
+	expectPrintedCommon(t, contents+" [mangled]", contents, expected, config.Options{
 		MangleSyntax: true,
 	})
 }
 
 func expectPrintedMangleMinify(t *testing.T, contents string, expected string) {
 	t.Helper()
-	expectPrintedCommon(t, contents+" [mangled, minified]", contents, expected, Options{
+	expectPrintedCommon(t, contents+" [mangled, minified]", contents, expected, config.Options{
 		MangleSyntax:     true,
 		RemoveWhitespace: true,
 	})
@@ -74,14 +76,14 @@ func expectPrintedMangleMinify(t *testing.T, contents string, expected string) {
 
 func expectPrintedASCII(t *testing.T, contents string, expected string) {
 	t.Helper()
-	expectPrintedCommon(t, contents+" [ascii]", contents, expected, Options{
+	expectPrintedCommon(t, contents+" [ascii]", contents, expected, config.Options{
 		ASCIIOnly: true,
 	})
 }
 
 func expectPrintedMinifyASCII(t *testing.T, contents string, expected string) {
 	t.Helper()
-	expectPrintedCommon(t, contents+" [ascii]", contents, expected, Options{
+	expectPrintedCommon(t, contents+" [ascii]", contents, expected, config.Options{
 		RemoveWhitespace: true,
 		ASCIIOnly:        true,
 	})
@@ -89,8 +91,8 @@ func expectPrintedMinifyASCII(t *testing.T, contents string, expected string) {
 
 func expectPrintedTarget(t *testing.T, esVersion int, contents string, expected string) {
 	t.Helper()
-	expectPrintedCommon(t, contents, contents, expected, Options{
-		UnsupportedFeatures: compat.UnsupportedJSFeatures(map[compat.Engine][]int{
+	expectPrintedCommon(t, contents, contents, expected, config.Options{
+		UnsupportedJSFeatures: compat.UnsupportedJSFeatures(map[compat.Engine][]int{
 			compat.ES: {esVersion},
 		}),
 	})
@@ -98,8 +100,8 @@ func expectPrintedTarget(t *testing.T, esVersion int, contents string, expected 
 
 func expectPrintedTargetMinify(t *testing.T, esVersion int, contents string, expected string) {
 	t.Helper()
-	expectPrintedCommon(t, contents+" [minified]", contents, expected, Options{
-		UnsupportedFeatures: compat.UnsupportedJSFeatures(map[compat.Engine][]int{
+	expectPrintedCommon(t, contents+" [minified]", contents, expected, config.Options{
+		UnsupportedJSFeatures: compat.UnsupportedJSFeatures(map[compat.Engine][]int{
 			compat.ES: {esVersion},
 		}),
 		RemoveWhitespace: true,
@@ -108,8 +110,8 @@ func expectPrintedTargetMinify(t *testing.T, esVersion int, contents string, exp
 
 func expectPrintedTargetMangle(t *testing.T, esVersion int, contents string, expected string) {
 	t.Helper()
-	expectPrintedCommon(t, contents+" [mangled]", contents, expected, Options{
-		UnsupportedFeatures: compat.UnsupportedJSFeatures(map[compat.Engine][]int{
+	expectPrintedCommon(t, contents+" [mangled]", contents, expected, config.Options{
+		UnsupportedJSFeatures: compat.UnsupportedJSFeatures(map[compat.Engine][]int{
 			compat.ES: {esVersion},
 		}),
 		MangleSyntax: true,
@@ -118,11 +120,43 @@ func expectPrintedTargetMangle(t *testing.T, esVersion int, contents string, exp
 
 func expectPrintedTargetASCII(t *testing.T, esVersion int, contents string, expected string) {
 	t.Helper()
-	expectPrintedCommon(t, contents+" [ascii]", contents, expected, Options{
-		UnsupportedFeatures: compat.UnsupportedJSFeatures(map[compat.Engine][]int{
+	expectPrintedCommon(t, contents+" [ascii]", contents, expected, config.Options{
+		UnsupportedJSFeatures: compat.UnsupportedJSFeatures(map[compat.Engine][]int{
 			compat.ES: {esVersion},
 		}),
 		ASCIIOnly: true,
+	})
+}
+
+func expectPrintedJSX(t *testing.T, contents string, expected string) {
+	t.Helper()
+	expectPrintedCommon(t, contents, contents, expected, config.Options{
+		JSX: config.JSXOptions{
+			Parse:    true,
+			Preserve: true,
+		},
+	})
+}
+
+func expectPrintedJSXASCII(t *testing.T, contents string, expected string) {
+	t.Helper()
+	expectPrintedCommon(t, contents, contents, expected, config.Options{
+		JSX: config.JSXOptions{
+			Parse:    true,
+			Preserve: true,
+		},
+		ASCIIOnly: true,
+	})
+}
+
+func expectPrintedJSXMinify(t *testing.T, contents string, expected string) {
+	t.Helper()
+	expectPrintedCommon(t, contents+" [minified]", contents, expected, config.Options{
+		JSX: config.JSXOptions{
+			Parse:    true,
+			Preserve: true,
+		},
+		RemoveWhitespace: true,
 	})
 }
 
@@ -239,7 +273,7 @@ func TestArray(t *testing.T) {
 func TestSplat(t *testing.T) {
 	expectPrinted(t, "[...(a, b)]", "[...(a, b)];\n")
 	expectPrinted(t, "x(...(a, b))", "x(...(a, b));\n")
-	expectPrinted(t, "({...(a, b)})", "({...(a, b)});\n")
+	expectPrinted(t, "({...(a, b)})", "({ ...(a, b) });\n")
 }
 
 func TestNew(t *testing.T) {
@@ -427,7 +461,7 @@ func TestTemplate(t *testing.T) {
 }
 
 func TestObject(t *testing.T) {
-	expectPrinted(t, "let x = {'(':')'}", "let x = {\"(\": \")\"};\n")
+	expectPrinted(t, "let x = {'(':')'}", "let x = { \"(\": \")\" };\n")
 	expectPrinted(t, "({})", "({});\n")
 	expectPrinted(t, "({}.x)", "({}).x;\n")
 	expectPrinted(t, "({} = {})", "({} = {});\n")
@@ -453,6 +487,7 @@ func TestFor(t *testing.T) {
 	expectPrinted(t, "for (x(a in b);;);", "for (x(a in b); ; )\n  ;\n")
 	expectPrinted(t, "for (x[a in b];;);", "for (x[a in b]; ; )\n  ;\n")
 	expectPrinted(t, "for (x?.[a in b];;);", "for (x?.[a in b]; ; )\n  ;\n")
+	expectPrinted(t, "for ((x => a in b);;);", "for ((x) => (a in b); ; )\n  ;\n")
 
 	// Make sure for-of loops with commas are wrapped in parentheses
 	expectPrinted(t, "for (let a in b, c);", "for (let a in b, c)\n  ;\n")
@@ -465,7 +500,7 @@ func TestFunction(t *testing.T) {
 		"function foo(a = (b, c), ...d) {\n}\n")
 	expectPrinted(t,
 		"function foo({[1 + 2]: a = 3} = {[1 + 2]: 3}) {}",
-		"function foo({[1 + 2]: a = 3} = {[1 + 2]: 3}) {\n}\n")
+		"function foo({ [1 + 2]: a = 3 } = { [1 + 2]: 3 }) {\n}\n")
 	expectPrinted(t,
 		"function foo([a = (1, 2), ...[b, ...c]] = [1, [2, 3]]) {}",
 		"function foo([a = (1, 2), ...[b, ...c]] = [1, [2, 3]]) {\n}\n")
@@ -549,7 +584,7 @@ func TestArrow(t *testing.T) {
 		"(a = (b, c), ...d) => {\n};\n")
 	expectPrinted(t,
 		"({[1 + 2]: a = 3} = {[1 + 2]: 3}) => {}",
-		"({[1 + 2]: a = 3} = {[1 + 2]: 3}) => {\n};\n")
+		"({ [1 + 2]: a = 3 } = { [1 + 2]: 3 }) => {\n};\n")
 	expectPrinted(t,
 		"([a = (1, 2), ...[b, ...c]] = [1, [2, 3]]) => {}",
 		"([a = (1, 2), ...[b, ...c]] = [1, [2, 3]]) => {\n};\n")
@@ -570,21 +605,21 @@ func TestArrow(t *testing.T) {
 		"a || (() => {\n});\n")
 	expectPrinted(t,
 		"({a = b, c = d}) => {}",
-		"({a = b, c = d}) => {\n};\n")
+		"({ a = b, c = d }) => {\n};\n")
 	expectPrinted(t,
 		"([{a = b, c = d} = {}] = []) => {}",
-		"([{a = b, c = d} = {}] = []) => {\n};\n")
+		"([{ a = b, c = d } = {}] = []) => {\n};\n")
 	expectPrinted(t,
 		"({a: [b = c] = []} = {}) => {}",
-		"({a: [b = c] = []} = {}) => {\n};\n")
+		"({ a: [b = c] = [] } = {}) => {\n};\n")
 
 	// These are not arrow functions but initially look like one
 	expectPrinted(t, "(a = b, c)", "a = b, c;\n")
 	expectPrinted(t, "([...a = b])", "[...a = b];\n")
 	expectPrinted(t, "([...a, ...b])", "[...a, ...b];\n")
-	expectPrinted(t, "({a: b, c() {}})", "({a: b, c() {\n}});\n")
-	expectPrinted(t, "({a: b, get c() {}})", "({a: b, get c() {\n}});\n")
-	expectPrinted(t, "({a: b, set c(x) {}})", "({a: b, set c(x) {\n}});\n")
+	expectPrinted(t, "({a: b, c() {}})", "({ a: b, c() {\n} });\n")
+	expectPrinted(t, "({a: b, get c() {}})", "({ a: b, get c() {\n} });\n")
+	expectPrinted(t, "({a: b, set c(x) {}})", "({ a: b, set c(x) {\n} });\n")
 }
 
 func TestClass(t *testing.T) {
@@ -594,6 +629,11 @@ func TestClass(t *testing.T) {
 	expectPrinted(t, "class Foo { static foo() {} }", "class Foo {\n  static foo() {\n  }\n}\n")
 	expectPrinted(t, "class Foo { static get foo() {} }", "class Foo {\n  static get foo() {\n  }\n}\n")
 	expectPrinted(t, "class Foo { static set foo(x) {} }", "class Foo {\n  static set foo(x) {\n  }\n}\n")
+}
+
+func TestPrivateIdentifiers(t *testing.T) {
+	expectPrinted(t, "class Foo { #foo; foo() { return #foo in this } }", "class Foo {\n  #foo;\n  foo() {\n    return #foo in this;\n  }\n}\n")
+	expectPrintedMinify(t, "class Foo { #foo; foo() { return #foo in this } }", "class Foo{#foo;foo(){return#foo in this}}")
 }
 
 func TestImport(t *testing.T) {
@@ -721,14 +761,19 @@ func TestMinify(t *testing.T) {
 	expectPrintedMinify(t, "import a from 'path'", "import a from\"path\";")
 	expectPrintedMinify(t, "import * as ns from 'path'", "import*as ns from\"path\";")
 	expectPrintedMinify(t, "import {a, b as c} from 'path'", "import{a,b as c}from\"path\";")
+	expectPrintedMinify(t, "import {a, ' ' as c} from 'path'", "import{a,\" \"as c}from\"path\";")
 
 	expectPrintedMinify(t, "export * as ns from 'path'", "export*as ns from\"path\";")
+	expectPrintedMinify(t, "export * as ' ' from 'path'", "export*as\" \"from\"path\";")
 	expectPrintedMinify(t, "export {a, b as c} from 'path'", "export{a,b as c}from\"path\";")
+	expectPrintedMinify(t, "export {' ', '-' as ';'} from 'path'", "export{\" \",\"-\"as\";\"}from\"path\";")
+	expectPrintedMinify(t, "let a, b; export {a, b as c}", "let a,b;export{a,b as c};")
+	expectPrintedMinify(t, "let a, b; export {a, b as ' '}", "let a,b;export{a,b as\" \"};")
 
 	// Print some strings using template literals when minifying
 	expectPrinted(t, "x = '\\n'", "x = \"\\n\";\n")
 	expectPrintedMangle(t, "x = '\\n'", "x = `\n`;\n")
-	expectPrintedMangle(t, "x = {'\\n': 0}", "x = {\"\\n\": 0};\n")
+	expectPrintedMangle(t, "x = {'\\n': 0}", "x = { \"\\n\": 0 };\n")
 	expectPrintedMangle(t, "(class{'\\n' = 0})", "(class {\n  \"\\n\" = 0;\n});\n")
 	expectPrintedMangle(t, "class Foo{'\\n' = 0}", "class Foo {\n  \"\\n\" = 0;\n}\n")
 
@@ -746,8 +791,8 @@ func TestES5(t *testing.T) {
 	expectPrintedTargetMangle(t, 5, "foo('a\\n\\n\\nb')", "foo(\"a\\n\\n\\nb\");\n")
 	expectPrintedTargetMangle(t, 2015, "foo('a\\n\\n\\nb')", "foo(`a\n\n\nb`);\n")
 
-	expectPrintedTarget(t, 5, "foo({a, b})", "foo({a: a, b: b});\n")
-	expectPrintedTarget(t, 2015, "foo({a, b})", "foo({a, b});\n")
+	expectPrintedTarget(t, 5, "foo({a, b})", "foo({ a: a, b: b });\n")
+	expectPrintedTarget(t, 2015, "foo({a, b})", "foo({ a, b });\n")
 
 	expectPrintedTarget(t, 5, "x => x", "(function(x) {\n  return x;\n});\n")
 	expectPrintedTarget(t, 2015, "x => x", "(x) => x;\n")
@@ -784,12 +829,12 @@ func TestASCIIOnly(t *testing.T) {
 	expectPrintedASCII(t, "var \\u{10000}", "var \\u{10000};\n")
 	expectPrintedTargetASCII(t, 2015, "'𐀀'", "\"\\u{10000}\";\n")
 	expectPrintedTargetASCII(t, 5, "'𐀀'", "\"\\uD800\\uDC00\";\n")
-	expectPrintedTargetASCII(t, 2015, "x.𐀀", "x.\\u{10000};\n")
+	expectPrintedTargetASCII(t, 2015, "x.𐀀", "x[\"\\u{10000}\"];\n")
 	expectPrintedTargetASCII(t, 5, "x.𐀀", "x[\"\\uD800\\uDC00\"];\n")
 
 	// Escapes should use consistent case
-	expectPrintedASCII(t, "var \\u{100a} = {\\u100A: '\\u100A'}", "var \\u100A = {\\u100A: \"\\u100A\"};\n")
-	expectPrintedASCII(t, "var \\u{1000a} = {\\u{1000A}: '\\u{1000A}'}", "var \\u{1000A} = {\\u{1000A}: \"\\u{1000A}\"};\n")
+	expectPrintedASCII(t, "var \\u{100a} = {\\u100A: '\\u100A'}", "var \\u100A = { \\u100A: \"\\u100A\" };\n")
+	expectPrintedASCII(t, "var \\u{1000a} = {\\u{1000A}: '\\u{1000A}'}", "var \\u{1000A} = { \"\\u{1000A}\": \"\\u{1000A}\" };\n")
 
 	// These characters should always be escaped
 	expectPrinted(t, "let x = '\u2028'", "let x = \"\\u2028\";\n")
@@ -801,4 +846,159 @@ func TestASCIIOnly(t *testing.T) {
 	expectPrintedASCII(t, "(class 𐀀 extends π {})", "(class \\u{10000} extends \\u03C0 {\n});\n")
 	expectPrintedMinifyASCII(t, "class 𐀀 extends π {}", "class \\u{10000} extends \\u03C0{}")
 	expectPrintedMinifyASCII(t, "(class 𐀀 extends π {})", "(class \\u{10000} extends \\u03C0{});")
+}
+
+func TestJSX(t *testing.T) {
+	expectPrintedJSX(t, "<a/>", "<a />;\n")
+	expectPrintedJSX(t, "<A/>", "<A />;\n")
+	expectPrintedJSX(t, "<a.b/>", "<a.b />;\n")
+	expectPrintedJSX(t, "<A.B/>", "<A.B />;\n")
+	expectPrintedJSX(t, "<a-b/>", "<a-b />;\n")
+	expectPrintedJSX(t, "<a:b/>", "<a:b />;\n")
+	expectPrintedJSX(t, "<a></a>", "<a />;\n")
+	expectPrintedJSX(t, "<a b></a>", "<a b />;\n")
+
+	expectPrintedJSX(t, "<a b={true}></a>", "<a b={true} />;\n")
+	expectPrintedJSX(t, "<a b={'x'}></a>", "<a b=\"x\" />;\n")
+	expectPrintedJSX(t, "<a b={`'`}></a>", "<a b=\"'\" />;\n")
+	expectPrintedJSX(t, "<a b={`\"`}></a>", "<a b='\"' />;\n")
+	expectPrintedJSX(t, "<a b={`'\"`}></a>", "<a b={`'\"`} />;\n")
+	expectPrintedJSX(t, "<a b=\"&quot;\"></a>", "<a b='\"' />;\n")
+	expectPrintedJSX(t, "<a b=\"&amp;\"></a>", "<a b={\"&\"} />;\n")
+
+	expectPrintedJSX(t, "<a>x</a>", "<a>x</a>;\n")
+	expectPrintedJSX(t, "<a>x\ny</a>", "<a>x y</a>;\n")
+	expectPrintedJSX(t, "<a>{'x'}{'y'}</a>", "<a>\n  {\"x\"}\n  {\"y\"}\n</a>;\n")
+	expectPrintedJSX(t, "<a> x</a>", "<a> x</a>;\n")
+	expectPrintedJSX(t, "<a>x </a>", "<a>x </a>;\n")
+	expectPrintedJSX(t, "<a>&#10;</a>", "<a>{\"\\n\"}</a>;\n")
+	expectPrintedJSX(t, "<a>&amp;</a>", "<a>{\"&\"}</a>;\n")
+	expectPrintedJSX(t, "<a>&lt;</a>", "<a>{\"<\"}</a>;\n")
+	expectPrintedJSX(t, "<a>&gt;</a>", "<a>{\">\"}</a>;\n")
+	expectPrintedJSX(t, "<a>&#123;</a>", "<a>{\"{\"}</a>;\n")
+	expectPrintedJSX(t, "<a>&#125;</a>", "<a>{\"}\"}</a>;\n")
+
+	expectPrintedJSX(t, "<a><x/></a>", "<a><x /></a>;\n")
+	expectPrintedJSX(t, "<a><x/><y/></a>", "<a>\n  <x />\n  <y />\n</a>;\n")
+	expectPrintedJSX(t, "<a>b<c/>d</a>", "<a>\n  {\"b\"}\n  <c />\n  {\"d\"}\n</a>;\n")
+
+	expectPrintedJSX(t, "<></>", "<></>;\n")
+	expectPrintedJSX(t, "<>x<y/>z</>", "<>\n  {\"x\"}\n  <y />\n  {\"z\"}\n</>;\n")
+
+	// These can't be escaped because JSX lacks a syntax for escapes
+	expectPrintedJSXASCII(t, "<π/>", "<π />;\n")
+	expectPrintedJSXASCII(t, "<π.𐀀/>", "<π.𐀀 />;\n")
+	expectPrintedJSXASCII(t, "<𐀀.π/>", "<𐀀.π />;\n")
+	expectPrintedJSXASCII(t, "<π>x</π>", "<π>x</π>;\n")
+	expectPrintedJSXASCII(t, "<𐀀>x</𐀀>", "<𐀀>x</𐀀>;\n")
+	expectPrintedJSXASCII(t, "<a π/>", "<a π />;\n")
+	expectPrintedJSXASCII(t, "<a 𐀀/>", "<a 𐀀 />;\n")
+
+	// These can be escaped but as JS strings (since XML entities in JSX aren't standard)
+	expectPrintedJSXASCII(t, "<a b='π'/>", "<a b={\"\\u03C0\"} />;\n")
+	expectPrintedJSXASCII(t, "<a b='𐀀'/>", "<a b={\"\\u{10000}\"} />;\n")
+	expectPrintedJSXASCII(t, "<a>π</a>", "<a>{\"\\u03C0\"}</a>;\n")
+	expectPrintedJSXASCII(t, "<a>𐀀</a>", "<a>{\"\\u{10000}\"}</a>;\n")
+
+	expectPrintedJSXMinify(t, "<a b c={x,y} d='true'/>", "<a b c={(x,y)}d=\"true\"/>;")
+	expectPrintedJSXMinify(t, "<a><b/><c/></a>", "<a><b/><c/></a>;")
+	expectPrintedJSXMinify(t, "<a> x <b/> y </a>", "<a> x <b/> y </a>;")
+	expectPrintedJSXMinify(t, "<a>{' x '}{'<b/>'}{' y '}</a>", "<a> x {\"<b/>\"} y </a>;")
+}
+
+func TestAvoidSlashScript(t *testing.T) {
+	// Positive cases
+	expectPrinted(t, "x = '</script'", "x = \"<\\/script\";\n")
+	expectPrinted(t, "x = `</script`", "x = `<\\/script`;\n")
+	expectPrinted(t, "x = `</SCRIPT`", "x = `<\\/SCRIPT`;\n")
+	expectPrinted(t, "x = `</ScRiPt`", "x = `<\\/ScRiPt`;\n")
+	expectPrinted(t, "x = `</script${y}`", "x = `<\\/script${y}`;\n")
+	expectPrinted(t, "x = `${y}</script`", "x = `${y}<\\/script`;\n")
+	expectPrintedMinify(t, "x = 1 < /script/.exec(y).length", "x=1< /script/.exec(y).length;")
+	expectPrintedMinify(t, "x = 1 < /SCRIPT/.exec(y).length", "x=1< /SCRIPT/.exec(y).length;")
+	expectPrintedMinify(t, "x = 1 < /ScRiPt/.exec(y).length", "x=1< /ScRiPt/.exec(y).length;")
+	expectPrintedMinify(t, "x = 1 << /script/.exec(y).length", "x=1<< /script/.exec(y).length;")
+	expectPrinted(t, "//! </script\n//! >/script\n//! /script", "//! <\\/script\n//! >/script\n//! /script\n")
+	expectPrinted(t, "//! </SCRIPT\n//! >/SCRIPT\n//! /SCRIPT", "//! <\\/SCRIPT\n//! >/SCRIPT\n//! /SCRIPT\n")
+	expectPrinted(t, "//! </ScRiPt\n//! >/ScRiPt\n//! /ScRiPt", "//! <\\/ScRiPt\n//! >/ScRiPt\n//! /ScRiPt\n")
+	expectPrinted(t, "/*! </script \n </script */", "/*! <\\/script \n <\\/script */\n")
+	expectPrinted(t, "/*! </SCRIPT \n </SCRIPT */", "/*! <\\/SCRIPT \n <\\/SCRIPT */\n")
+	expectPrinted(t, "/*! </ScRiPt \n </ScRiPt */", "/*! <\\/ScRiPt \n <\\/ScRiPt */\n")
+	expectPrinted(t, "String.raw`</script`",
+		"var _a;\nString.raw(_a || (_a = __template([\"<\\/script\"])));\nimport {\n  __template\n} from \"<runtime>\";\n")
+	expectPrinted(t, "String.raw`</script${a}`",
+		"var _a;\nString.raw(_a || (_a = __template([\"<\\/script\", \"\"])), a);\nimport {\n  __template\n} from \"<runtime>\";\n")
+	expectPrinted(t, "String.raw`${a}</script`",
+		"var _a;\nString.raw(_a || (_a = __template([\"\", \"<\\/script\"])), a);\nimport {\n  __template\n} from \"<runtime>\";\n")
+	expectPrinted(t, "String.raw`</SCRIPT`",
+		"var _a;\nString.raw(_a || (_a = __template([\"<\\/SCRIPT\"])));\nimport {\n  __template\n} from \"<runtime>\";\n")
+	expectPrinted(t, "String.raw`</ScRiPt`",
+		"var _a;\nString.raw(_a || (_a = __template([\"<\\/ScRiPt\"])));\nimport {\n  __template\n} from \"<runtime>\";\n")
+
+	// Negative cases
+	expectPrinted(t, "x = '</'", "x = \"</\";\n")
+	expectPrinted(t, "x = '</ script'", "x = \"</ script\";\n")
+	expectPrinted(t, "x = '< /script'", "x = \"< /script\";\n")
+	expectPrinted(t, "x = '/script>'", "x = \"/script>\";\n")
+	expectPrinted(t, "x = '<script>'", "x = \"<script>\";\n")
+	expectPrintedMinify(t, "x = 1 < / script/.exec(y).length", "x=1</ script/.exec(y).length;")
+	expectPrintedMinify(t, "x = 1 << / script/.exec(y).length", "x=1<</ script/.exec(y).length;")
+}
+
+func TestInfinity(t *testing.T) {
+	expectPrinted(t, "x = Infinity", "x = Infinity;\n")
+	expectPrinted(t, "x = -Infinity", "x = -Infinity;\n")
+	expectPrinted(t, "x = (Infinity).toString", "x = Infinity.toString;\n")
+	expectPrinted(t, "x = (-Infinity).toString", "x = (-Infinity).toString;\n")
+	expectPrinted(t, "x = (Infinity) ** 2", "x = Infinity ** 2;\n")
+	expectPrinted(t, "x = (-Infinity) ** 2", "x = (-Infinity) ** 2;\n")
+	expectPrinted(t, "x = ~Infinity", "x = ~Infinity;\n")
+	expectPrinted(t, "x = ~-Infinity", "x = ~-Infinity;\n")
+	expectPrinted(t, "x = Infinity * y", "x = Infinity * y;\n")
+	expectPrinted(t, "x = Infinity / y", "x = Infinity / y;\n")
+	expectPrinted(t, "x = y * Infinity", "x = y * Infinity;\n")
+	expectPrinted(t, "x = y / Infinity", "x = y / Infinity;\n")
+	expectPrinted(t, "throw Infinity", "throw Infinity;\n")
+
+	expectPrintedMinify(t, "x = Infinity", "x=Infinity;")
+	expectPrintedMinify(t, "x = -Infinity", "x=-Infinity;")
+	expectPrintedMinify(t, "x = (Infinity).toString", "x=Infinity.toString;")
+	expectPrintedMinify(t, "x = (-Infinity).toString", "x=(-Infinity).toString;")
+	expectPrintedMinify(t, "x = (Infinity) ** 2", "x=Infinity**2;")
+	expectPrintedMinify(t, "x = (-Infinity) ** 2", "x=(-Infinity)**2;")
+	expectPrintedMinify(t, "x = ~Infinity", "x=~Infinity;")
+	expectPrintedMinify(t, "x = ~-Infinity", "x=~-Infinity;")
+	expectPrintedMinify(t, "x = Infinity * y", "x=Infinity*y;")
+	expectPrintedMinify(t, "x = Infinity / y", "x=Infinity/y;")
+	expectPrintedMinify(t, "x = y * Infinity", "x=y*Infinity;")
+	expectPrintedMinify(t, "x = y / Infinity", "x=y/Infinity;")
+	expectPrintedMinify(t, "throw Infinity", "throw Infinity;")
+
+	expectPrintedMangle(t, "x = Infinity", "x = 1 / 0;\n")
+	expectPrintedMangle(t, "x = -Infinity", "x = -1 / 0;\n")
+	expectPrintedMangle(t, "x = (Infinity).toString", "x = (1 / 0).toString;\n")
+	expectPrintedMangle(t, "x = (-Infinity).toString", "x = (-1 / 0).toString;\n")
+	expectPrintedMangle(t, "x = Infinity ** 2", "x = (1 / 0) ** 2;\n")
+	expectPrintedMangle(t, "x = (-Infinity) ** 2", "x = (-1 / 0) ** 2;\n")
+	expectPrintedMangle(t, "x = ~Infinity", "x = ~(1 / 0);\n")
+	expectPrintedMangle(t, "x = ~-Infinity", "x = ~(-1 / 0);\n")
+	expectPrintedMangle(t, "x = Infinity * y", "x = 1 / 0 * y;\n")
+	expectPrintedMangle(t, "x = Infinity / y", "x = 1 / 0 / y;\n")
+	expectPrintedMangle(t, "x = y * Infinity", "x = y * (1 / 0);\n")
+	expectPrintedMangle(t, "x = y / Infinity", "x = y / (1 / 0);\n")
+	expectPrintedMangle(t, "throw Infinity", "throw 1 / 0;\n")
+
+	expectPrintedMangleMinify(t, "x = Infinity", "x=1/0;")
+	expectPrintedMangleMinify(t, "x = -Infinity", "x=-1/0;")
+	expectPrintedMangleMinify(t, "x = (Infinity).toString", "x=(1/0).toString;")
+	expectPrintedMangleMinify(t, "x = (-Infinity).toString", "x=(-1/0).toString;")
+	expectPrintedMangleMinify(t, "x = Infinity ** 2", "x=(1/0)**2;")
+	expectPrintedMangleMinify(t, "x = (-Infinity) ** 2", "x=(-1/0)**2;")
+	expectPrintedMangleMinify(t, "x = ~Infinity", "x=~(1/0);")
+	expectPrintedMangleMinify(t, "x = ~-Infinity", "x=~(-1/0);")
+	expectPrintedMangleMinify(t, "x = Infinity * y", "x=1/0*y;")
+	expectPrintedMangleMinify(t, "x = Infinity / y", "x=1/0/y;")
+	expectPrintedMangleMinify(t, "x = y * Infinity", "x=y*(1/0);")
+	expectPrintedMangleMinify(t, "x = y / Infinity", "x=y/(1/0);")
+	expectPrintedMangleMinify(t, "throw Infinity", "throw 1/0;")
 }

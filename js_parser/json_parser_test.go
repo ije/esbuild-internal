@@ -14,7 +14,7 @@ func expectParseErrorJSON(t *testing.T, contents string, expected string) {
 	t.Helper()
 	t.Run(contents, func(t *testing.T) {
 		t.Helper()
-		log := logger.NewDeferLog()
+		log := logger.NewDeferLog(logger.DeferLogNoVerboseOrDebug)
 		ParseJSON(log, test.SourceForTest(contents), JSONOptions{})
 		msgs := log.Done()
 		text := ""
@@ -37,7 +37,7 @@ func expectPrintedJSONWithWarning(t *testing.T, contents string, warning string,
 	t.Helper()
 	t.Run(contents, func(t *testing.T) {
 		t.Helper()
-		log := logger.NewDeferLog()
+		log := logger.NewDeferLog(logger.DeferLogNoVerboseOrDebug)
 		expr, ok := ParseJSON(log, test.SourceForTest(contents), JSONOptions{})
 		msgs := log.Done()
 		text := ""
@@ -145,7 +145,10 @@ func TestJSONNumber(t *testing.T) {
 func TestJSONObject(t *testing.T) {
 	expectPrintedJSON(t, "{\"x\":0}", "({x:0})")
 	expectPrintedJSON(t, "{\"x\":0,\"y\":1}", "({x:0,y:1})")
-	expectPrintedJSONWithWarning(t, "{\"x\":0,\"x\":1}", "<stdin>: warning: Duplicate key \"x\" in object literal\n", "({x:0,x:1})")
+	expectPrintedJSONWithWarning(t,
+		"{\"x\":0,\"x\":1}",
+		"<stdin>: warning: Duplicate key \"x\" in object literal\n<stdin>: note: The original \"x\" is here\n",
+		"({x:0,x:1})")
 	expectParseErrorJSON(t, "{\"x\":0,}", "<stdin>: error: JSON does not support trailing commas\n")
 	expectParseErrorJSON(t, "{x:0}", "<stdin>: error: Expected string but found \"x\"\n")
 	expectParseErrorJSON(t, "{1:0}", "<stdin>: error: Expected string but found \"1\"\n")

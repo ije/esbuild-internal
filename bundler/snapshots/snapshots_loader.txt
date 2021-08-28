@@ -1,12 +1,44 @@
 TestAutoDetectMimeTypeFromExtension
 ---------- /out.js ----------
 // test.svg
-var require_test = __commonJS((exports, module) => {
-  module.exports = "data:image/svg+xml;base64,YQBigGP/ZA==";
+var require_test = __commonJS({
+  "test.svg"(exports, module) {
+    module.exports = "data:image/svg+xml;base64,YQBigGP/ZA==";
+  }
 });
 
 // entry.js
 console.log(require_test());
+
+================================================================================
+TestJSXPreserveCapitalLetter
+---------- /out.js ----------
+// foo.js
+var MustStartWithUpperCaseLetter = class {
+};
+
+// entry.jsx
+console.log(<MustStartWithUpperCaseLetter />);
+
+================================================================================
+TestJSXPreserveCapitalLetterMinify
+---------- /out.js ----------
+// foo.js
+var Y = class {
+};
+
+// entry.jsx
+console.log(<Y tag-must-start-with-capital-letter />);
+
+================================================================================
+TestJSXPreserveCapitalLetterMinifyNested
+---------- /out.js ----------
+// entry.jsx
+x = () => {
+  class Y {
+  }
+  return <Y tag-must-start-with-capital-letter />;
+};
 
 ================================================================================
 TestJSXSyntaxInJSWithJSXLoader
@@ -18,8 +50,10 @@ console.log(/* @__PURE__ */ React.createElement("div", null));
 TestLoaderBase64CommonJSAndES6
 ---------- /out.js ----------
 // x.b64
-var require_x = __commonJS((exports, module) => {
-  module.exports = "eA==";
+var require_x = __commonJS({
+  "x.b64"(exports, module) {
+    module.exports = "eA==";
+  }
 });
 
 // y.b64
@@ -33,8 +67,10 @@ console.log(x_b64, y_default);
 TestLoaderDataURLCommonJSAndES6
 ---------- /out.js ----------
 // x.txt
-var require_x = __commonJS((exports, module) => {
-  module.exports = "data:text/plain;charset=utf-8;base64,eA==";
+var require_x = __commonJS({
+  "x.txt"(exports, module) {
+    module.exports = "data:text/plain;charset=utf-8;base64,eA==";
+  }
 });
 
 // y.txt
@@ -46,12 +82,14 @@ console.log(x_url, y_default);
 
 ================================================================================
 TestLoaderFile
----------- /out/test-T3K5TRK4.svg ----------
+---------- /out/test-IPILGNO5.svg ----------
 <svg></svg>
 ---------- /out/entry.js ----------
 // test.svg
-var require_test = __commonJS((exports, module) => {
-  module.exports = "./test-T3K5TRK4.svg";
+var require_test = __commonJS({
+  "test.svg"(exports, module) {
+    module.exports = "./test-IPILGNO5.svg";
+  }
 });
 
 // entry.js
@@ -59,18 +97,20 @@ console.log(require_test());
 
 ================================================================================
 TestLoaderFileCommonJSAndES6
----------- /y-SXFQX7JJ.txt ----------
+---------- /y-YE5AYNFB.txt ----------
 y
----------- /x-CH3K3DWF.txt ----------
+---------- /x-LSAMBFUD.txt ----------
 x
 ---------- /out.js ----------
 // x.txt
-var require_x = __commonJS((exports, module) => {
-  module.exports = "./x-CH3K3DWF.txt";
+var require_x = __commonJS({
+  "x.txt"(exports, module) {
+    module.exports = "./x-LSAMBFUD.txt";
+  }
 });
 
 // y.txt
-var y_default = "./y-SXFQX7JJ.txt";
+var y_default = "./y-YE5AYNFB.txt";
 
 // entry.js
 var x_url = require_x();
@@ -78,34 +118,162 @@ console.log(x_url, y_default);
 
 ================================================================================
 TestLoaderFileMultipleNoCollision
----------- /dist/test-VFFI7ZOM.txt ----------
+---------- /dist/test-J7OMUXO3.txt ----------
 test
 ---------- /dist/out.js ----------
 // a/test.txt
-var require_test = __commonJS((exports, module) => {
-  module.exports = "./test-VFFI7ZOM.txt";
+var require_test = __commonJS({
+  "a/test.txt"(exports, module) {
+    module.exports = "./test-J7OMUXO3.txt";
+  }
 });
 
 // b/test.txt
-var require_test2 = __commonJS((exports, module) => {
-  module.exports = "./test-VFFI7ZOM.txt";
+var require_test2 = __commonJS({
+  "b/test.txt"(exports, module) {
+    module.exports = "./test-J7OMUXO3.txt";
+  }
 });
 
 // entry.js
 console.log(require_test(), require_test2());
 
 ================================================================================
+TestLoaderFileOneSourceTwoDifferentOutputPathsCSS
+---------- /out/common-LSAMBFUD.png ----------
+x
+---------- /out/entries/entry.css ----------
+/* src/shared/common.css */
+div {
+  background: url(../common-LSAMBFUD.png);
+}
+
+/* src/entries/entry.css */
+
+---------- /out/entries/other/entry.css ----------
+/* src/shared/common.css */
+div {
+  background: url(../../common-LSAMBFUD.png);
+}
+
+/* src/entries/other/entry.css */
+
+================================================================================
+TestLoaderFileOneSourceTwoDifferentOutputPathsJS
+---------- /out/common-LSAMBFUD.png ----------
+x
+---------- /out/entries/entry.js ----------
+// src/shared/common.png
+var common_default = "../common-LSAMBFUD.png";
+
+// src/shared/common.js
+console.log(common_default);
+
+---------- /out/entries/other/entry.js ----------
+// src/shared/common.png
+var common_default = "../../common-LSAMBFUD.png";
+
+// src/shared/common.js
+console.log(common_default);
+
+================================================================================
+TestLoaderFilePublicPathAssetNamesCSS
+---------- /out/images/image-LSAMBFUD.png ----------
+x
+---------- /out/entries/entry.css ----------
+/* src/entries/entry.css */
+div {
+  background: url(https://example.com/images/image-LSAMBFUD.png);
+}
+
+================================================================================
+TestLoaderFilePublicPathAssetNamesJS
+---------- /out/images/image-LSAMBFUD.png ----------
+x
+---------- /out/entries/entry.js ----------
+// src/images/image.png
+var image_default = "https://example.com/images/image-LSAMBFUD.png";
+
+// src/entries/entry.js
+console.log(image_default);
+
+================================================================================
+TestLoaderFilePublicPathCSS
+---------- /out/image-LSAMBFUD.png ----------
+x
+---------- /out/entries/entry.css ----------
+/* src/entries/entry.css */
+div {
+  background: url(https://example.com/image-LSAMBFUD.png);
+}
+
+================================================================================
+TestLoaderFilePublicPathJS
+---------- /out/image-LSAMBFUD.png ----------
+x
+---------- /out/entries/entry.js ----------
+// src/images/image.png
+var image_default = "https://example.com/image-LSAMBFUD.png";
+
+// src/entries/entry.js
+console.log(image_default);
+
+================================================================================
+TestLoaderFileRelativePathAssetNamesCSS
+---------- /out/images/image-LSAMBFUD.png ----------
+x
+---------- /out/entries/entry.css ----------
+/* src/entries/entry.css */
+div {
+  background: url(../images/image-LSAMBFUD.png);
+}
+
+================================================================================
+TestLoaderFileRelativePathAssetNamesJS
+---------- /out/images/image-LSAMBFUD.png ----------
+x
+---------- /out/entries/entry.js ----------
+// src/images/image.png
+var image_default = "../images/image-LSAMBFUD.png";
+
+// src/entries/entry.js
+console.log(image_default);
+
+================================================================================
+TestLoaderFileRelativePathCSS
+---------- /out/image-LSAMBFUD.png ----------
+x
+---------- /out/entries/entry.css ----------
+/* src/entries/entry.css */
+div {
+  background: url(../image-LSAMBFUD.png);
+}
+
+================================================================================
+TestLoaderFileRelativePathJS
+---------- /out/image-LSAMBFUD.png ----------
+x
+---------- /out/entries/entry.js ----------
+// src/images/image.png
+var image_default = "../image-LSAMBFUD.png";
+
+// src/entries/entry.js
+console.log(image_default);
+
+================================================================================
 TestLoaderJSONCommonJSAndES6
 ---------- /out.js ----------
 // x.json
-var require_x = __commonJS((exports, module) => {
-  module.exports = {x: true};
+var require_x = __commonJS({
+  "x.json"(exports, module) {
+    module.exports = { x: true };
+  }
 });
 
 // y.json
 var y1 = true;
 var y2 = false;
-var y_default = {y1, y2};
+var y_default = { y1, y2 };
 
 // z.json
 var small = "some small text";
@@ -128,7 +296,7 @@ __export(test2_exports, {
   "invalid-identifier": () => invalid_identifier2
 });
 var invalid_identifier2 = true;
-var test2_default = {"invalid-identifier": invalid_identifier2};
+var test2_default = { "invalid-identifier": invalid_identifier2 };
 
 // entry.js
 console.log(invalid_identifier, test2_exports);
@@ -136,20 +304,32 @@ console.log(invalid_identifier, test2_exports);
 ================================================================================
 TestLoaderJSONNoBundle
 ---------- /out.js ----------
-module.exports = {test: 123, "invalid-identifier": true};
+module.exports = { test: 123, "invalid-identifier": true };
 
 ================================================================================
 TestLoaderJSONNoBundleCommonJS
 ---------- /out.js ----------
-module.exports = {test: 123, "invalid-identifier": true};
+module.exports = { test: 123, "invalid-identifier": true };
 
 ================================================================================
 TestLoaderJSONNoBundleES6
 ---------- /out.js ----------
 var test = 123;
-var test_default = {test, "invalid-identifier": true};
+var test_default = { test, "invalid-identifier": true };
 export {
   test_default as default,
+  test
+};
+
+================================================================================
+TestLoaderJSONNoBundleES6ArbitraryModuleNamespaceNames
+---------- /out.js ----------
+var test = 123;
+var invalid_identifier = true;
+var test_default = { test, "invalid-identifier": invalid_identifier };
+export {
+  test_default as default,
+  invalid_identifier as "invalid-identifier",
   test
 };
 
@@ -157,8 +337,10 @@ export {
 TestLoaderJSONNoBundleIIFE
 ---------- /out.js ----------
 (() => {
-  var require_test = __commonJS((exports, module) => {
-    module.exports = {test: 123, "invalid-identifier": true};
+  var require_test = __commonJS({
+    "test.json"(exports, module) {
+      module.exports = { test: 123, "invalid-identifier": true };
+    }
   });
   require_test();
 })();
@@ -168,7 +350,7 @@ TestLoaderJSONSharedWithMultipleEntriesIssue413
 ---------- /out/a.js ----------
 // data.json
 var test = 123;
-var data_default = {test};
+var data_default = { test };
 
 // a.js
 console.log("a:", data_default);
@@ -176,7 +358,7 @@ console.log("a:", data_default);
 ---------- /out/b.js ----------
 // data.json
 var test = 123;
-var data_default = {test};
+var data_default = { test };
 
 // b.js
 console.log("b:", data_default);
@@ -185,8 +367,10 @@ console.log("b:", data_default);
 TestLoaderTextCommonJSAndES6
 ---------- /out.js ----------
 // x.txt
-var require_x = __commonJS((exports, module) => {
-  module.exports = "x";
+var require_x = __commonJS({
+  "x.txt"(exports, module) {
+    module.exports = "x";
+  }
 });
 
 // y.txt
@@ -200,8 +384,10 @@ console.log(x_txt, y_default);
 TestRequireCustomExtensionBase64
 ---------- /out.js ----------
 // test.custom
-var require_test = __commonJS((exports, module) => {
-  module.exports = "YQBigGP/ZA==";
+var require_test = __commonJS({
+  "test.custom"(exports, module) {
+    module.exports = "YQBigGP/ZA==";
+  }
 });
 
 // entry.js
@@ -211,8 +397,10 @@ console.log(require_test());
 TestRequireCustomExtensionDataURL
 ---------- /out.js ----------
 // test.custom
-var require_test = __commonJS((exports, module) => {
-  module.exports = "data:application/octet-stream;base64,YQBigGP/ZA==";
+var require_test = __commonJS({
+  "test.custom"(exports, module) {
+    module.exports = "data:application/octet-stream;base64,YQBigGP/ZA==";
+  }
 });
 
 // entry.js
@@ -222,13 +410,17 @@ console.log(require_test());
 TestRequireCustomExtensionPreferLongest
 ---------- /out.js ----------
 // test.txt
-var require_test = __commonJS((exports, module) => {
-  module.exports = "test.txt";
+var require_test = __commonJS({
+  "test.txt"(exports, module) {
+    module.exports = "test.txt";
+  }
 });
 
 // test.base64.txt
-var require_test_base64 = __commonJS((exports, module) => {
-  module.exports = "dGVzdC5iYXNlNjQudHh0";
+var require_test_base64 = __commonJS({
+  "test.base64.txt"(exports, module) {
+    module.exports = "dGVzdC5iYXNlNjQudHh0";
+  }
 });
 
 // entry.js
@@ -238,8 +430,10 @@ console.log(require_test(), require_test_base64());
 TestRequireCustomExtensionString
 ---------- /out.js ----------
 // test.custom
-var require_test = __commonJS((exports, module) => {
-  module.exports = "#include <stdio.h>";
+var require_test = __commonJS({
+  "test.custom"(exports, module) {
+    module.exports = "#include <stdio.h>";
+  }
 });
 
 // entry.js

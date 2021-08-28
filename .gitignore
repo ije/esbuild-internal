@@ -24,3 +24,4 @@
 /scripts/.test262/
 /scripts/.verify-source-map/
 node_modules/
+.DS_Store

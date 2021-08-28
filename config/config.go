@@ -12,12 +12,16 @@ import (
 	"github.com/ije/esbuild-internal/logger"
 )
 
-type LanguageTarget int8
-
 type JSXOptions struct {
+	Factory  JSXExpr
+	Fragment JSXExpr
 	Parse    bool
-	Factory  []string
-	Fragment []string
+	Preserve bool
+}
+
+type JSXExpr struct {
+	Parts    []string
+	Constant js_ast.E
 }
 
 type TSOptions struct {
@@ -53,6 +57,20 @@ const (
 	SourceMapInlineAndExternal
 )
 
+type LegalComments uint8
+
+const (
+	LegalCommentsInline LegalComments = iota
+	LegalCommentsNone
+	LegalCommentsEndOfFile
+	LegalCommentsLinkedWithComment
+	LegalCommentsExternalWithoutComment
+)
+
+func (lc LegalComments) HasExternalFile() bool {
+	return lc == LegalCommentsLinkedWithComment || lc == LegalCommentsExternalWithoutComment
+}
+
 type Loader int
 
 const (
@@ -76,7 +94,12 @@ func (loader Loader) IsTypeScript() bool {
 }
 
 func (loader Loader) CanHaveSourceMap() bool {
-	return loader == LoaderJS || loader == LoaderJSX || loader == LoaderTS || loader == LoaderTSX
+	switch loader {
+	case LoaderJS, LoaderJSX, LoaderTS, LoaderTSX, LoaderCSS:
+		return true
+	default:
+		return false
+	}
 }
 
 type Format uint8
@@ -168,6 +191,14 @@ const (
 	ModuleESM
 )
 
+type MaybeBool uint8
+
+const (
+	Unspecified MaybeBool = iota
+	True
+	False
+)
+
 type Options struct {
 	Mode              Mode
 	ModuleType        ModuleType
@@ -175,27 +206,18 @@ type Options struct {
 	RemoveWhitespace  bool
 	MinifyIdentifiers bool
 	MangleSyntax      bool
+	ProfilerNames     bool
 	CodeSplitting     bool
 	WatchMode         bool
-
-	// Setting this to true disables warnings about code that is very likely to
-	// be a bug. This is used to ignore issues inside "node_modules" directories.
-	// This has caught real issues in the past. However, it's not esbuild's job
-	// to find bugs in other libraries, and these warnings are problematic for
-	// people using these libraries with esbuild. The only fix is to either
-	// disable all esbuild warnings and not get warnings about your own code, or
-	// to try to get the warning fixed in the affected library. This is
-	// especially annoying if the warning is a false positive as was the case in
-	// https://github.com/firebase/firebase-js-sdk/issues/3814. So these warnings
-	// are now disabled for code inside "node_modules" directories.
-	SuppressWarningsAboutWeirdCode bool
+	AllowOverwrite    bool
+	LegalComments     LegalComments
 
 	// If true, make sure to generate a single file that can be written to stdout
 	WriteToStdout bool
 
 	OmitRuntimeForTests     bool
 	PreserveUnusedImportsTS bool
-	UseDefineForClassFields bool
+	UseDefineForClassFields MaybeBool
 	ASCIIOnly               bool
 	KeepNames               bool
 	IgnoreDCEAnnotations    bool
@@ -205,8 +227,10 @@ type Options struct {
 	JSX      JSXOptions
 	Platform Platform
 
+	IsTargetUnconfigured   bool // If true, TypeScript's "target" setting is respected
 	UnsupportedJSFeatures  compat.JSFeature
 	UnsupportedCSSFeatures compat.CSSFeature
+	TSTarget               *TSTarget
 
 	// This is the original information that was used to generate the
 	// unsupported feature sets above. It's used for error messages.
@@ -250,6 +274,13 @@ type Options struct {
 	ExcludeSourcesContent bool
 
 	Stdin *StdinInfo
+}
+
+type TSTarget struct {
+	Source                logger.Source
+	Range                 logger.Range
+	Target                string
+	UnsupportedJSFeatures compat.JSFeature
 }
 
 type PathPlaceholder uint8
@@ -357,6 +388,10 @@ func IsTreeShakingEnabled(mode Mode, outputFormat Format) bool {
 	return mode == ModeBundle || (mode == ModeConvertFormat && outputFormat == FormatIIFE)
 }
 
+func ShouldCallRuntimeRequire(mode Mode, outputFormat Format) bool {
+	return mode == ModeBundle && outputFormat != FormatCommonJS
+}
+
 type InjectedDefine struct {
 	Source logger.Source
 	Data   js_ast.E
@@ -364,10 +399,14 @@ type InjectedDefine struct {
 }
 
 type InjectedFile struct {
-	Path        string
-	SourceIndex uint32
-	Exports     []string
-	IsDefine    bool
+	Source     logger.Source
+	Exports    []InjectableExport
+	DefineName string
+}
+
+type InjectableExport struct {
+	Alias string
+	Loc   logger.Loc
 }
 
 var filterMutex sync.Mutex
@@ -430,8 +469,19 @@ func PluginAppliesToPath(path logger.Path, filter *regexp.Regexp, namespace stri
 
 type Plugin struct {
 	Name      string
+	OnStart   []OnStart
 	OnResolve []OnResolve
 	OnLoad    []OnLoad
+}
+
+type OnStart struct {
+	Name     string
+	Callback func() OnStartResult
+}
+
+type OnStartResult struct {
+	Msgs        []logger.Msg
+	ThrownError error
 }
 
 type OnResolve struct {
@@ -452,9 +502,10 @@ type OnResolveArgs struct {
 type OnResolveResult struct {
 	PluginName string
 
-	Path       logger.Path
-	External   bool
-	PluginData interface{}
+	Path             logger.Path
+	External         bool
+	IsSideEffectFree bool
+	PluginData       interface{}
 
 	Msgs        []logger.Msg
 	ThrownError error

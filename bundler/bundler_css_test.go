@@ -53,27 +53,42 @@ func TestCSSAtImportExternal(t *testing.T) {
 				@import "./external2.css";
 				@import "./charset1.css";
 				@import "./charset2.css";
+				@import "./external5.css" screen;
 			`,
 			"/internal.css": `
+				@import "./external5.css" print;
 				.before { color: red }
 			`,
 			"/charset1.css": `
 				@charset "UTF-8";
+				@import "./external3.css";
+				@import "./external4.css";
+				@import "./external5.css";
+				@import "https://www.example.com/style1.css";
+				@import "https://www.example.com/style2.css";
+				@import "https://www.example.com/style3.css" print;
 				.middle { color: green }
 			`,
 			"/charset2.css": `
 				@charset "UTF-8";
+				@import "./external3.css";
+				@import "./external5.css" screen;
+				@import "https://www.example.com/style1.css";
+				@import "https://www.example.com/style3.css";
 				.after { color: blue }
 			`,
 		},
 		entryPaths: []string{"/entry.css"},
 		options: config.Options{
-			Mode:          config.ModeBundle,
-			AbsOutputFile: "/out.css",
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
 			ExternalModules: config.ExternalModules{
 				AbsPaths: map[string]bool{
 					"/external1.css": true,
 					"/external2.css": true,
+					"/external3.css": true,
+					"/external4.css": true,
+					"/external5.css": true,
 				},
 			},
 		},
@@ -457,10 +472,13 @@ func TestPackageURLsInCSS(t *testing.T) {
 	css_suite.expectBundled(t, bundled{
 		files: map[string]string{
 			"/entry.css": `
+			  @import "test.css";
+
 				a { background: url(a/1.png); }
 				b { background: url(b/2.png); }
 				c { background: url(c/3.png); }
 			`,
+			"/test.css":             `.css { color: red }`,
 			"/a/1.png":              `a-1`,
 			"/node_modules/b/2.png": `b-2-node_modules`,
 			"/c/3.png":              `c-3`,

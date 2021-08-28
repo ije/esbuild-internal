@@ -1,9 +1,11 @@
 package renamer
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"github.com/ije/esbuild-internal/ast"
 	"github.com/ije/esbuild-internal/js_ast"
@@ -23,21 +25,35 @@ func ComputeReservedNames(moduleScopes []*js_ast.Scope, symbols js_ast.SymbolMap
 
 	// All unbound symbols must be reserved names
 	for _, scope := range moduleScopes {
-		for _, member := range scope.Members {
-			symbol := symbols.Get(member.Ref)
-			if symbol.Kind == js_ast.SymbolUnbound || symbol.MustNotBeRenamed {
-				names[symbol.OriginalName] = 1
-			}
-		}
-		for _, ref := range scope.Generated {
-			symbol := symbols.Get(ref)
-			if symbol.Kind == js_ast.SymbolUnbound || symbol.MustNotBeRenamed {
-				names[symbol.OriginalName] = 1
-			}
-		}
+		computeReservedNamesForScope(scope, symbols, names)
 	}
 
 	return names
+}
+
+func computeReservedNamesForScope(scope *js_ast.Scope, symbols js_ast.SymbolMap, names map[string]uint32) {
+	for _, member := range scope.Members {
+		symbol := symbols.Get(member.Ref)
+		if symbol.Kind == js_ast.SymbolUnbound || symbol.MustNotBeRenamed {
+			names[symbol.OriginalName] = 1
+		}
+	}
+	for _, ref := range scope.Generated {
+		symbol := symbols.Get(ref)
+		if symbol.Kind == js_ast.SymbolUnbound || symbol.MustNotBeRenamed {
+			names[symbol.OriginalName] = 1
+		}
+	}
+
+	// If there's a direct "eval" somewhere inside the current scope, continue
+	// traversing down the scope tree until we find it to get all reserved names
+	if scope.ContainsDirectEval {
+		for _, child := range scope.Children {
+			if child.ContainsDirectEval {
+				computeReservedNamesForScope(child, symbols, names)
+			}
+		}
+	}
 }
 
 type Renamer interface {
@@ -66,16 +82,16 @@ func (r *noOpRenamer) NameForSymbol(ref js_ast.Ref) string {
 // MinifyRenamer
 
 type symbolSlot struct {
-	name  string
-	count uint32
+	name               string
+	count              uint32
+	needsCapitalForJSX uint32 // This is really a bool but needs to be atomic
 }
 
 type MinifyRenamer struct {
-	symbols       js_ast.SymbolMap
-	sortedBuffer  StableRefArray
-	reservedNames map[string]uint32
-	slots         [3][]symbolSlot
-	symbolToSlot  map[js_ast.Ref]ast.Index32
+	symbols              js_ast.SymbolMap
+	reservedNames        map[string]uint32
+	slots                [3][]symbolSlot
+	topLevelSymbolToSlot map[js_ast.Ref]uint32
 }
 
 func NewMinifyRenamer(symbols js_ast.SymbolMap, firstTopLevelSlots js_ast.SlotCounts, reservedNames map[string]uint32) *MinifyRenamer {
@@ -87,7 +103,7 @@ func NewMinifyRenamer(symbols js_ast.SymbolMap, firstTopLevelSlots js_ast.SlotCo
 			make([]symbolSlot, firstTopLevelSlots[1]),
 			make([]symbolSlot, firstTopLevelSlots[2]),
 		},
-		symbolToSlot: make(map[js_ast.Ref]ast.Index32),
+		topLevelSymbolToSlot: make(map[js_ast.Ref]uint32),
 	}
 }
 
@@ -107,8 +123,7 @@ func (r *MinifyRenamer) NameForSymbol(ref js_ast.Ref) string {
 
 	// If it's not (i.e. it's in a top-level scope), look up the slot
 	if !i.IsValid() {
-		var ok bool
-		i, ok = r.symbolToSlot[ref]
+		index, ok := r.topLevelSymbolToSlot[ref]
 		if !ok {
 			// If we get here, then we're printing a symbol that never had any
 			// recorded uses. This is odd but can happen in certain scenarios.
@@ -117,29 +132,67 @@ func (r *MinifyRenamer) NameForSymbol(ref js_ast.Ref) string {
 			// what name we use since it's dead code.
 			return symbol.OriginalName
 		}
+		i = ast.MakeIndex32(index)
 	}
 
 	return r.slots[ns][i.GetIndex()].name
 }
 
-func (r *MinifyRenamer) AccumulateSymbolUseCounts(symbolUses map[js_ast.Ref]js_ast.SymbolUse, stableSourceIndices []uint32) {
-	// Sort symbol uses for determinism, reusing a shared memory buffer
-	r.sortedBuffer = r.sortedBuffer[:0]
-	for ref := range symbolUses {
-		r.sortedBuffer = append(r.sortedBuffer, StableRef{
-			StableOuterIndex: stableSourceIndices[ref.OuterIndex],
-			Ref:              ref,
-		})
-	}
-	sort.Sort(r.sortedBuffer)
+// The sort order here is arbitrary but needs to be consistent between builds.
+// The InnerIndex should be stable because the parser for a single file is
+// single-threaded and deterministically assigns out InnerIndex values
+// sequentially. But the SourceIndex should be unstable because the main thread
+// assigns out source index values sequentially to newly-discovered dependencies
+// in a multi-threaded producer/consumer relationship. So instead we use the
+// index of the source in the DFS order over all entry points for stability.
+type DeferredTopLevelSymbol struct {
+	StableSourceIndex uint32
+	Ref               js_ast.Ref
+	Count             uint32
+}
 
-	// Accumulate symbol use counts
-	for _, stable := range r.sortedBuffer {
-		r.AccumulateSymbolCount(stable.Ref, symbolUses[stable.Ref].CountEstimate)
+// This type is just so we can use Go's native sort function
+type DeferredTopLevelSymbolArray []DeferredTopLevelSymbol
+
+func (a DeferredTopLevelSymbolArray) Len() int          { return len(a) }
+func (a DeferredTopLevelSymbolArray) Swap(i int, j int) { a[i], a[j] = a[j], a[i] }
+func (a DeferredTopLevelSymbolArray) Less(i int, j int) bool {
+	ai, aj := a[i], a[j]
+	if ai.StableSourceIndex < aj.StableSourceIndex {
+		return true
+	}
+	if ai.StableSourceIndex > aj.StableSourceIndex {
+		return false
+	}
+	if ai.Ref.InnerIndex < aj.Ref.InnerIndex {
+		return true
+	}
+	if ai.Ref.InnerIndex > aj.Ref.InnerIndex {
+		return false
+	}
+	return ai.Count < aj.Count
+}
+
+func (r *MinifyRenamer) AccumulateSymbolUseCounts(
+	topLevelSymbols *DeferredTopLevelSymbolArray,
+	symbolUses map[js_ast.Ref]js_ast.SymbolUse,
+	stableSourceIndices []uint32,
+) {
+	// NOTE: This function is run in parallel. Make sure to avoid data races.
+
+	for ref, use := range symbolUses {
+		r.AccumulateSymbolCount(topLevelSymbols, ref, use.CountEstimate, stableSourceIndices)
 	}
 }
 
-func (r *MinifyRenamer) AccumulateSymbolCount(ref js_ast.Ref, count uint32) {
+func (r *MinifyRenamer) AccumulateSymbolCount(
+	topLevelSymbols *DeferredTopLevelSymbolArray,
+	ref js_ast.Ref,
+	count uint32,
+	stableSourceIndices []uint32,
+) {
+	// NOTE: This function is run in parallel. Make sure to avoid data races.
+
 	// Follow links to get to the underlying symbol
 	ref = js_ast.FollowSymbols(r.symbols, ref)
 	symbol := r.symbols.Get(ref)
@@ -155,21 +208,52 @@ func (r *MinifyRenamer) AccumulateSymbolCount(ref js_ast.Ref, count uint32) {
 	}
 
 	// Check if it's a nested scope symbol
-	slots := &r.slots[ns]
-	i := symbol.NestedScopeSlot
-
-	// If it's not (i.e. it's in a top-level scope), allocate a slot for it
-	if !i.IsValid() {
-		var ok bool
-		i, ok = r.symbolToSlot[ref]
-		if !ok {
-			i = ast.MakeIndex32(uint32(len(*slots)))
-			*slots = append(*slots, symbolSlot{})
-			r.symbolToSlot[ref] = i
+	if i := symbol.NestedScopeSlot; i.IsValid() {
+		// If it is, accumulate the count using a parallel-safe atomic increment
+		slot := &r.slots[ns][i.GetIndex()]
+		atomic.AddUint32(&slot.count, count)
+		if symbol.MustStartWithCapitalLetterForJSX {
+			atomic.StoreUint32(&slot.needsCapitalForJSX, 1)
 		}
+		return
 	}
 
-	(*slots)[i.GetIndex()].count += count
+	// If it's a top-level symbol, defer it to later since we have
+	// to allocate slots for these in serial instead of in parallel
+	*topLevelSymbols = append(*topLevelSymbols, DeferredTopLevelSymbol{
+		StableSourceIndex: stableSourceIndices[ref.SourceIndex],
+		Ref:               ref,
+		Count:             count,
+	})
+}
+
+// The parallel part of the symbol count accumulation algorithm above processes
+// nested symbols and generates on an array of top-level symbols to process later.
+// After the parallel part has finished, that array of top-level symbols is passed
+// to this function which processes them in serial.
+func (r *MinifyRenamer) AllocateTopLevelSymbolSlots(topLevelSymbols DeferredTopLevelSymbolArray) {
+	for _, stable := range topLevelSymbols {
+		symbol := r.symbols.Get(stable.Ref)
+		slots := &r.slots[symbol.SlotNamespace()]
+		if i, ok := r.topLevelSymbolToSlot[stable.Ref]; ok {
+			slot := &(*slots)[i]
+			slot.count += stable.Count
+			if symbol.MustStartWithCapitalLetterForJSX {
+				slot.needsCapitalForJSX = 1
+			}
+		} else {
+			needsCapitalForJSX := uint32(0)
+			if symbol.MustStartWithCapitalLetterForJSX {
+				needsCapitalForJSX = 1
+			}
+			i = uint32(len(*slots))
+			*slots = append(*slots, symbolSlot{
+				count:              stable.Count,
+				needsCapitalForJSX: needsCapitalForJSX,
+			})
+			r.topLevelSymbolToSlot[stable.Ref] = i
+		}
+	}
 }
 
 func (r *MinifyRenamer) AssignNamesByFrequency(minifier *js_ast.NameMinifier) {
@@ -184,6 +268,7 @@ func (r *MinifyRenamer) AssignNamesByFrequency(minifier *js_ast.NameMinifier) {
 		// Assign names to symbols
 		nextName := 0
 		for _, data := range sorted {
+			slot := &slots[data.slot]
 			name := minifier.NumberToMinifiedName(nextName)
 			nextName++
 
@@ -199,6 +284,14 @@ func (r *MinifyRenamer) AssignNamesByFrequency(minifier *js_ast.NameMinifier) {
 					nextName++
 				}
 
+				// Make sure names of symbols used in JSX elements start with a capital letter
+				if slot.needsCapitalForJSX != 0 {
+					for name[0] >= 'a' && name[0] <= 'z' {
+						name = minifier.NumberToMinifiedName(nextName)
+						nextName++
+					}
+				}
+
 			case js_ast.SlotLabel:
 				for js_lexer.Keywords[name] != 0 {
 					name = minifier.NumberToMinifiedName(nextName)
@@ -211,7 +304,7 @@ func (r *MinifyRenamer) AssignNamesByFrequency(minifier *js_ast.NameMinifier) {
 				name = "#" + name
 			}
 
-			slots[data.slot].name = name
+			slot.name = name
 		}
 	}
 }
@@ -274,8 +367,8 @@ func assignNestedScopeSlotsHelper(scope *js_ast.Scope, symbols []js_ast.Symbol, 
 	}
 
 	// Labels are always declared in a nested scope, so we don't need to check.
-	if scope.LabelRef != js_ast.InvalidRef {
-		symbol := &symbols[scope.LabelRef.InnerIndex]
+	if scope.Label.Ref != js_ast.InvalidRef {
+		symbol := &symbols[scope.Label.Ref.InnerIndex]
 		symbol.NestedScopeSlot = ast.MakeIndex32(slot[js_ast.SlotLabel])
 		slot[js_ast.SlotLabel]++
 	}
@@ -303,21 +396,6 @@ func (a slotAndCountArray) Less(i int, j int) bool {
 	return ai.count > aj.count || (ai.count == aj.count && ai.slot < aj.slot)
 }
 
-type StableRef struct {
-	StableOuterIndex uint32
-	Ref              js_ast.Ref
-}
-
-// This type is just so we can use Go's native sort function
-type StableRefArray []StableRef
-
-func (a StableRefArray) Len() int          { return len(a) }
-func (a StableRefArray) Swap(i int, j int) { a[i], a[j] = a[j], a[i] }
-func (a StableRefArray) Less(i int, j int) bool {
-	ai, aj := a[i], a[j]
-	return ai.StableOuterIndex > aj.StableOuterIndex || (ai.StableOuterIndex == aj.StableOuterIndex && ai.Ref.InnerIndex < aj.Ref.InnerIndex)
-}
-
 ////////////////////////////////////////////////////////////////////////////////
 // NumberRenamer
 
@@ -330,14 +408,14 @@ type NumberRenamer struct {
 func NewNumberRenamer(symbols js_ast.SymbolMap, reservedNames map[string]uint32) *NumberRenamer {
 	return &NumberRenamer{
 		symbols: symbols,
-		names:   make([][]string, len(symbols.Outer)),
+		names:   make([][]string, len(symbols.SymbolsForSource)),
 		root:    numberScope{nameCounts: reservedNames},
 	}
 }
 
 func (r *NumberRenamer) NameForSymbol(ref js_ast.Ref) string {
 	ref = js_ast.FollowSymbols(r.symbols, ref)
-	if inner := r.names[ref.OuterIndex]; inner != nil {
+	if inner := r.names[ref.SourceIndex]; inner != nil {
 		if name := inner[ref.InnerIndex]; name != "" {
 			return name
 		}
@@ -353,7 +431,7 @@ func (r *NumberRenamer) assignName(scope *numberScope, ref js_ast.Ref) {
 	ref = js_ast.FollowSymbols(r.symbols, ref)
 
 	// Don't rename the same symbol more than once
-	inner := r.names[ref.OuterIndex]
+	inner := r.names[ref.SourceIndex]
 	if inner != nil && inner[ref.InnerIndex] != "" {
 		return
 	}
@@ -364,8 +442,16 @@ func (r *NumberRenamer) assignName(scope *numberScope, ref js_ast.Ref) {
 		return
 	}
 
+	// Make sure names of symbols used in JSX elements start with a capital letter
+	originalName := symbol.OriginalName
+	if symbol.MustStartWithCapitalLetterForJSX {
+		if first := rune(originalName[0]); first >= 'a' && first <= 'z' {
+			originalName = fmt.Sprintf("%c%s", first+('A'-'a'), originalName[1:])
+		}
+	}
+
 	// Compute a new name
-	name := scope.findUnusedName(symbol.OriginalName)
+	name := scope.findUnusedName(originalName)
 
 	// Store the new name
 	if inner == nil {
@@ -378,8 +464,8 @@ func (r *NumberRenamer) assignName(scope *numberScope, ref js_ast.Ref) {
 		// "names" array ahead of time, that will waste a lot more memory for
 		// builds that make heavy use of code splitting and have many chunks. Doing
 		// things lazily like this means we use less memory but still stay safe.
-		inner = make([]string, len(r.symbols.Outer[ref.OuterIndex]))
-		r.names[ref.OuterIndex] = inner
+		inner = make([]string, len(r.symbols.SymbolsForSource[ref.SourceIndex]))
+		r.names[ref.SourceIndex] = inner
 	}
 	inner[ref.InnerIndex] = name
 }
@@ -396,7 +482,7 @@ func (r *NumberRenamer) assignNamesRecursive(scope *js_ast.Scope, sourceIndex ui
 
 	// Rename all symbols in this scope
 	for _, innerIndex := range *sorted {
-		r.assignName(s, js_ast.Ref{OuterIndex: sourceIndex, InnerIndex: uint32(innerIndex)})
+		r.assignName(s, js_ast.Ref{SourceIndex: sourceIndex, InnerIndex: uint32(innerIndex)})
 	}
 	for _, ref := range scope.Generated {
 		r.assignName(s, ref)

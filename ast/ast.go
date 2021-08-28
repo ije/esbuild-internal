@@ -60,8 +60,9 @@ func (kind ImportKind) IsFromCSS() bool {
 }
 
 type ImportRecord struct {
-	Range logger.Range
-	Path  logger.Path
+	Range      logger.Range
+	Path       logger.Path
+	Assertions *[]AssertEntry
 
 	// The resolved source index for an internal import (within the bundle) or
 	// nil for an external import (not included in the bundle)
@@ -82,20 +83,39 @@ type ImportRecord struct {
 	ContainsDefaultAlias bool
 
 	// If true, this "export * from 'path'" statement is evaluated at run-time by
-	// calling the "__exportStar()" helper function
-	CallsRunTimeExportStarFn bool
+	// calling the "__reExport()" helper function
+	CallsRunTimeReExportFn bool
 
 	// Tell the printer to wrap this call to "require()" in "__toModule(...)"
 	WrapWithToModule bool
 
-	// True for require calls like this: "try { require() } catch {}". In this
-	// case we shouldn't generate an error if the path could not be resolved.
-	IsInsideTryBody bool
+	// Tell the printer to use the runtime "__require()" instead of "require()"
+	CallRuntimeRequire bool
+
+	// True for the following cases:
+	//
+	//   try { require('x') } catch { handle }
+	//   try { await import('x') } catch { handle }
+	//   try { require.resolve('x') } catch { handle }
+	//   import('x').catch(handle)
+	//   import('x').then(_, handle)
+	//
+	// In these cases we shouldn't generate an error if the path could not be
+	// resolved.
+	HandlesImportErrors bool
 
 	// If true, this was originally written as a bare "import 'file'" statement
 	WasOriginallyBareImport bool
 
 	Kind ImportKind
+}
+
+type AssertEntry struct {
+	Key             []uint16 // An identifier or a string
+	Value           []uint16 // Always a string
+	KeyLoc          logger.Loc
+	ValueLoc        logger.Loc
+	PreferQuotedKey bool
 }
 
 // This stores a 32-bit index where the zero value is an invalid index. This is

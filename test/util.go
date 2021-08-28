@@ -1,15 +1,27 @@
 package test
 
 import (
+	"fmt"
 	"testing"
 
+	"github.com/ije/esbuild-internal/fs"
 	"github.com/ije/esbuild-internal/logger"
 )
 
-func AssertEqual(t *testing.T, a interface{}, b interface{}) {
+func AssertEqual(t *testing.T, observed interface{}, expected interface{}) {
 	t.Helper()
-	if a != b {
-		t.Fatalf("%s != %s", a, b)
+	if observed != expected {
+		t.Fatalf("%s != %s", observed, expected)
+	}
+}
+
+func AssertEqualWithDiff(t *testing.T, observed interface{}, expected interface{}) {
+	t.Helper()
+	if observed != expected {
+		stringA := fmt.Sprintf("%v", observed)
+		stringB := fmt.Sprintf("%v", expected)
+		color := !fs.CheckIfWindows()
+		t.Fatal(diff(stringB, stringA, color))
 	}
 }
 
