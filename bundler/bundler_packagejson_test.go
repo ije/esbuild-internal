@@ -86,7 +86,7 @@ func TestPackageJsonSyntaxErrorComment(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/Users/user/project/out.js",
 		},
-		expectedScanLog: `Users/user/project/node_modules/demo-pkg/package.json: error: JSON does not support comments
+		expectedScanLog: `Users/user/project/node_modules/demo-pkg/package.json: ERROR: JSON does not support comments
 `,
 	})
 }
@@ -115,7 +115,7 @@ func TestPackageJsonSyntaxErrorTrailingComma(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/Users/user/project/out.js",
 		},
-		expectedScanLog: `Users/user/project/node_modules/demo-pkg/package.json: error: JSON does not support trailing commas
+		expectedScanLog: `Users/user/project/node_modules/demo-pkg/package.json: ERROR: JSON does not support trailing commas
 `,
 	})
 }
@@ -805,6 +805,49 @@ func TestPackageJsonBrowserIndexNoExt(t *testing.T) {
 	})
 }
 
+// See https://github.com/evanw/esbuild/issues/2002
+func TestPackageJsonBrowserIssue2002A(t *testing.T) {
+	packagejson_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/entry.js": `require('pkg/sub')`,
+			"/Users/user/project/src/node_modules/pkg/package.json": `{
+				"browser": {
+					"./sub": "./sub/foo.js"
+				}
+			}`,
+			"/Users/user/project/src/node_modules/pkg/sub/foo.js":   `require('sub')`,
+			"/Users/user/project/src/node_modules/sub/package.json": `{ "main": "./bar" }`,
+			"/Users/user/project/src/node_modules/sub/bar.js":       `works()`,
+		},
+		entryPaths: []string{"/Users/user/project/src/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+		},
+	})
+}
+
+func TestPackageJsonBrowserIssue2002B(t *testing.T) {
+	packagejson_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/entry.js": `require('pkg/sub')`,
+			"/Users/user/project/src/node_modules/pkg/package.json": `{
+				"browser": {
+					"./sub": "./sub/foo.js",
+					"./sub/sub": "./sub/bar.js"
+				}
+			}`,
+			"/Users/user/project/src/node_modules/pkg/sub/foo.js": `require('sub')`,
+			"/Users/user/project/src/node_modules/pkg/sub/bar.js": `works()`,
+		},
+		entryPaths: []string{"/Users/user/project/src/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+		},
+	})
+}
+
 func TestPackageJsonDualPackageHazardImportOnly(t *testing.T) {
 	packagejson_suite.expectBundled(t, bundled{
 		files: map[string]string{
@@ -1161,7 +1204,9 @@ func TestPackageJsonNeutralNoDefaultMainFields(t *testing.T) {
 			Platform:      config.PlatformNeutral,
 			AbsOutputFile: "/Users/user/project/out.js",
 		},
-		expectedScanLog: `Users/user/project/src/entry.js: error: Could not resolve "demo-pkg" (mark it as external to exclude it from the bundle)
+		expectedScanLog: `Users/user/project/src/entry.js: ERROR: Could not resolve "demo-pkg"
+Users/user/project/node_modules/demo-pkg/package.json: NOTE: The "main" field here was ignored. Main fields must be configured explicitly when using the "neutral" platform.
+NOTE: You can mark the path "demo-pkg" as external to exclude it from the bundle, which will remove this error.
 `,
 	})
 }
@@ -1233,16 +1278,21 @@ func TestPackageJsonExportsErrorInvalidModuleSpecifier(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/Users/user/project/out.js",
 		},
-		expectedScanLog: `Users/user/project/src/entry.js: error: Could not resolve "pkg1" (mark it as external to exclude it from the bundle)
-Users/user/project/node_modules/pkg1/package.json: note: The module specifier "./%%" is invalid
-Users/user/project/src/entry.js: error: Could not resolve "pkg2" (mark it as external to exclude it from the bundle)
-Users/user/project/node_modules/pkg2/package.json: note: The module specifier "./%2f" is invalid
-Users/user/project/src/entry.js: error: Could not resolve "pkg3" (mark it as external to exclude it from the bundle)
-Users/user/project/node_modules/pkg3/package.json: note: The module specifier "./%2F" is invalid
-Users/user/project/src/entry.js: error: Could not resolve "pkg4" (mark it as external to exclude it from the bundle)
-Users/user/project/node_modules/pkg4/package.json: note: The module specifier "./%5c" is invalid
-Users/user/project/src/entry.js: error: Could not resolve "pkg5" (mark it as external to exclude it from the bundle)
-Users/user/project/node_modules/pkg5/package.json: note: The module specifier "./%5C" is invalid
+		expectedScanLog: `Users/user/project/src/entry.js: ERROR: Could not resolve "pkg1"
+Users/user/project/node_modules/pkg1/package.json: NOTE: The module specifier "./%%" is invalid:
+NOTE: You can mark the path "pkg1" as external to exclude it from the bundle, which will remove this error.
+Users/user/project/src/entry.js: ERROR: Could not resolve "pkg2"
+Users/user/project/node_modules/pkg2/package.json: NOTE: The module specifier "./%2f" is invalid:
+NOTE: You can mark the path "pkg2" as external to exclude it from the bundle, which will remove this error.
+Users/user/project/src/entry.js: ERROR: Could not resolve "pkg3"
+Users/user/project/node_modules/pkg3/package.json: NOTE: The module specifier "./%2F" is invalid:
+NOTE: You can mark the path "pkg3" as external to exclude it from the bundle, which will remove this error.
+Users/user/project/src/entry.js: ERROR: Could not resolve "pkg4"
+Users/user/project/node_modules/pkg4/package.json: NOTE: The module specifier "./%5c" is invalid:
+NOTE: You can mark the path "pkg4" as external to exclude it from the bundle, which will remove this error.
+Users/user/project/src/entry.js: ERROR: Could not resolve "pkg5"
+Users/user/project/node_modules/pkg5/package.json: NOTE: The module specifier "./%5C" is invalid:
+NOTE: You can mark the path "pkg5" as external to exclude it from the bundle, which will remove this error.
 `,
 	})
 }
@@ -1266,12 +1316,14 @@ func TestPackageJsonExportsErrorInvalidPackageConfiguration(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/Users/user/project/out.js",
 		},
-		expectedScanLog: `Users/user/project/node_modules/pkg1/package.json: warning: This value must be a string, an object, an array, or null
-Users/user/project/node_modules/pkg2/package.json: warning: This value must be a string, an object, an array, or null
-Users/user/project/src/entry.js: error: Could not resolve "pkg1" (mark it as external to exclude it from the bundle)
-Users/user/project/node_modules/pkg1/package.json: note: The package configuration has an invalid value here
-Users/user/project/src/entry.js: error: Could not resolve "pkg2/foo" (mark it as external to exclude it from the bundle)
-Users/user/project/node_modules/pkg2/package.json: note: The package configuration has an invalid value here
+		expectedScanLog: `Users/user/project/node_modules/pkg1/package.json: WARNING: This value must be a string, an object, an array, or null
+Users/user/project/node_modules/pkg2/package.json: WARNING: This value must be a string, an object, an array, or null
+Users/user/project/src/entry.js: ERROR: Could not resolve "pkg1"
+Users/user/project/node_modules/pkg1/package.json: NOTE: The package configuration has an invalid value here:
+NOTE: You can mark the path "pkg1" as external to exclude it from the bundle, which will remove this error.
+Users/user/project/src/entry.js: ERROR: Could not resolve "pkg2/foo"
+Users/user/project/node_modules/pkg2/package.json: NOTE: The package configuration has an invalid value here:
+NOTE: You can mark the path "pkg2/foo" as external to exclude it from the bundle, which will remove this error.
 `,
 	})
 }
@@ -1299,12 +1351,15 @@ func TestPackageJsonExportsErrorInvalidPackageTarget(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/Users/user/project/out.js",
 		},
-		expectedScanLog: `Users/user/project/src/entry.js: error: Could not resolve "pkg1" (mark it as external to exclude it from the bundle)
-Users/user/project/node_modules/pkg1/package.json: note: The package target "invalid" is invalid
-Users/user/project/src/entry.js: error: Could not resolve "pkg2" (mark it as external to exclude it from the bundle)
-Users/user/project/node_modules/pkg2/package.json: note: The package target "../pkg3" is invalid
-Users/user/project/src/entry.js: error: Could not resolve "pkg3" (mark it as external to exclude it from the bundle)
-Users/user/project/node_modules/pkg3/package.json: note: The package target "./node_modules/pkg" is invalid
+		expectedScanLog: `Users/user/project/src/entry.js: ERROR: Could not resolve "pkg1"
+Users/user/project/node_modules/pkg1/package.json: NOTE: The package target "invalid" is invalid:
+NOTE: You can mark the path "pkg1" as external to exclude it from the bundle, which will remove this error.
+Users/user/project/src/entry.js: ERROR: Could not resolve "pkg2"
+Users/user/project/node_modules/pkg2/package.json: NOTE: The package target "../pkg3" is invalid:
+NOTE: You can mark the path "pkg2" as external to exclude it from the bundle, which will remove this error.
+Users/user/project/src/entry.js: ERROR: Could not resolve "pkg3"
+Users/user/project/node_modules/pkg3/package.json: NOTE: The package target "./node_modules/pkg" is invalid:
+NOTE: You can mark the path "pkg3" as external to exclude it from the bundle, which will remove this error.
 `,
 	})
 }
@@ -1324,8 +1379,9 @@ func TestPackageJsonExportsErrorPackagePathNotExported(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/Users/user/project/out.js",
 		},
-		expectedScanLog: `Users/user/project/src/entry.js: error: Could not resolve "pkg1/foo" (mark it as external to exclude it from the bundle)
-Users/user/project/node_modules/pkg1/package.json: note: The path "./foo" is not exported by package "pkg1"
+		expectedScanLog: `Users/user/project/src/entry.js: ERROR: Could not resolve "pkg1/foo"
+Users/user/project/node_modules/pkg1/package.json: NOTE: The path "./foo" is not exported by package "pkg1":
+NOTE: You can mark the path "pkg1/foo" as external to exclude it from the bundle, which will remove this error.
 `,
 	})
 }
@@ -1345,8 +1401,9 @@ func TestPackageJsonExportsErrorModuleNotFound(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/Users/user/project/out.js",
 		},
-		expectedScanLog: `Users/user/project/src/entry.js: error: Could not resolve "pkg1" (mark it as external to exclude it from the bundle)
-Users/user/project/node_modules/pkg1/package.json: note: The module "./foo.js" was not found on the file system
+		expectedScanLog: `Users/user/project/src/entry.js: ERROR: Could not resolve "pkg1"
+Users/user/project/node_modules/pkg1/package.json: NOTE: The module "./foo.js" was not found on the file system:
+NOTE: You can mark the path "pkg1" as external to exclude it from the bundle, which will remove this error.
 `,
 	})
 }
@@ -1373,10 +1430,12 @@ func TestPackageJsonExportsErrorUnsupportedDirectoryImport(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/Users/user/project/out.js",
 		},
-		expectedScanLog: `Users/user/project/src/entry.js: error: Could not resolve "pkg1" (mark it as external to exclude it from the bundle)
-Users/user/project/node_modules/pkg1/package.json: note: The module "./foo" was not found on the file system
-Users/user/project/src/entry.js: error: Could not resolve "pkg2" (mark it as external to exclude it from the bundle)
-Users/user/project/node_modules/pkg2/package.json: note: Importing the directory "./foo" is not supported
+		expectedScanLog: `Users/user/project/src/entry.js: ERROR: Could not resolve "pkg1"
+Users/user/project/node_modules/pkg1/package.json: NOTE: The module "./foo" was not found on the file system:
+NOTE: You can mark the path "pkg1" as external to exclude it from the bundle, which will remove this error.
+Users/user/project/src/entry.js: ERROR: Could not resolve "pkg2"
+Users/user/project/node_modules/pkg2/package.json: NOTE: Importing the directory "./foo" is not supported:
+NOTE: You can mark the path "pkg2" as external to exclude it from the bundle, which will remove this error.
 `,
 	})
 }
@@ -1470,6 +1529,118 @@ func TestPackageJsonExportsDefaultOverImportAndRequire(t *testing.T) {
 		options: config.Options{
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/Users/user/project/out.js",
+		},
+	})
+}
+
+func TestPackageJsonExportsEntryPointImportOverRequire(t *testing.T) {
+	packagejson_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/node_modules/pkg/package.json": `
+				{
+					"exports": {
+						"import": "./import.js",
+						"require": "./require.js"
+					},
+					"module": "./module.js",
+					"main": "./main.js"
+				}
+			`,
+			"/node_modules/pkg/import.js": `
+				console.log('SUCCESS')
+			`,
+			"/node_modules/pkg/require.js": `
+				console.log('FAILURE')
+			`,
+			"/node_modules/pkg/module.js": `
+				console.log('FAILURE')
+			`,
+			"/node_modules/pkg/main.js": `
+				console.log('FAILURE')
+			`,
+		},
+		entryPaths: []string{"pkg"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+		},
+	})
+}
+
+func TestPackageJsonExportsEntryPointRequireOnly(t *testing.T) {
+	packagejson_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/node_modules/pkg/package.json": `
+				{
+					"exports": {
+						"require": "./require.js"
+					},
+					"module": "./module.js",
+					"main": "./main.js"
+				}
+			`,
+			"/node_modules/pkg/require.js": `
+				console.log('FAILURE')
+			`,
+			"/node_modules/pkg/module.js": `
+				console.log('FAILURE')
+			`,
+			"/node_modules/pkg/main.js": `
+				console.log('FAILURE')
+			`,
+		},
+		entryPaths: []string{"pkg"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+		},
+		expectedScanLog: `ERROR: Could not resolve "pkg"
+node_modules/pkg/package.json: NOTE: The path "." is not currently exported by package "pkg":
+node_modules/pkg/package.json: NOTE: None of the conditions provided ("require") match any of the currently active conditions ("browser", "default", "import"):
+`,
+	})
+}
+
+func TestPackageJsonExportsEntryPointModuleOverMain(t *testing.T) {
+	packagejson_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/node_modules/pkg/package.json": `
+				{
+					"module": "./module.js",
+					"main": "./main.js"
+				}
+			`,
+			"/node_modules/pkg/module.js": `
+				console.log('SUCCESS')
+			`,
+			"/node_modules/pkg/main.js": `
+				console.log('FAILURE')
+			`,
+		},
+		entryPaths: []string{"pkg"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+		},
+	})
+}
+
+func TestPackageJsonExportsEntryPointMainOnly(t *testing.T) {
+	packagejson_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/node_modules/pkg/package.json": `
+				{
+					"main": "./main.js"
+				}
+			`,
+			"/node_modules/pkg/main.js": `
+				console.log('SUCCESS')
+			`,
+		},
+		entryPaths: []string{"pkg"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
 		},
 	})
 }
@@ -1637,8 +1808,9 @@ func TestPackageJsonExportsWildcard(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/Users/user/project/out.js",
 		},
-		expectedScanLog: `Users/user/project/src/entry.js: error: Could not resolve "pkg1/foo" (mark it as external to exclude it from the bundle)
-Users/user/project/node_modules/pkg1/package.json: note: The path "./foo" is not exported by package "pkg1"
+		expectedScanLog: `Users/user/project/src/entry.js: ERROR: Could not resolve "pkg1/foo"
+Users/user/project/node_modules/pkg1/package.json: NOTE: The path "./foo" is not exported by package "pkg1":
+NOTE: You can mark the path "pkg1/foo" as external to exclude it from the bundle, which will remove this error.
 `,
 	})
 }
@@ -1658,8 +1830,9 @@ func TestPackageJsonExportsErrorMissingTrailingSlash(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/Users/user/project/out.js",
 		},
-		expectedScanLog: `Users/user/project/src/entry.js: error: Could not resolve "pkg1/foo/bar" (mark it as external to exclude it from the bundle)
-Users/user/project/node_modules/pkg1/package.json: note: The module specifier "./test" is invalid
+		expectedScanLog: `Users/user/project/src/entry.js: ERROR: Could not resolve "pkg1/foo/bar"
+Users/user/project/node_modules/pkg1/package.json: NOTE: The module specifier "./test" is invalid:
+NOTE: You can mark the path "pkg1/foo/bar" as external to exclude it from the bundle, which will remove this error.
 `,
 	})
 }
@@ -1739,8 +1912,9 @@ func TestPackageJsonExportsNotExactMissingExtensionPattern(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/Users/user/project/out.js",
 		},
-		expectedScanLog: `Users/user/project/src/entry.js: error: Could not resolve "pkg1/foo/bar" (mark it as external to exclude it from the bundle)
-Users/user/project/node_modules/pkg1/package.json: note: The module "./dir/bar" was not found on the file system
+		expectedScanLog: `Users/user/project/src/entry.js: ERROR: Could not resolve "pkg1/foo/bar"
+Users/user/project/node_modules/pkg1/package.json: NOTE: The module "./dir/bar" was not found on the file system:
+NOTE: You can mark the path "pkg1/foo/bar" as external to exclude it from the bundle, which will remove this error.
 `,
 	})
 }
@@ -1767,8 +1941,9 @@ func TestPackageJsonExportsExactMissingExtension(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/Users/user/project/out.js",
 		},
-		expectedScanLog: `Users/user/project/src/entry.js: error: Could not resolve "pkg1/foo/bar" (mark it as external to exclude it from the bundle)
-Users/user/project/node_modules/pkg1/package.json: note: The module "./dir/bar" was not found on the file system
+		expectedScanLog: `Users/user/project/src/entry.js: ERROR: Could not resolve "pkg1/foo/bar"
+Users/user/project/node_modules/pkg1/package.json: NOTE: The module "./dir/bar" was not found on the file system:
+NOTE: You can mark the path "pkg1/foo/bar" as external to exclude it from the bundle, which will remove this error.
 `,
 	})
 }
@@ -1801,12 +1976,16 @@ func TestPackageJsonExportsNoConditionsMatch(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/Users/user/project/out.js",
 		},
-		expectedScanLog: `Users/user/project/src/entry.js: error: Could not resolve "pkg1" (mark it as external to exclude it from the bundle)
-Users/user/project/node_modules/pkg1/package.json: note: The path "." is not currently exported by package "pkg1"
-Users/user/project/node_modules/pkg1/package.json: note: None of the conditions provided ("what") match any of the currently active conditions ("browser", "default", "import")
-Users/user/project/src/entry.js: error: Could not resolve "pkg1/foo.js" (mark it as external to exclude it from the bundle)
-Users/user/project/node_modules/pkg1/package.json: note: The path "./foo.js" is not currently exported by package "pkg1"
-Users/user/project/node_modules/pkg1/package.json: note: None of the conditions provided ("what") match any of the currently active conditions ("browser", "default", "import")
+		expectedScanLog: `Users/user/project/src/entry.js: ERROR: Could not resolve "pkg1"
+Users/user/project/node_modules/pkg1/package.json: NOTE: The path "." is not currently exported by package "pkg1":
+Users/user/project/node_modules/pkg1/package.json: NOTE: None of the conditions provided ("what") match any of the currently active conditions ("browser", "default", "import"):
+Users/user/project/node_modules/pkg1/package.json: NOTE: Consider enabling the "what" condition if this package expects it to be enabled. You can use 'Conditions: []string{"what"}' to do that:
+NOTE: You can mark the path "pkg1" as external to exclude it from the bundle, which will remove this error.
+Users/user/project/src/entry.js: ERROR: Could not resolve "pkg1/foo.js"
+Users/user/project/node_modules/pkg1/package.json: NOTE: The path "./foo.js" is not currently exported by package "pkg1":
+Users/user/project/node_modules/pkg1/package.json: NOTE: None of the conditions provided ("what") match any of the currently active conditions ("browser", "default", "import"):
+Users/user/project/node_modules/pkg1/package.json: NOTE: Consider enabling the "what" condition if this package expects it to be enabled. You can use 'Conditions: []string{"what"}' to do that:
+NOTE: You can mark the path "pkg1/foo.js" as external to exclude it from the bundle, which will remove this error.
 `,
 	})
 }
@@ -1839,14 +2018,16 @@ func TestPackageJsonExportsMustUseRequire(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/Users/user/project/out.js",
 		},
-		expectedScanLog: `Users/user/project/src/entry.js: error: Could not resolve "pkg1" (mark it as external to exclude it from the bundle)
-Users/user/project/node_modules/pkg1/package.json: note: The path "." is not currently exported by package "pkg1"
-Users/user/project/node_modules/pkg1/package.json: note: None of the conditions provided ("require") match any of the currently active conditions ("browser", "default", "import")
-Users/user/project/src/entry.js: note: Consider using a "require()" call to import this file
-Users/user/project/src/entry.js: error: Could not resolve "pkg1/foo.js" (mark it as external to exclude it from the bundle)
-Users/user/project/node_modules/pkg1/package.json: note: The path "./foo.js" is not currently exported by package "pkg1"
-Users/user/project/node_modules/pkg1/package.json: note: None of the conditions provided ("require") match any of the currently active conditions ("browser", "default", "import")
-Users/user/project/src/entry.js: note: Consider using a "require()" call to import this file
+		expectedScanLog: `Users/user/project/src/entry.js: ERROR: Could not resolve "pkg1"
+Users/user/project/node_modules/pkg1/package.json: NOTE: The path "." is not currently exported by package "pkg1":
+Users/user/project/node_modules/pkg1/package.json: NOTE: None of the conditions provided ("require") match any of the currently active conditions ("browser", "default", "import"):
+Users/user/project/src/entry.js: NOTE: Consider using a "require()" call to import this file, which will work because the "require" condition is supported by this package:
+NOTE: You can mark the path "pkg1" as external to exclude it from the bundle, which will remove this error.
+Users/user/project/src/entry.js: ERROR: Could not resolve "pkg1/foo.js"
+Users/user/project/node_modules/pkg1/package.json: NOTE: The path "./foo.js" is not currently exported by package "pkg1":
+Users/user/project/node_modules/pkg1/package.json: NOTE: None of the conditions provided ("require") match any of the currently active conditions ("browser", "default", "import"):
+Users/user/project/src/entry.js: NOTE: Consider using a "require()" call to import this file, which will work because the "require" condition is supported by this package:
+NOTE: You can mark the path "pkg1/foo.js" as external to exclude it from the bundle, which will remove this error.
 `,
 	})
 }
@@ -1879,14 +2060,16 @@ func TestPackageJsonExportsMustUseImport(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/Users/user/project/out.js",
 		},
-		expectedScanLog: `Users/user/project/src/entry.js: error: Could not resolve "pkg1" (mark it as external to exclude it from the bundle, or surround it with try/catch to handle the failure at run-time)
-Users/user/project/node_modules/pkg1/package.json: note: The path "." is not currently exported by package "pkg1"
-Users/user/project/node_modules/pkg1/package.json: note: None of the conditions provided ("import") match any of the currently active conditions ("browser", "default", "require")
-Users/user/project/src/entry.js: note: Consider using an "import" statement to import this file
-Users/user/project/src/entry.js: error: Could not resolve "pkg1/foo.js" (mark it as external to exclude it from the bundle, or surround it with try/catch to handle the failure at run-time)
-Users/user/project/node_modules/pkg1/package.json: note: The path "./foo.js" is not currently exported by package "pkg1"
-Users/user/project/node_modules/pkg1/package.json: note: None of the conditions provided ("import") match any of the currently active conditions ("browser", "default", "require")
-Users/user/project/src/entry.js: note: Consider using an "import" statement to import this file
+		expectedScanLog: `Users/user/project/src/entry.js: ERROR: Could not resolve "pkg1"
+Users/user/project/node_modules/pkg1/package.json: NOTE: The path "." is not currently exported by package "pkg1":
+Users/user/project/node_modules/pkg1/package.json: NOTE: None of the conditions provided ("import") match any of the currently active conditions ("browser", "default", "require"):
+Users/user/project/src/entry.js: NOTE: Consider using an "import" statement to import this file, which will work because the "import" condition is supported by this package:
+NOTE: You can mark the path "pkg1" as external to exclude it from the bundle, which will remove this error. You can also surround this "require" call with a try/catch block to handle this failure at run-time instead of bundle-time.
+Users/user/project/src/entry.js: ERROR: Could not resolve "pkg1/foo.js"
+Users/user/project/node_modules/pkg1/package.json: NOTE: The path "./foo.js" is not currently exported by package "pkg1":
+Users/user/project/node_modules/pkg1/package.json: NOTE: None of the conditions provided ("import") match any of the currently active conditions ("browser", "default", "require"):
+Users/user/project/src/entry.js: NOTE: Consider using an "import" statement to import this file, which will work because the "import" condition is supported by this package:
+NOTE: You can mark the path "pkg1/foo.js" as external to exclude it from the bundle, which will remove this error. You can also surround this "require" call with a try/catch block to handle this failure at run-time instead of bundle-time.
 `,
 	})
 }
@@ -1918,14 +2101,275 @@ func TestPackageJsonExportsReverseLookup(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/Users/user/project/out.js",
 		},
-		expectedScanLog: `Users/user/project/src/entry.js: error: Could not resolve "pkg/path/to/real/file" (mark it as external to exclude it from the bundle, or surround it with try/catch to handle the failure at run-time)
-Users/user/project/node_modules/pkg/package.json: note: The path "./path/to/real/file" is not exported by package "pkg"
-Users/user/project/node_modules/pkg/package.json: note: The file "./path/to/real/file.js" is exported at path "./lib/teal/file"
-Users/user/project/src/entry.js: note: Import from "pkg/lib/teal/file" to get the file "Users/user/project/node_modules/pkg/path/to/real/file.js"
-Users/user/project/src/entry.js: error: Could not resolve "pkg/path/to/other/file" (mark it as external to exclude it from the bundle, or surround it with try/catch to handle the failure at run-time)
-Users/user/project/node_modules/pkg/package.json: note: The path "./path/to/other/file" is not exported by package "pkg"
-Users/user/project/node_modules/pkg/package.json: note: The file "./path/to/other/file.js" is exported at path "./extra/other/file.js"
-Users/user/project/src/entry.js: note: Import from "pkg/extra/other/file.js" to get the file "Users/user/project/node_modules/pkg/path/to/other/file.js"
+		expectedScanLog: `Users/user/project/src/entry.js: ERROR: Could not resolve "pkg/path/to/real/file"
+Users/user/project/node_modules/pkg/package.json: NOTE: The path "./path/to/real/file" is not exported by package "pkg":
+Users/user/project/node_modules/pkg/package.json: NOTE: The file "./path/to/real/file.js" is exported at path "./lib/teal/file":
+Users/user/project/src/entry.js: NOTE: Import from "pkg/lib/teal/file" to get the file "Users/user/project/node_modules/pkg/path/to/real/file.js":
+NOTE: You can mark the path "pkg/path/to/real/file" as external to exclude it from the bundle, which will remove this error. You can also surround this "require" call with a try/catch block to handle this failure at run-time instead of bundle-time.
+Users/user/project/src/entry.js: ERROR: Could not resolve "pkg/path/to/other/file"
+Users/user/project/node_modules/pkg/package.json: NOTE: The path "./path/to/other/file" is not exported by package "pkg":
+Users/user/project/node_modules/pkg/package.json: NOTE: The file "./path/to/other/file.js" is exported at path "./extra/other/file.js":
+Users/user/project/src/entry.js: NOTE: Import from "pkg/extra/other/file.js" to get the file "Users/user/project/node_modules/pkg/path/to/other/file.js":
+NOTE: You can mark the path "pkg/path/to/other/file" as external to exclude it from the bundle, which will remove this error. You can also surround this "require" call with a try/catch block to handle this failure at run-time instead of bundle-time.
+`,
+	})
+}
+
+func TestPackageJsonImports(t *testing.T) {
+	packagejson_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/foo/entry.js": `
+				import '#top-level'
+				import '#nested/path.js'
+				import '#star/c.js'
+				import '#slash/d.js'
+			`,
+			"/Users/user/project/src/package.json": `
+				{
+					"imports": {
+						"#top-level": "./a.js",
+						"#nested/path.js": "./b.js",
+						"#star/*": "./some-star/*",
+						"#slash/": "./some-slash/"
+					}
+				}
+			`,
+			"/Users/user/project/src/a.js":            `console.log('a.js')`,
+			"/Users/user/project/src/b.js":            `console.log('b.js')`,
+			"/Users/user/project/src/some-star/c.js":  `console.log('c.js')`,
+			"/Users/user/project/src/some-slash/d.js": `console.log('d.js')`,
+		},
+		entryPaths: []string{"/Users/user/project/src/foo/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+		},
+	})
+}
+
+func TestPackageJsonImportsRemapToOtherPackage(t *testing.T) {
+	packagejson_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/entry.js": `
+				import '#top-level'
+				import '#nested/path.js'
+				import '#star/c.js'
+				import '#slash/d.js'
+			`,
+			"/Users/user/project/src/package.json": `
+				{
+					"imports": {
+						"#top-level": "pkg/a.js",
+						"#nested/path.js": "pkg/b.js",
+						"#star/*": "pkg/some-star/*",
+						"#slash/": "pkg/some-slash/"
+					}
+				}
+			`,
+			"/Users/user/project/src/node_modules/pkg/a.js":            `console.log('a.js')`,
+			"/Users/user/project/src/node_modules/pkg/b.js":            `console.log('b.js')`,
+			"/Users/user/project/src/node_modules/pkg/some-star/c.js":  `console.log('c.js')`,
+			"/Users/user/project/src/node_modules/pkg/some-slash/d.js": `console.log('d.js')`,
+		},
+		entryPaths: []string{"/Users/user/project/src/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+		},
+	})
+}
+
+func TestPackageJsonImportsErrorMissingRemappedPackage(t *testing.T) {
+	packagejson_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/entry.js": `
+				import '#foo'
+			`,
+			"/Users/user/project/src/package.json": `
+				{
+					"imports": {
+						"#foo": "bar"
+					}
+				}
+			`,
+		},
+		entryPaths: []string{"/Users/user/project/src/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+		},
+		expectedScanLog: `Users/user/project/src/entry.js: ERROR: Could not resolve "#foo"
+Users/user/project/src/package.json: NOTE: The remapped path "bar" could not be resolved:
+NOTE: You can mark the path "#foo" as external to exclude it from the bundle, which will remove this error.
+`,
+	})
+}
+
+func TestPackageJsonImportsInvalidPackageConfiguration(t *testing.T) {
+	packagejson_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/entry.js": `
+				import '#foo'
+			`,
+			"/Users/user/project/src/package.json": `
+				{
+					"imports": "#foo"
+				}
+			`,
+		},
+		entryPaths: []string{"/Users/user/project/src/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+		},
+		expectedScanLog: `Users/user/project/src/entry.js: ERROR: Could not resolve "#foo"
+Users/user/project/src/package.json: NOTE: The package configuration has an invalid value here:
+NOTE: You can mark the path "#foo" as external to exclude it from the bundle, which will remove this error.
+Users/user/project/src/package.json: WARNING: The value for "imports" must be an object
+`,
+	})
+}
+
+func TestPackageJsonImportsErrorEqualsHash(t *testing.T) {
+	packagejson_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/entry.js": `
+				import '#'
+			`,
+			"/Users/user/project/src/package.json": `
+				{
+					"imports": {}
+				}
+			`,
+		},
+		entryPaths: []string{"/Users/user/project/src/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+		},
+		expectedScanLog: `Users/user/project/src/entry.js: ERROR: Could not resolve "#"
+Users/user/project/src/package.json: NOTE: This "imports" map was ignored because the module specifier "#" is invalid:
+NOTE: You can mark the path "#" as external to exclude it from the bundle, which will remove this error.
+`,
+	})
+}
+
+func TestPackageJsonImportsErrorStartsWithHashSlash(t *testing.T) {
+	packagejson_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/entry.js": `
+				import '#/foo'
+			`,
+			"/Users/user/project/src/package.json": `
+				{
+					"imports": {}
+				}
+			`,
+		},
+		entryPaths: []string{"/Users/user/project/src/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+		},
+		expectedScanLog: `Users/user/project/src/entry.js: ERROR: Could not resolve "#/foo"
+Users/user/project/src/package.json: NOTE: This "imports" map was ignored because the module specifier "#/foo" is invalid:
+NOTE: You can mark the path "#/foo" as external to exclude it from the bundle, which will remove this error.
+`,
+	})
+}
+
+func TestPackageJsonMainFieldsErrorMessageDefault(t *testing.T) {
+	packagejson_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/entry.js": `
+				import 'foo'
+			`,
+			"/Users/user/project/node_modules/foo/package.json": `
+				{
+					"main": "./foo"
+				}
+			`,
+		},
+		entryPaths: []string{"/Users/user/project/src/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+		},
+		expectedScanLog: `Users/user/project/src/entry.js: ERROR: Could not resolve "foo"
+NOTE: You can mark the path "foo" as external to exclude it from the bundle, which will remove this error.
+`,
+	})
+}
+
+func TestPackageJsonMainFieldsErrorMessageNotIncluded(t *testing.T) {
+	packagejson_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/entry.js": `
+				import 'foo'
+			`,
+			"/Users/user/project/node_modules/foo/package.json": `
+				{
+					"main": "./foo"
+				}
+			`,
+		},
+		entryPaths: []string{"/Users/user/project/src/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+			MainFields:    []string{"some", "fields"},
+		},
+		expectedScanLog: `Users/user/project/src/entry.js: ERROR: Could not resolve "foo"
+Users/user/project/node_modules/foo/package.json: NOTE: The "main" field here was ignored because the list of main fields to use is currently set to ["some", "fields"].
+NOTE: You can mark the path "foo" as external to exclude it from the bundle, which will remove this error.
+`,
+	})
+}
+
+func TestPackageJsonMainFieldsErrorMessageEmpty(t *testing.T) {
+	packagejson_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/entry.js": `
+				import 'foo'
+			`,
+			"/Users/user/project/node_modules/foo/package.json": `
+				{
+					"main": "./foo"
+				}
+			`,
+		},
+		entryPaths: []string{"/Users/user/project/src/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+			MainFields:    []string{},
+		},
+		expectedScanLog: `Users/user/project/src/entry.js: ERROR: Could not resolve "foo"
+Users/user/project/node_modules/foo/package.json: NOTE: The "main" field here was ignored because the list of main fields to use is currently set to [].
+NOTE: You can mark the path "foo" as external to exclude it from the bundle, which will remove this error.
+`,
+	})
+}
+
+func TestPackageJsonTypeShouldBeTypes(t *testing.T) {
+	packagejson_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/index.js": ``,
+			"/Users/user/project/package.json": `
+				{
+					"main": "./src/index.js",
+					"type": "./src/index.d.ts"
+				}
+			`,
+		},
+		entryPaths: []string{"/Users/user/project/src/index.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+			MainFields:    []string{},
+		},
+		expectedScanLog: `Users/user/project/package.json: WARNING: "./src/index.d.ts" is not a valid value for the "type" field
+Users/user/project/package.json: NOTE: TypeScript type declarations use the "types" field, not the "type" field:
 `,
 	})
 }

@@ -52,17 +52,19 @@ func hasErrors(msgs []logger.Msg) bool {
 type bundled struct {
 	files              map[string]string
 	entryPaths         []string
+	entryPathsAdvanced []EntryPoint
 	expectedScanLog    string
 	expectedCompileLog string
 	options            config.Options
+	debugLogs          bool
 }
 
 type suite struct {
+	expectedSnapshots  map[string]string
+	generatedSnapshots map[string]string
 	name               string
 	path               string
 	mutex              sync.Mutex
-	expectedSnapshots  map[string]string
-	generatedSnapshots map[string]string
 }
 
 func (s *suite) expectBundled(t *testing.T, args bundled) {
@@ -77,13 +79,22 @@ func (s *suite) expectBundled(t *testing.T, args bundled) {
 		if args.options.AbsOutputFile != "" {
 			args.options.AbsOutputDir = path.Dir(args.options.AbsOutputFile)
 		}
-		log := logger.NewDeferLog(logger.DeferLogNoVerboseOrDebug)
+		if args.options.Mode == config.ModeBundle || (args.options.Mode == config.ModeConvertFormat && args.options.OutputFormat == config.FormatIIFE) {
+			// Apply this default to all tests since it was not configurable when the tests were written
+			args.options.TreeShaking = true
+		}
+		logKind := logger.DeferLogNoVerboseOrDebug
+		if args.debugLogs {
+			logKind = logger.DeferLogAll
+		}
+		log := logger.NewDeferLog(logKind)
 		caches := cache.MakeCacheSet()
 		resolver := resolver.NewResolver(fs, log, caches, args.options)
-		entryPoints := make([]EntryPoint, 0, len(args.entryPaths))
+		entryPoints := make([]EntryPoint, 0, len(args.entryPaths)+len(args.entryPathsAdvanced))
 		for _, path := range args.entryPaths {
 			entryPoints = append(entryPoints, EntryPoint{InputPath: path})
 		}
+		entryPoints = append(entryPoints, args.entryPathsAdvanced...)
 		bundle := ScanBundle(log, fs, resolver, caches, entryPoints, args.options, nil)
 		msgs := log.Done()
 		assertLog(t, msgs, args.expectedScanLog)
@@ -93,9 +104,9 @@ func (s *suite) expectBundled(t *testing.T, args bundled) {
 			return
 		}
 
-		log = logger.NewDeferLog(logger.DeferLogNoVerboseOrDebug)
+		log = logger.NewDeferLog(logKind)
 		args.options.OmitRuntimeForTests = true
-		results, _ := bundle.Compile(log, args.options, nil)
+		results, _ := bundle.Compile(log, args.options, nil, nil)
 		msgs = log.Done()
 		assertLog(t, msgs, args.expectedCompileLog)
 

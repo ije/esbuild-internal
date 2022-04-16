@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/ije/esbuild-internal/config"
+	"github.com/ije/esbuild-internal/helpers"
 	"github.com/ije/esbuild-internal/js_ast"
 	"github.com/ije/esbuild-internal/js_lexer"
 	"github.com/ije/esbuild-internal/js_parser"
@@ -16,9 +17,8 @@ import (
 )
 
 type packageJSON struct {
-	source     logger.Source
-	mainFields map[string]string
-	moduleType config.ModuleType
+	mainFields     map[string]mainField
+	moduleTypeData js_ast.ModuleTypeData
 
 	// Present if the "browser" field is present. This field is intended to be
 	// used by bundlers and lets you redirect the paths of certain 3rd-party
@@ -61,8 +61,18 @@ type packageJSON struct {
 	sideEffectsRegexps []*regexp.Regexp
 	sideEffectsData    *SideEffectsData
 
+	// This represents the "imports" field in this package.json file.
+	importsMap *pjMap
+
 	// This represents the "exports" field in this package.json file.
-	exportsMap *peMap
+	exportsMap *pjMap
+
+	source logger.Source
+}
+
+type mainField struct {
+	relPath string
+	keyLoc  logger.Loc
 }
 
 type browserPathKind uint8
@@ -187,7 +197,16 @@ func (r resolverQuery) checkBrowserMap(resolveDirInfo *dirInfo, inputPath string
 				}
 			}
 			if isInSamePackage {
-				checkPath("./" + inputPath)
+				relativePathPrefix := "./"
+
+				// Use the relative path from the file containing the import path to the
+				// enclosing package.json file. This includes any subdirectories within the
+				// package if there are any.
+				if relPath, ok := r.fs.Rel(resolveDirInfo.enclosingBrowserScope.absPath, resolveDirInfo.absPath); ok && relPath != "." {
+					relativePathPrefix += strings.ReplaceAll(relPath, "\\", "/") + "/"
+				}
+
+				checkPath(relativePathPrefix + inputPath)
 			}
 		}
 	}
@@ -213,7 +232,7 @@ func (r resolverQuery) parsePackageJSON(inputPath string) *packageJSON {
 		r.debugLogs.addNote(fmt.Sprintf("Failed to read file %q: %s", packageJSONPath, originalError.Error()))
 	}
 	if err != nil {
-		r.log.AddError(nil, logger.Loc{},
+		r.log.Add(logger.Error, nil, logger.Range{},
 			fmt.Sprintf("Cannot read file %q: %s",
 				r.PrettyPath(logger.Path{Text: packageJSONPath, Namespace: "file"}), err.Error()))
 		return nil
@@ -235,22 +254,49 @@ func (r resolverQuery) parsePackageJSON(inputPath string) *packageJSON {
 		return nil
 	}
 
-	packageJSON := &packageJSON{source: jsonSource}
+	packageJSON := &packageJSON{
+		source:     jsonSource,
+		mainFields: make(map[string]mainField),
+	}
 
 	// Read the "type" field
-	if typeJSON, _, ok := getProperty(json, "type"); ok {
+	if typeJSON, typeKeyLoc, ok := getProperty(json, "type"); ok {
 		if typeValue, ok := getString(typeJSON); ok {
 			switch typeValue {
 			case "commonjs":
-				packageJSON.moduleType = config.ModuleCommonJS
+				packageJSON.moduleTypeData = js_ast.ModuleTypeData{
+					Type:   js_ast.ModuleCommonJS_PackageJSON,
+					Source: &packageJSON.source,
+					Range:  jsonSource.RangeOfString(typeJSON.Loc),
+				}
 			case "module":
-				packageJSON.moduleType = config.ModuleESM
+				packageJSON.moduleTypeData = js_ast.ModuleTypeData{
+					Type:   js_ast.ModuleESM_PackageJSON,
+					Source: &packageJSON.source,
+					Range:  jsonSource.RangeOfString(typeJSON.Loc),
+				}
 			default:
-				r.log.AddRangeWarning(&tracker, jsonSource.RangeOfString(typeJSON.Loc),
-					fmt.Sprintf("%q is not a valid value for the \"type\" field (must be either \"commonjs\" or \"module\")", typeValue))
+				notes := []logger.MsgData{{Text: "The \"type\" field must be set to either \"commonjs\" or \"module\"."}}
+				kind := logger.Warning
+
+				// If someone does something like "type": "./index.d.ts" then they
+				// likely meant "types" instead of "type". Customize the message
+				// for this and hide it if it's inside a published npm package.
+				if strings.HasSuffix(typeValue, ".d.ts") {
+					notes[0] = tracker.MsgData(jsonSource.RangeOfString(typeKeyLoc),
+						"TypeScript type declarations use the \"types\" field, not the \"type\" field:")
+					notes[0].Location.Suggestion = "\"types\""
+					if helpers.IsInsideNodeModules(jsonSource.KeyPath.Text) {
+						kind = logger.Debug
+					}
+				}
+
+				r.log.AddWithNotes(kind, &tracker, jsonSource.RangeOfString(typeJSON.Loc),
+					fmt.Sprintf("%q is not a valid value for the \"type\" field", typeValue),
+					notes)
 			}
 		} else {
-			r.log.AddWarning(&tracker, typeJSON.Loc,
+			r.log.Add(logger.Warning, &tracker, logger.Range{Loc: typeJSON.Loc},
 				"The value for \"type\" must be a string")
 		}
 	}
@@ -261,12 +307,18 @@ func (r resolverQuery) parsePackageJSON(inputPath string) *packageJSON {
 		mainFields = defaultMainFields[r.options.Platform]
 	}
 	for _, field := range mainFields {
-		if mainJSON, _, ok := getProperty(json, field); ok {
+		if mainJSON, mainLoc, ok := getProperty(json, field); ok {
 			if main, ok := getString(mainJSON); ok && main != "" {
-				if packageJSON.mainFields == nil {
-					packageJSON.mainFields = make(map[string]string)
+				packageJSON.mainFields[field] = mainField{keyLoc: mainLoc, relPath: main}
+			}
+		}
+	}
+	for _, field := range mainFieldsForFailure {
+		if _, ok := packageJSON.mainFields[field]; !ok {
+			if mainJSON, mainLoc, ok := getProperty(json, field); ok {
+				if main, ok := getString(mainJSON); ok && main != "" {
+					packageJSON.mainFields[field] = mainField{keyLoc: mainLoc, relPath: main}
 				}
-				packageJSON.mainFields[field] = main
 			}
 		}
 	}
@@ -300,7 +352,7 @@ func (r resolverQuery) parsePackageJSON(inputPath string) *packageJSON {
 							browserMap[key] = nil
 						}
 					} else {
-						r.log.AddWarning(&tracker, prop.ValueOrNil.Loc,
+						r.log.Add(logger.Warning, &tracker, logger.Range{Loc: prop.ValueOrNil.Loc},
 							"Each \"browser\" mapping must be a string or a boolean")
 					}
 				}
@@ -337,13 +389,13 @@ func (r resolverQuery) parsePackageJSON(inputPath string) *packageJSON {
 			for _, itemJSON := range data.Items {
 				item, ok := itemJSON.Data.(*js_ast.EString)
 				if !ok || item.Value == nil {
-					r.log.AddWarning(&tracker, itemJSON.Loc,
+					r.log.Add(logger.Warning, &tracker, logger.Range{Loc: itemJSON.Loc},
 						"Expected string in array for \"sideEffects\"")
 					continue
 				}
 
 				// Reference: https://github.com/webpack/webpack/blob/ed175cd22f89eb9fecd0a70572a3fd0be028e77c/lib/optimize/SideEffectsFlagPlugin.js
-				pattern := js_lexer.UTF16ToString(item.Value)
+				pattern := helpers.UTF16ToString(item.Value)
 				if !strings.ContainsRune(pattern, '/') {
 					pattern = "**/" + pattern
 				}
@@ -361,15 +413,25 @@ func (r resolverQuery) parsePackageJSON(inputPath string) *packageJSON {
 			}
 
 		default:
-			r.log.AddWarning(&tracker, sideEffectsJSON.Loc,
+			r.log.Add(logger.Warning, &tracker, logger.Range{Loc: sideEffectsJSON.Loc},
 				"The value for \"sideEffects\" must be a boolean or an array")
 		}
 	}
 
+	// Read the "imports" map
+	if importsJSON, _, ok := getProperty(json, "imports"); ok {
+		if importsMap := parseImportsExportsMap(jsonSource, r.log, importsJSON); importsMap != nil {
+			if importsMap.root.kind != pjObject {
+				r.log.Add(logger.Warning, &tracker, importsMap.root.firstToken,
+					"The value for \"imports\" must be an object")
+			}
+			packageJSON.importsMap = importsMap
+		}
+	}
+
 	// Read the "exports" map
-	if exportsJSON, exportsRange, ok := getProperty(json, "exports"); ok {
-		if exportsMap := parseExportsMap(jsonSource, r.log, exportsJSON); exportsMap != nil {
-			exportsMap.exportsRange = jsonSource.RangeOfString(exportsRange)
+	if exportsJSON, _, ok := getProperty(json, "exports"); ok {
+		if exportsMap := parseImportsExportsMap(jsonSource, r.log, exportsJSON); exportsMap != nil {
 			packageJSON.exportsMap = exportsMap
 		}
 	}
@@ -438,38 +500,37 @@ func globstarToEscapedRegexp(glob string) (string, bool) {
 }
 
 // Reference: https://nodejs.org/api/esm.html#esm_resolver_algorithm_specification
-type peMap struct {
-	exportsRange logger.Range
-	root         peEntry
+type pjMap struct {
+	root pjEntry
 }
 
-type peKind uint8
+type pjKind uint8
 
 const (
-	peNull peKind = iota
-	peString
-	peArray
-	peObject
-	peInvalid
+	pjNull pjKind = iota
+	pjString
+	pjArray
+	pjObject
+	pjInvalid
 )
 
-type peEntry struct {
+type pjEntry struct {
 	strData       string
-	arrData       []peEntry
-	mapData       []peMapEntry // Can't be a "map" because order matters
+	arrData       []pjEntry
+	mapData       []pjMapEntry // Can't be a "map" because order matters
 	expansionKeys expansionKeysArray
 	firstToken    logger.Range
-	kind          peKind
+	kind          pjKind
 }
 
-type peMapEntry struct {
+type pjMapEntry struct {
 	key      string
+	value    pjEntry
 	keyRange logger.Range
-	value    peEntry
 }
 
 // This type is just so we can use Go's native sort function
-type expansionKeysArray []peMapEntry
+type expansionKeysArray []pjMapEntry
 
 func (a expansionKeysArray) Len() int          { return len(a) }
 func (a expansionKeysArray) Swap(i int, j int) { a[i], a[j] = a[j], a[i] }
@@ -478,56 +539,56 @@ func (a expansionKeysArray) Less(i int, j int) bool {
 	return len(a[i].key) > len(a[j].key)
 }
 
-func (entry peEntry) valueForKey(key string) (peEntry, bool) {
+func (entry pjEntry) valueForKey(key string) (pjEntry, bool) {
 	for _, item := range entry.mapData {
 		if item.key == key {
 			return item.value, true
 		}
 	}
-	return peEntry{}, false
+	return pjEntry{}, false
 }
 
-func parseExportsMap(source logger.Source, log logger.Log, json js_ast.Expr) *peMap {
-	var visit func(expr js_ast.Expr) peEntry
+func parseImportsExportsMap(source logger.Source, log logger.Log, json js_ast.Expr) *pjMap {
+	var visit func(expr js_ast.Expr) pjEntry
 	tracker := logger.MakeLineColumnTracker(&source)
 
-	visit = func(expr js_ast.Expr) peEntry {
+	visit = func(expr js_ast.Expr) pjEntry {
 		var firstToken logger.Range
 
 		switch e := expr.Data.(type) {
 		case *js_ast.ENull:
-			return peEntry{
-				kind:       peNull,
+			return pjEntry{
+				kind:       pjNull,
 				firstToken: js_lexer.RangeOfIdentifier(source, expr.Loc),
 			}
 
 		case *js_ast.EString:
-			return peEntry{
-				kind:       peString,
+			return pjEntry{
+				kind:       pjString,
 				firstToken: source.RangeOfString(expr.Loc),
-				strData:    js_lexer.UTF16ToString(e.Value),
+				strData:    helpers.UTF16ToString(e.Value),
 			}
 
 		case *js_ast.EArray:
-			arrData := make([]peEntry, len(e.Items))
+			arrData := make([]pjEntry, len(e.Items))
 			for i, item := range e.Items {
 				arrData[i] = visit(item)
 			}
-			return peEntry{
-				kind:       peArray,
+			return pjEntry{
+				kind:       pjArray,
 				firstToken: logger.Range{Loc: expr.Loc, Len: 1},
 				arrData:    arrData,
 			}
 
 		case *js_ast.EObject:
-			mapData := make([]peMapEntry, len(e.Properties))
+			mapData := make([]pjMapEntry, len(e.Properties))
 			expansionKeys := make(expansionKeysArray, 0, len(e.Properties))
 			firstToken := logger.Range{Loc: expr.Loc, Len: 1}
 			isConditionalSugar := false
 
 			for i, property := range e.Properties {
 				keyStr, _ := property.Key.Data.(*js_ast.EString)
-				key := js_lexer.UTF16ToString(keyStr.Value)
+				key := helpers.UTF16ToString(keyStr.Value)
 				keyRange := source.RangeOfString(property.Key.Loc)
 
 				// If exports is an Object with both a key starting with "." and a key
@@ -537,17 +598,17 @@ func parseExportsMap(source logger.Source, log logger.Log, json js_ast.Expr) *pe
 					isConditionalSugar = curIsConditionalSugar
 				} else if isConditionalSugar != curIsConditionalSugar {
 					prevEntry := mapData[i-1]
-					log.AddRangeWarningWithNotes(&tracker, keyRange,
+					log.AddWithNotes(logger.Warning, &tracker, keyRange,
 						"This object cannot contain keys that both start with \".\" and don't start with \".\"",
-						[]logger.MsgData{logger.RangeData(&tracker, prevEntry.keyRange,
-							fmt.Sprintf("The previous key %q is incompatible with the current key %q", prevEntry.key, key))})
-					return peEntry{
-						kind:       peInvalid,
+						[]logger.MsgData{tracker.MsgData(prevEntry.keyRange,
+							fmt.Sprintf("The key %q is incompatible with the previous key %q:", key, prevEntry.key))})
+					return pjEntry{
+						kind:       pjInvalid,
 						firstToken: firstToken,
 					}
 				}
 
-				entry := peMapEntry{
+				entry := pjMapEntry{
 					key:      key,
 					keyRange: keyRange,
 					value:    visit(property.ValueOrNil),
@@ -564,8 +625,8 @@ func parseExportsMap(source logger.Source, log logger.Log, json js_ast.Expr) *pe
 			// sorted by length descending.
 			sort.Stable(expansionKeys)
 
-			return peEntry{
-				kind:          peObject,
+			return pjEntry{
+				kind:          pjObject,
 				firstToken:    firstToken,
 				mapData:       mapData,
 				expansionKeys: expansionKeys,
@@ -581,75 +642,79 @@ func parseExportsMap(source logger.Source, log logger.Log, json js_ast.Expr) *pe
 			firstToken.Loc = expr.Loc
 		}
 
-		log.AddRangeWarning(&tracker, firstToken, "This value must be a string, an object, an array, or null")
-		return peEntry{
-			kind:       peInvalid,
+		log.Add(logger.Warning, &tracker, firstToken,
+			"This value must be a string, an object, an array, or null")
+		return pjEntry{
+			kind:       pjInvalid,
 			firstToken: firstToken,
 		}
 	}
 
 	root := visit(json)
 
-	if root.kind == peNull {
+	if root.kind == pjNull {
 		return nil
 	}
 
-	return &peMap{root: root}
+	return &pjMap{root: root}
 }
 
-func (entry peEntry) keysStartWithDot() bool {
+func (entry pjEntry) keysStartWithDot() bool {
 	return len(entry.mapData) > 0 && strings.HasPrefix(entry.mapData[0].key, ".")
 }
 
-type peStatus uint8
+type pjStatus uint8
 
 const (
-	peStatusUndefined                  peStatus = iota
-	peStatusUndefinedNoConditionsMatch          // A more friendly error message for when no conditions are matched
-	peStatusNull
-	peStatusExact
-	peStatusInexact // This means we may need to try CommonJS-style extension suffixes
+	pjStatusUndefined                  pjStatus = iota
+	pjStatusUndefinedNoConditionsMatch          // A more friendly error message for when no conditions are matched
+	pjStatusNull
+	pjStatusExact
+	pjStatusInexact        // This means we may need to try CommonJS-style extension suffixes
+	pjStatusPackageResolve // Need to re-run package resolution on the result
 
 	// Module specifier is an invalid URL, package name or package subpath specifier.
-	peStatusInvalidModuleSpecifier
+	pjStatusInvalidModuleSpecifier
 
 	// package.json configuration is invalid or contains an invalid configuration.
-	peStatusInvalidPackageConfiguration
+	pjStatusInvalidPackageConfiguration
 
 	// Package exports or imports define a target module for the package that is an invalid type or string target.
-	peStatusInvalidPackageTarget
+	pjStatusInvalidPackageTarget
 
 	// Package exports do not define or permit a target subpath in the package for the given module.
-	peStatusPackagePathNotExported
+	pjStatusPackagePathNotExported
+
+	// Package imports do not define the specifiespecifier
+	pjStatusPackageImportNotDefined
 
 	// The package or module requested does not exist.
-	peStatusModuleNotFound
+	pjStatusModuleNotFound
 
 	// The resolved path corresponds to a directory, which is not a supported target for module imports.
-	peStatusUnsupportedDirectoryImport
+	pjStatusUnsupportedDirectoryImport
 )
 
-func (status peStatus) isUndefined() bool {
-	return status == peStatusUndefined || status == peStatusUndefinedNoConditionsMatch
+func (status pjStatus) isUndefined() bool {
+	return status == pjStatusUndefined || status == pjStatusUndefinedNoConditionsMatch
 }
 
-type peDebug struct {
+type pjDebug struct {
+	// If the status is "pjStatusUndefinedNoConditionsMatch", this is the set of
+	// conditions that didn't match, in the order that they were found in the file.
+	// This information is used for error messages.
+	unmatchedConditions []logger.Span
+
 	// This is the range of the token to use for error messages
 	token logger.Range
-
-	// If the status is "peStatusUndefinedNoConditionsMatch", this is the set of
-	// conditions that didn't match. This information is used for error messages.
-	unmatchedConditions []string
 }
 
-func (r resolverQuery) esmPackageExportsResolveWithPostConditions(
-	packageURL string,
-	subpath string,
-	exports peEntry,
-	conditions map[string]bool,
-) (string, peStatus, peDebug) {
-	resolved, status, debug := r.esmPackageExportsResolve(packageURL, subpath, exports, conditions)
-	if status != peStatusExact && status != peStatusInexact {
+func (r resolverQuery) esmHandlePostConditions(
+	resolved string,
+	status pjStatus,
+	debug pjDebug,
+) (string, pjStatus, pjDebug) {
+	if status != pjStatusExact && status != pjStatusInexact {
 		return resolved, status, debug
 	}
 
@@ -660,7 +725,7 @@ func (r resolverQuery) esmPackageExportsResolveWithPostConditions(
 		if r.debugLogs != nil {
 			r.debugLogs.addNote(fmt.Sprintf("The path %q contains invalid URL escapes: %s", resolved, err.Error()))
 		}
-		return resolved, peStatusInvalidModuleSpecifier, debug
+		return resolved, pjStatusInvalidModuleSpecifier, debug
 	}
 	var found string
 	if strings.Contains(resolved, "%2f") {
@@ -676,7 +741,7 @@ func (r resolverQuery) esmPackageExportsResolveWithPostConditions(
 		if r.debugLogs != nil {
 			r.debugLogs.addNote(fmt.Sprintf("The path %q is not allowed to contain %q", resolved, found))
 		}
-		return resolved, peStatusInvalidModuleSpecifier, debug
+		return resolved, pjStatusInvalidModuleSpecifier, debug
 	}
 
 	// If the file at resolved is a directory, then throw an Unsupported Directory
@@ -685,30 +750,52 @@ func (r resolverQuery) esmPackageExportsResolveWithPostConditions(
 		if r.debugLogs != nil {
 			r.debugLogs.addNote(fmt.Sprintf("The path %q is not allowed to end with a slash", resolved))
 		}
-		return resolved, peStatusUnsupportedDirectoryImport, debug
+		return resolved, pjStatusUnsupportedDirectoryImport, debug
 	}
 
 	// Set resolved to the real path of resolved.
 	return resolvedPath, status, debug
 }
 
+func (r resolverQuery) esmPackageImportsResolve(
+	specifier string,
+	imports pjEntry,
+	conditions map[string]bool,
+) (string, pjStatus, pjDebug) {
+	// ALGORITHM DEVIATION: Provide a friendly error message if "imports" is not an object
+	if imports.kind != pjObject {
+		return "", pjStatusInvalidPackageConfiguration, pjDebug{token: imports.firstToken}
+	}
+
+	resolved, status, debug := r.esmPackageImportsExportsResolve(specifier, imports, "/", true, conditions)
+	if status != pjStatusNull && status != pjStatusUndefined {
+		return resolved, status, debug
+	}
+
+	if r.debugLogs != nil {
+		r.debugLogs.addNote(fmt.Sprintf("The package import %q is not defined", specifier))
+	}
+	return specifier, pjStatusPackageImportNotDefined, pjDebug{token: imports.firstToken}
+}
+
 func (r resolverQuery) esmPackageExportsResolve(
 	packageURL string,
 	subpath string,
-	exports peEntry,
+	exports pjEntry,
 	conditions map[string]bool,
-) (string, peStatus, peDebug) {
-	if exports.kind == peInvalid {
+) (string, pjStatus, pjDebug) {
+	if exports.kind == pjInvalid {
 		if r.debugLogs != nil {
 			r.debugLogs.addNote("Invalid package configuration")
 		}
-		return "", peStatusInvalidPackageConfiguration, peDebug{token: exports.firstToken}
+		return "", pjStatusInvalidPackageConfiguration, pjDebug{token: exports.firstToken}
 	}
+
 	if subpath == "." {
-		mainExport := peEntry{kind: peNull}
-		if exports.kind == peString || exports.kind == peArray || (exports.kind == peObject && !exports.keysStartWithDot()) {
+		mainExport := pjEntry{kind: pjNull}
+		if exports.kind == pjString || exports.kind == pjArray || (exports.kind == pjObject && !exports.keysStartWithDot()) {
 			mainExport = exports
-		} else if exports.kind == peObject {
+		} else if exports.kind == pjObject {
 			if dot, ok := exports.valueForKey("."); ok {
 				if r.debugLogs != nil {
 					r.debugLogs.addNote("Using the entry for \".\"")
@@ -716,30 +803,32 @@ func (r resolverQuery) esmPackageExportsResolve(
 				mainExport = dot
 			}
 		}
-		if mainExport.kind != peNull {
-			resolved, status, debug := r.esmPackageTargetResolve(packageURL, mainExport, "", false, conditions)
-			if status != peStatusNull && status != peStatusUndefined {
+		if mainExport.kind != pjNull {
+			resolved, status, debug := r.esmPackageTargetResolve(packageURL, mainExport, "", false, false, conditions)
+			if status != pjStatusNull && status != pjStatusUndefined {
 				return resolved, status, debug
 			}
 		}
-	} else if exports.kind == peObject && exports.keysStartWithDot() {
-		resolved, status, debug := r.esmPackageImportsExportsResolve(subpath, exports, packageURL, conditions)
-		if status != peStatusNull && status != peStatusUndefined {
+	} else if exports.kind == pjObject && exports.keysStartWithDot() {
+		resolved, status, debug := r.esmPackageImportsExportsResolve(subpath, exports, packageURL, false, conditions)
+		if status != pjStatusNull && status != pjStatusUndefined {
 			return resolved, status, debug
 		}
 	}
+
 	if r.debugLogs != nil {
-		r.debugLogs.addNote(fmt.Sprintf("The path %q not exported", subpath))
+		r.debugLogs.addNote(fmt.Sprintf("The path %q is not exported", subpath))
 	}
-	return "", peStatusPackagePathNotExported, peDebug{token: exports.firstToken}
+	return "", pjStatusPackagePathNotExported, pjDebug{token: exports.firstToken}
 }
 
 func (r resolverQuery) esmPackageImportsExportsResolve(
 	matchKey string,
-	matchObj peEntry,
+	matchObj pjEntry,
 	packageURL string,
+	isImports bool,
 	conditions map[string]bool,
-) (string, peStatus, peDebug) {
+) (string, pjStatus, pjDebug) {
 	if r.debugLogs != nil {
 		r.debugLogs.addNote(fmt.Sprintf("Checking object path map for %q", matchKey))
 	}
@@ -749,7 +838,7 @@ func (r resolverQuery) esmPackageImportsExportsResolve(
 			if r.debugLogs != nil {
 				r.debugLogs.addNote(fmt.Sprintf("Found exact match for %q", matchKey))
 			}
-			return r.esmPackageTargetResolve(packageURL, target, "", false, conditions)
+			return r.esmPackageTargetResolve(packageURL, target, "", false, isImports, conditions)
 		}
 	}
 
@@ -763,7 +852,7 @@ func (r resolverQuery) esmPackageImportsExportsResolve(
 				if r.debugLogs != nil {
 					r.debugLogs.addNote(fmt.Sprintf("The key %q matched with %q left over", expansion.key, subpath))
 				}
-				return r.esmPackageTargetResolve(packageURL, target, subpath, true, conditions)
+				return r.esmPackageTargetResolve(packageURL, target, subpath, true, isImports, conditions)
 			}
 		}
 
@@ -773,10 +862,10 @@ func (r resolverQuery) esmPackageImportsExportsResolve(
 			if r.debugLogs != nil {
 				r.debugLogs.addNote(fmt.Sprintf("The key %q matched with %q left over", expansion.key, subpath))
 			}
-			result, status, debug := r.esmPackageTargetResolve(packageURL, target, subpath, false, conditions)
-			if status == peStatusExact {
+			result, status, debug := r.esmPackageTargetResolve(packageURL, target, subpath, false, isImports, conditions)
+			if status == pjStatusExact {
 				// Return the object { resolved, exact: false }.
-				status = peStatusInexact
+				status = pjStatusInexact
 			}
 			return result, status, debug
 		}
@@ -789,7 +878,7 @@ func (r resolverQuery) esmPackageImportsExportsResolve(
 	if r.debugLogs != nil {
 		r.debugLogs.addNote(fmt.Sprintf("No keys matched %q", matchKey))
 	}
-	return "", peStatusNull, peDebug{token: matchObj.firstToken}
+	return "", pjStatusNull, pjDebug{token: matchObj.firstToken}
 }
 
 // If path split on "/" or "\" contains any ".", ".." or "node_modules"
@@ -818,13 +907,14 @@ func findInvalidSegment(path string) string {
 
 func (r resolverQuery) esmPackageTargetResolve(
 	packageURL string,
-	target peEntry,
+	target pjEntry,
 	subpath string,
 	pattern bool,
+	internal bool,
 	conditions map[string]bool,
-) (string, peStatus, peDebug) {
+) (string, pjStatus, pjDebug) {
 	switch target.kind {
-	case peString:
+	case pjString:
 		if r.debugLogs != nil {
 			r.debugLogs.addNote(fmt.Sprintf("Checking path %q against target %q", subpath, target.strData))
 			r.debugLogs.increaseIndent()
@@ -837,14 +927,29 @@ func (r resolverQuery) esmPackageTargetResolve(
 			if r.debugLogs != nil {
 				r.debugLogs.addNote(fmt.Sprintf("The target %q is invalid because it doesn't end \"/\"", target.strData))
 			}
-			return target.strData, peStatusInvalidModuleSpecifier, peDebug{token: target.firstToken}
+			return target.strData, pjStatusInvalidModuleSpecifier, pjDebug{token: target.firstToken}
 		}
 
+		// If target does not start with "./", then...
 		if !strings.HasPrefix(target.strData, "./") {
+			if internal && !strings.HasPrefix(target.strData, "../") && !strings.HasPrefix(target.strData, "/") {
+				if pattern {
+					result := strings.ReplaceAll(target.strData, "*", subpath)
+					if r.debugLogs != nil {
+						r.debugLogs.addNote(fmt.Sprintf("Substituted %q for \"*\" in %q to get %q", subpath, target.strData, result))
+					}
+					return result, pjStatusPackageResolve, pjDebug{token: target.firstToken}
+				}
+				result := target.strData + subpath
+				if r.debugLogs != nil {
+					r.debugLogs.addNote(fmt.Sprintf("Joined %q to %q to get %q", target.strData, subpath, result))
+				}
+				return result, pjStatusPackageResolve, pjDebug{token: target.firstToken}
+			}
 			if r.debugLogs != nil {
 				r.debugLogs.addNote(fmt.Sprintf("The target %q is invalid because it doesn't start with \"./\"", target.strData))
 			}
-			return target.strData, peStatusInvalidPackageTarget, peDebug{token: target.firstToken}
+			return target.strData, pjStatusInvalidPackageTarget, pjDebug{token: target.firstToken}
 		}
 
 		// If target split on "/" or "\" contains any ".", ".." or "node_modules"
@@ -853,7 +958,7 @@ func (r resolverQuery) esmPackageTargetResolve(
 			if r.debugLogs != nil {
 				r.debugLogs.addNote(fmt.Sprintf("The target %q is invalid because it contains invalid segment %q", target.strData, invalidSegment))
 			}
-			return target.strData, peStatusInvalidPackageTarget, peDebug{token: target.firstToken}
+			return target.strData, pjStatusInvalidPackageTarget, pjDebug{token: target.firstToken}
 		}
 
 		// Let resolvedTarget be the URL resolution of the concatenation of packageURL and target.
@@ -865,7 +970,7 @@ func (r resolverQuery) esmPackageTargetResolve(
 			if r.debugLogs != nil {
 				r.debugLogs.addNote(fmt.Sprintf("The path %q is invalid because it contains invalid segment %q", subpath, invalidSegment))
 			}
-			return subpath, peStatusInvalidModuleSpecifier, peDebug{token: target.firstToken}
+			return subpath, pjStatusInvalidModuleSpecifier, pjDebug{token: target.firstToken}
 		}
 
 		if pattern {
@@ -874,17 +979,17 @@ func (r resolverQuery) esmPackageTargetResolve(
 			if r.debugLogs != nil {
 				r.debugLogs.addNote(fmt.Sprintf("Substituted %q for \"*\" in %q to get %q", subpath, "."+resolvedTarget, "."+result))
 			}
-			return result, peStatusExact, peDebug{token: target.firstToken}
+			return result, pjStatusExact, pjDebug{token: target.firstToken}
 		} else {
 			// Return the URL resolution of the concatenation of subpath and resolvedTarget.
 			result := path.Join(resolvedTarget, subpath)
 			if r.debugLogs != nil {
 				r.debugLogs.addNote(fmt.Sprintf("Joined %q to %q to get %q", subpath, "."+resolvedTarget, "."+result))
 			}
-			return result, peStatusExact, peDebug{token: target.firstToken}
+			return result, pjStatusExact, pjDebug{token: target.firstToken}
 		}
 
-	case peObject:
+	case pjObject:
 		if r.debugLogs != nil {
 			keys := make([]string, 0, len(conditions))
 			for key := range conditions {
@@ -897,14 +1002,14 @@ func (r resolverQuery) esmPackageTargetResolve(
 		}
 
 		var didFindMapEntry bool
-		var lastMapEntry peMapEntry
+		var lastMapEntry pjMapEntry
 
 		for _, p := range target.mapData {
 			if p.key == "default" || conditions[p.key] {
 				if r.debugLogs != nil {
 					r.debugLogs.addNote(fmt.Sprintf("The key %q applies", p.key))
 				}
-				resolved, status, debug := r.esmPackageTargetResolve(packageURL, p.value, subpath, pattern, conditions)
+				resolved, status, debug := r.esmPackageTargetResolve(packageURL, p.value, subpath, pattern, internal, conditions)
 				if status.isUndefined() {
 					didFindMapEntry = true
 					lastMapEntry = p
@@ -923,7 +1028,7 @@ func (r resolverQuery) esmPackageTargetResolve(
 
 		// ALGORITHM DEVIATION: Provide a friendly error message if no conditions matched
 		if len(target.mapData) > 0 && !target.keysStartWithDot() {
-			if didFindMapEntry && lastMapEntry.value.kind == peObject &&
+			if didFindMapEntry && lastMapEntry.value.kind == pjObject &&
 				len(lastMapEntry.value.mapData) > 0 && !lastMapEntry.value.keysStartWithDot() {
 				// If a top-level condition did match but no sub-condition matched,
 				// complain about the sub-condition instead of the top-level condition.
@@ -952,36 +1057,36 @@ func (r resolverQuery) esmPackageTargetResolve(
 				// More information: https://github.com/evanw/esbuild/issues/1484
 				target = lastMapEntry.value
 			}
-			keys := make([]string, len(target.mapData))
+			keys := make([]logger.Span, len(target.mapData))
 			for i, p := range target.mapData {
-				keys[i] = p.key
+				keys[i] = logger.Span{Text: p.key, Range: p.keyRange}
 			}
-			return "", peStatusUndefinedNoConditionsMatch, peDebug{
+			return "", pjStatusUndefinedNoConditionsMatch, pjDebug{
 				token:               target.firstToken,
 				unmatchedConditions: keys,
 			}
 		}
 
-		return "", peStatusUndefined, peDebug{token: target.firstToken}
+		return "", pjStatusUndefined, pjDebug{token: target.firstToken}
 
-	case peArray:
+	case pjArray:
 		if len(target.arrData) == 0 {
 			if r.debugLogs != nil {
 				r.debugLogs.addNote(fmt.Sprintf("The path %q is set to an empty array", subpath))
 			}
-			return "", peStatusNull, peDebug{token: target.firstToken}
+			return "", pjStatusNull, pjDebug{token: target.firstToken}
 		}
 		if r.debugLogs != nil {
 			r.debugLogs.addNote(fmt.Sprintf("Checking for %q in an array", subpath))
 			r.debugLogs.increaseIndent()
 			defer r.debugLogs.decreaseIndent()
 		}
-		lastException := peStatusUndefined
-		lastDebug := peDebug{token: target.firstToken}
+		lastException := pjStatusUndefined
+		lastDebug := pjDebug{token: target.firstToken}
 		for _, targetValue := range target.arrData {
 			// Let resolved be the result, continuing the loop on any Invalid Package Target error.
-			resolved, status, debug := r.esmPackageTargetResolve(packageURL, targetValue, subpath, pattern, conditions)
-			if status == peStatusInvalidPackageTarget || status == peStatusNull {
+			resolved, status, debug := r.esmPackageTargetResolve(packageURL, targetValue, subpath, pattern, internal, conditions)
+			if status == pjStatusInvalidPackageTarget || status == pjStatusNull {
 				lastException = status
 				lastDebug = debug
 				continue
@@ -995,17 +1100,17 @@ func (r resolverQuery) esmPackageTargetResolve(
 		// Return or throw the last fallback resolution null return or error.
 		return "", lastException, lastDebug
 
-	case peNull:
+	case pjNull:
 		if r.debugLogs != nil {
 			r.debugLogs.addNote(fmt.Sprintf("The path %q is set to null", subpath))
 		}
-		return "", peStatusNull, peDebug{token: target.firstToken}
+		return "", pjStatusNull, pjDebug{token: target.firstToken}
 	}
 
 	if r.debugLogs != nil {
 		r.debugLogs.addNote(fmt.Sprintf("Invalid package target for path %q", subpath))
 	}
-	return "", peStatusInvalidPackageTarget, peDebug{token: target.firstToken}
+	return "", pjStatusInvalidPackageTarget, pjDebug{token: target.firstToken}
 }
 
 func esmParsePackageName(packageSpecifier string) (packageName string, packageSubpath string, ok bool) {
@@ -1041,10 +1146,10 @@ func esmParsePackageName(packageSpecifier string) (packageName string, packageSu
 
 func (r resolverQuery) esmPackageExportsReverseResolve(
 	query string,
-	root peEntry,
+	root pjEntry,
 	conditions map[string]bool,
 ) (bool, string, logger.Range) {
-	if root.kind == peObject && root.keysStartWithDot() {
+	if root.kind == pjObject && root.keysStartWithDot() {
 		if ok, subpath, token := r.esmPackageImportsExportsReverseResolve(query, root, conditions); ok {
 			return true, subpath, token
 		}
@@ -1055,7 +1160,7 @@ func (r resolverQuery) esmPackageExportsReverseResolve(
 
 func (r resolverQuery) esmPackageImportsExportsReverseResolve(
 	query string,
-	matchObj peEntry,
+	matchObj pjEntry,
 	conditions map[string]bool,
 ) (bool, string, logger.Range) {
 	if !strings.HasSuffix(query, "*") {
@@ -1092,12 +1197,12 @@ const (
 func (r resolverQuery) esmPackageTargetReverseResolve(
 	query string,
 	key string,
-	target peEntry,
+	target pjEntry,
 	kind esmReverseKind,
 	conditions map[string]bool,
 ) (bool, string, logger.Range) {
 	switch target.kind {
-	case peString:
+	case pjString:
 		switch kind {
 		case esmReverseExact:
 			if query == target.strData {
@@ -1133,7 +1238,7 @@ func (r resolverQuery) esmPackageTargetReverseResolve(
 			break
 		}
 
-	case peObject:
+	case pjObject:
 		for _, p := range target.mapData {
 			if p.key == "default" || conditions[p.key] {
 				if ok, subpath, token := r.esmPackageTargetReverseResolve(query, key, p.value, kind, conditions); ok {
@@ -1142,7 +1247,7 @@ func (r resolverQuery) esmPackageTargetReverseResolve(
 			}
 		}
 
-	case peArray:
+	case pjArray:
 		for _, targetValue := range target.arrData {
 			if ok, subpath, token := r.esmPackageTargetReverseResolve(query, key, targetValue, kind, conditions); ok {
 				return true, subpath, token
