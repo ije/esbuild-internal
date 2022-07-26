@@ -38,7 +38,7 @@ export default [
     return __async(this, null, function* () {
     });
   },
-  () => __async(this, null, function* () {
+  () => __async(void 0, null, function* () {
   }),
   { foo() {
     return __async(this, null, function* () {
@@ -1648,6 +1648,17 @@ _foo = new WeakMap();
 __publicField(Foo, "FOO");
 export {
   Foo
+};
+
+================================================================================
+TestLowerRegExpNameCollision
+---------- /out.js ----------
+// entry.js
+function foo(RegExp2) {
+  return new RegExp2(new RegExp(".", "d"), "d");
+}
+export {
+  foo
 };
 
 ================================================================================

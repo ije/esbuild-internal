@@ -269,6 +269,20 @@ type ClassStaticBlock struct {
 	Loc   logger.Loc
 }
 
+type PropertyFlags uint8
+
+const (
+	PropertyIsComputed PropertyFlags = 1 << iota
+	PropertyIsMethod
+	PropertyIsStatic
+	PropertyWasShorthand
+	PropertyPreferQuotedKey
+)
+
+func (flags PropertyFlags) Has(flag PropertyFlags) bool {
+	return (flags & flag) != 0
+}
+
 type Property struct {
 	ClassStaticBlock *ClassStaticBlock
 
@@ -290,12 +304,9 @@ type Property struct {
 
 	TSDecorators []Expr
 
-	Kind            PropertyKind
-	IsComputed      bool
-	IsMethod        bool
-	IsStatic        bool
-	WasShorthand    bool
-	PreferQuotedKey bool
+	Loc   logger.Loc
+	Kind  PropertyKind
+	Flags PropertyFlags
 }
 
 type PropertyBinding struct {
@@ -371,14 +382,16 @@ type BMissing struct{}
 type BIdentifier struct{ Ref Ref }
 
 type BArray struct {
-	Items        []ArrayBinding
-	HasSpread    bool
-	IsSingleLine bool
+	Items           []ArrayBinding
+	CloseBracketLoc logger.Loc
+	HasSpread       bool
+	IsSingleLine    bool
 }
 
 type BObject struct {
-	Properties   []PropertyBinding
-	IsSingleLine bool
+	Properties    []PropertyBinding
+	CloseBraceLoc logger.Loc
+	IsSingleLine  bool
 }
 
 type Expr struct {
@@ -475,11 +488,14 @@ var ESuperShared = &ESuper{}
 var ENullShared = &ENull{}
 var EUndefinedShared = &EUndefined{}
 var EThisShared = &EThis{}
+var SEmptyShared = &SEmpty{}
+var SDebuggerShared = &SDebugger{}
 
 type ENew struct {
 	Target        Expr
 	Args          []Expr
 	CloseParenLoc logger.Loc
+	IsMultiLine   bool
 
 	// True if there is a comment containing "@__PURE__" or "#__PURE__" preceding
 	// this call expression. See the comment inside ECall for more details.
@@ -506,6 +522,7 @@ type ECall struct {
 	CloseParenLoc logger.Loc
 	OptionalChain OptionalChain
 	IsDirectEval  bool
+	IsMultiLine   bool
 
 	// True if there is a comment containing "@__PURE__" or "#__PURE__" preceding
 	// this call expression. This is an annotation used for tree shaking, and
@@ -1507,6 +1524,7 @@ const (
 	ExplicitStrictMode
 	ImplicitStrictModeClass
 	ImplicitStrictModeESM
+	ImplicitStrictModeTSAlwaysStrict
 )
 
 func (s *Scope) RecursiveSetStrictMode(kind StrictModeKind) {
