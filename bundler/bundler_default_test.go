@@ -539,6 +539,88 @@ func TestJSXConstantFragments(t *testing.T) {
 	})
 }
 
+func TestJSXAutomaticImportsCommonJS(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.jsx": `
+				import {jsx, Fragment} from './custom-react'
+				console.log(<div jsx={jsx}/>, <><Fragment/></>)
+			`,
+			"/custom-react.js": `
+				module.exports = {}
+			`,
+		},
+		entryPaths: []string{"/entry.jsx"},
+		options: config.Options{
+			Mode: config.ModeBundle,
+			JSX: config.JSXOptions{
+				AutomaticRuntime: true,
+			},
+			ExternalSettings: config.ExternalSettings{
+				PreResolve: config.ExternalMatchers{Exact: map[string]bool{
+					"react/jsx-runtime": true,
+				}},
+			},
+			AbsOutputFile: "/out.js",
+		},
+	})
+}
+
+func TestJSXAutomaticImportsES6(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.jsx": `
+				import {jsx, Fragment} from './custom-react'
+				console.log(<div jsx={jsx}/>, <><Fragment/></>)
+			`,
+			"/custom-react.js": `
+				export function jsx() {}
+				export function Fragment() {}
+			`,
+		},
+		entryPaths: []string{"/entry.jsx"},
+		options: config.Options{
+			Mode: config.ModeBundle,
+			JSX: config.JSXOptions{
+				AutomaticRuntime: true,
+			},
+			ExternalSettings: config.ExternalSettings{
+				PreResolve: config.ExternalMatchers{Exact: map[string]bool{
+					"react/jsx-runtime": true,
+				}},
+			},
+			AbsOutputFile: "/out.js",
+		},
+	})
+}
+
+func TestJSXAutomaticSyntaxInJS(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				console.log(<div/>)
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode: config.ModeBundle,
+			JSX: config.JSXOptions{
+				AutomaticRuntime: true,
+			},
+			ExternalSettings: config.ExternalSettings{
+				PreResolve: config.ExternalMatchers{Exact: map[string]bool{
+					"react/jsx-runtime": true,
+				}},
+			},
+			AbsOutputFile: "/out.js",
+		},
+		expectedScanLog: `entry.js: ERROR: The JSX syntax extension is not currently enabled
+NOTE: The esbuild loader for this file is currently set to "js" but it must be set to "jsx" to be able to parse JSX syntax. ` +
+			`You can use 'Loader: map[string]api.Loader{".js": api.LoaderJSX}' to do that.
+`,
+	})
+}
+
 func TestNodeModules(t *testing.T) {
 	default_suite.expectBundled(t, bundled{
 		files: map[string]string{
@@ -1312,6 +1394,24 @@ func TestHashbangNoBundle(t *testing.T) {
 	})
 }
 
+func TestHashbangBannerUseStrictOrder(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `#! in file
+				'use strict'
+				foo()
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+			JSBanner:      "#! from banner",
+			OutputFormat:  config.FormatIIFE,
+		},
+	})
+}
+
 func TestRequireFSBrowser(t *testing.T) {
 	default_suite.expectBundled(t, bundled{
 		files: map[string]string{
@@ -1837,39 +1937,40 @@ func TestThisWithES6Syntax(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/out.js",
 		},
-		expectedScanLog: `es6-export-abstract-class.ts: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+		debugLogs: true,
+		expectedScanLog: `es6-export-abstract-class.ts: DEBUG: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
 es6-export-abstract-class.ts: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
-es6-export-async-function.js: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-async-function.js: DEBUG: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
 es6-export-async-function.js: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
-es6-export-class.js: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-class.js: DEBUG: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
 es6-export-class.js: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
-es6-export-clause-from.js: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-clause-from.js: DEBUG: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
 es6-export-clause-from.js: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
-es6-export-clause.js: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-clause.js: DEBUG: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
 es6-export-clause.js: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
-es6-export-const-enum.ts: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-const-enum.ts: DEBUG: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
 es6-export-const-enum.ts: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
-es6-export-default.js: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-default.js: DEBUG: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
 es6-export-default.js: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
-es6-export-enum.ts: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-enum.ts: DEBUG: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
 es6-export-enum.ts: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
-es6-export-function.js: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-function.js: DEBUG: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
 es6-export-function.js: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
-es6-export-import-assign.ts: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-import-assign.ts: DEBUG: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
 es6-export-import-assign.ts: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
-es6-export-module.ts: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-module.ts: DEBUG: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
 es6-export-module.ts: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
-es6-export-namespace.ts: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-namespace.ts: DEBUG: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
 es6-export-namespace.ts: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
-es6-export-star-as.js: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-star-as.js: DEBUG: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
 es6-export-star-as.js: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
-es6-export-star.js: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-star.js: DEBUG: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
 es6-export-star.js: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
-es6-export-variable.js: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-variable.js: DEBUG: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
 es6-export-variable.js: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
-es6-expr-import-meta.js: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-expr-import-meta.js: DEBUG: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
 es6-expr-import-meta.js: NOTE: This file is considered to be an ECMAScript module because of the use of "import.meta" here:
-es6-import-meta.js: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-import-meta.js: DEBUG: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
 es6-import-meta.js: NOTE: This file is considered to be an ECMAScript module because of the use of "import.meta" here:
 `,
 	})
@@ -2334,10 +2435,27 @@ func TestImportAbsPathAsFile(t *testing.T) {
 }
 
 func TestImportAbsPathAsDir(t *testing.T) {
-	default_suite.expectBundled(t, bundled{
+	default_suite.expectBundledUnix(t, bundled{
 		files: map[string]string{
 			"/Users/user/project/entry.js": `
 				import pkg from '/Users/user/project/node_modules/pkg'
+				console.log(pkg)
+			`,
+			"/Users/user/project/node_modules/pkg/index.js": `
+				export default 123
+			`,
+		},
+		entryPaths: []string{"/Users/user/project/entry.js"},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
+		},
+	})
+
+	default_suite.expectBundledWindows(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/entry.js": `
+				import pkg from 'C:\\Users\\user\\project\\node_modules\\pkg'
 				console.log(pkg)
 			`,
 			"/Users/user/project/node_modules/pkg/index.js": `
@@ -3811,12 +3929,13 @@ func TestMinifyArguments(t *testing.T) {
 			Mode:              config.ModeBundle,
 			MinifyIdentifiers: true,
 			AbsOutputFile:     "/out.js",
+			OutputFormat:      config.FormatIIFE,
 		},
 	})
 }
 
 func TestWarningsInsideNodeModules(t *testing.T) {
-	default_suite.expectBundled(t, bundled{
+	default_suite.expectBundledUnix(t, bundled{
 		files: map[string]string{
 			"/entry.js": `
 				import "./dup-case.js";        import "./node_modules/dup-case.js";        import "@plugin/dup-case.js"
@@ -3902,7 +4021,7 @@ delete-super.js: WARNING: Attempting to delete a property of "super" will throw 
 dup-case.js: WARNING: This case clause will never be evaluated because it duplicates an earlier case clause
 dup-case.js: NOTE: The earlier case clause is here:
 equals-nan.js: WARNING: Comparison with NaN using the "===" operator here is always false
-NOTE: Floating-point equality is defined such that NaN is never equal to anything, so "x === NaN" always returns false. You need to use "isNaN(x)" instead to test for NaN.
+NOTE: Floating-point equality is defined such that NaN is never equal to anything, so "x === NaN" always returns false. You need to use "Number.isNaN(x)" instead to test for NaN.
 equals-neg-zero.js: WARNING: Comparison with -0 using the "===" operator will also match 0
 NOTE: Floating-point equality is defined such that 0 and -0 are equal, so "x === -0" returns true for both 0 and -0. You need to use "Object.is(x, -0)" instead to test for -0.
 equals-object.js: WARNING: Comparison using the "===" operator here is always false
@@ -3973,7 +4092,7 @@ entry.js: WARNING: "@scope/missing-pkg" should be marked as external for use wit
 }
 
 func TestInjectMissing(t *testing.T) {
-	default_suite.expectBundled(t, bundled{
+	default_suite.expectBundledUnix(t, bundled{
 		files: map[string]string{
 			"/entry.js": ``,
 		},
@@ -3985,8 +4104,22 @@ func TestInjectMissing(t *testing.T) {
 				"/inject.js",
 			},
 		},
-		expectedScanLog: `ERROR: Could not read from file: /inject.js
-`,
+		expectedScanLog: "ERROR: Could not read from file: /inject.js\n",
+	})
+
+	default_suite.expectBundledWindows(t, bundled{
+		files: map[string]string{
+			"/entry.js": ``,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+			InjectAbsPaths: []string{
+				"/inject.js",
+			},
+		},
+		expectedScanLog: "ERROR: Could not read from file: C:\\inject.js\n",
 	})
 }
 
@@ -4989,9 +5122,10 @@ func TestJSXThisValueESM(t *testing.T) {
 			},
 			AbsOutputDir: "/out",
 		},
-		expectedScanLog: `factory.jsx: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+		debugLogs: true,
+		expectedScanLog: `factory.jsx: DEBUG: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
 factory.jsx: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
-fragment.jsx: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+fragment.jsx: DEBUG: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
 fragment.jsx: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
 `,
 	})
@@ -5076,9 +5210,10 @@ func TestJSXThisPropertyESM(t *testing.T) {
 			},
 			AbsOutputDir: "/out",
 		},
-		expectedScanLog: `factory.jsx: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+		debugLogs: true,
+		expectedScanLog: `factory.jsx: DEBUG: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
 factory.jsx: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
-fragment.jsx: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+fragment.jsx: DEBUG: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
 fragment.jsx: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
 `,
 	})
@@ -5354,8 +5489,11 @@ func TestThisUndefinedWarningESM(t *testing.T) {
 			Mode:         config.ModeBundle,
 			AbsOutputDir: "/out",
 		},
-		expectedScanLog: `file1.js: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+		debugLogs: true,
+		expectedScanLog: `file1.js: DEBUG: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
 file1.js: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
+node_modules/pkg/file2.js: DEBUG: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+node_modules/pkg/file2.js: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
 `,
 	})
 }
@@ -5690,11 +5828,10 @@ func TestToESMWrapperOmission(t *testing.T) {
 
 // This is coverage for a past bug in esbuild. We used to generate this, which is wrong:
 //
-//   let x = function(foo) {
-//     var foo2;
-//     return foo2;
-//   };
-//
+//	let x = function(foo) {
+//	  var foo2;
+//	  return foo2;
+//	};
 func TestNamedFunctionExpressionArgumentCollision(t *testing.T) {
 	loader_suite.expectBundled(t, bundled{
 		files: map[string]string{
@@ -6605,63 +6742,38 @@ b.js: NOTE: Another definition of "x" comes from "b.js" here:
 	})
 }
 
-func TestThisIsUndefinedWarningBabelCompiledJSX(t *testing.T) {
+// See: https://github.com/evanw/esbuild/issues/2537
+func TestNonDeterminismIssue2537(t *testing.T) {
 	loader_suite.expectBundled(t, bundled{
 		files: map[string]string{
-			"/no1.js": `
-				import { jsxDEV as _jsxDEV } from "react/jsx-dev-runtime";
-				export var Foo = () => _jsxDEV("div", {}, void 0, false, { fileName: "Foo.tsx", lineNumber: 1, columnNumber: 23 }, this);
+			"/entry.ts": `
+				export function aap(noot: boolean, wim: number) {
+					let mies = "teun"
+					if (noot) {
+						function vuur(v: number) {
+							return v * 2
+						}
+						function schaap(s: number) {
+							return s / 2
+						}
+						mies = vuur(wim) + schaap(wim)
+					}
+					return mies
+				}
 			`,
-			"/no2.js": `
-				import { jsxDEV } from "react/jsx-dev-runtime";
-				export var Foo = () => jsxDEV("div", {}, void 0, false, { fileName: "Foo.tsx", lineNumber: 1, columnNumber: 23 }, this);
-			`,
-
-			"/yes1.js": `
-				import { jsxDEV as _jsxDEV } from "react/jsx-runtime";
-				export var Foo = () => _jsxDEV("div", {}, void 0, false, { fileName: "Foo.tsx", lineNumber: 1, columnNumber: 23 }, this);
-			`,
-			"/yes2.js": `
-				import { jsxDEV as _jsxDEV } from "react/jsx-dev-runtime";
-				export var Foo = () => _jsxDEV("div", {}, void 0, false, this, { fileName: "Foo.tsx", lineNumber: 1, columnNumber: 23 });
-			`,
-			"/yes3.js": `
-				import { jsxDEV as _jsxDEV } from "react/jsx-dev-runtime";
-				export var Foo = () => _jsxDEV("div", {}, void 0, false, { fileName: "Foo.tsx", lineNumber: 1, columnNumber: 23 }, this, null);
-			`,
-			"/yes4.js": `
-				import { _jsxDEV } from "react/jsx-dev-runtime";
-				export var Foo = () => _jsxDEV("div", {}, void 0, false, { fileName: "Foo.tsx", lineNumber: 1, columnNumber: 23 }, this);
-			`,
-
-			"/node_modules/react/jsx-runtime.js": `
-				export var jsxDEV
-			`,
-			"/node_modules/react/jsx-dev-runtime.js": `
-				export var jsxDEV, _jsxDEV
+			"/tsconfig.json": `
+				{
+					"compilerOptions": {
+						"alwaysStrict": true
+					}
+				}
 			`,
 		},
-		entryPaths: []string{
-			"/no1.js",
-			"/no2.js",
-
-			"/yes1.js",
-			"/yes2.js",
-			"/yes3.js",
-			"/yes4.js",
-		},
+		entryPaths: []string{"/entry.ts"},
 		options: config.Options{
-			Mode:         config.ModeBundle,
-			AbsOutputDir: "/out",
+			Mode:              config.ModeBundle,
+			AbsOutputFile:     "/out.js",
+			MinifyIdentifiers: true,
 		},
-		expectedScanLog: `yes1.js: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
-yes1.js: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
-yes2.js: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
-yes2.js: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
-yes3.js: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
-yes3.js: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
-yes4.js: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
-yes4.js: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
-`,
 	})
 }

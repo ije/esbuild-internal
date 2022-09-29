@@ -1566,8 +1566,8 @@ func (c *linkerContext) scanImportsAndExports() {
 						// Every call will be inlined
 						continue
 					} else if (flags & (js_ast.IsIdentityFunction | js_ast.CouldPotentiallyBeMutated)) == js_ast.IsIdentityFunction {
-						// Every single-argument call will be inlined
-						callUse.CallCountEstimate -= callUse.SingleArgCallCountEstimate
+						// Every single-argument call will be inlined as long as it's not a spread
+						callUse.CallCountEstimate -= callUse.SingleArgNonSpreadCallCountEstimate
 						if callUse.CallCountEstimate == 0 {
 							continue
 						}
@@ -2974,11 +2974,11 @@ func sanitizeFilePathForVirtualModulePath(path string) string {
 // order that JavaScript modules were evaluated in before the top-level await
 // feature was introduced.
 //
-//     A
-//    / \
-//   B   C
-//    \ /
-//     D
+//	  A
+//	 / \
+//	B   C
+//	 \ /
+//	  D
 //
 // If A imports B and then C, B imports D, and C imports D, then the JavaScript
 // traversal order is D B C A.
@@ -3042,11 +3042,11 @@ func (c *linkerContext) findImportedCSSFilesInJSOrder(entryPoint uint32) (order 
 // CSS file multiple times is equivalent to evaluating it once at the last
 // location. So we drop all but the last evaluation in the order.
 //
-//     A
-//    / \
-//   B   C
-//    \ /
-//     D
+//	  A
+//	 / \
+//	B   C
+//	 \ /
+//	  D
 //
 // If A imports B and then C, B imports D, and C imports D, then the CSS
 // traversal order is B D C A.
@@ -4867,33 +4867,39 @@ func (c *linkerContext) generateChunkJS(chunks []chunkInfo, chunkIndex int, chun
 	newlineBeforeComment := false
 	isExecutable := false
 
+	// Start with the hashbang if there is one. This must be done before the
+	// banner because it only works if it's literally the first character.
 	if chunk.isEntryPoint {
-		repr := c.graph.Files[chunk.sourceIndex].InputFile.Repr.(*graph.JSRepr)
-
-		// Start with the hashbang if there is one
-		if repr.AST.Hashbang != "" {
+		if repr := c.graph.Files[chunk.sourceIndex].InputFile.Repr.(*graph.JSRepr); repr.AST.Hashbang != "" {
 			hashbang := repr.AST.Hashbang + "\n"
 			prevOffset.AdvanceString(hashbang)
 			j.AddString(hashbang)
 			newlineBeforeComment = true
 			isExecutable = true
 		}
-
-		// Add the top-level directive if present (but omit "use strict" in ES
-		// modules because all ES modules are automatically in strict mode)
-		if repr.AST.Directive != "" && (repr.AST.Directive != "use strict" || c.options.OutputFormat != config.FormatESModule) {
-			quoted := string(helpers.QuoteForJSON(repr.AST.Directive, c.options.ASCIIOnly)) + ";" + newline
-			prevOffset.AdvanceString(quoted)
-			j.AddString(quoted)
-			newlineBeforeComment = true
-		}
 	}
 
+	// Then emit the banner after the hashbang. This must come before the
+	// "use strict" directive below because some people use the banner to
+	// emit a hashbang, which must be the first thing in the file.
 	if len(c.options.JSBanner) > 0 {
 		prevOffset.AdvanceString(c.options.JSBanner)
 		prevOffset.AdvanceString("\n")
 		j.AddString(c.options.JSBanner)
 		j.AddString("\n")
+		newlineBeforeComment = true
+	}
+
+	// Add the top-level directive if present (but omit "use strict" in ES
+	// modules because all ES modules are automatically in strict mode)
+	if chunk.isEntryPoint {
+		if repr := c.graph.Files[chunk.sourceIndex].InputFile.Repr.(*graph.JSRepr); repr.AST.Directive != "" &&
+			(repr.AST.Directive != "use strict" || c.options.OutputFormat != config.FormatESModule) {
+			quoted := string(helpers.QuoteForJSON(repr.AST.Directive, c.options.ASCIIOnly)) + ";" + newline
+			prevOffset.AdvanceString(quoted)
+			j.AddString(quoted)
+			newlineBeforeComment = true
+		}
 	}
 
 	// Optionally wrap with an IIFE

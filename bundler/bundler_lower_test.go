@@ -876,7 +876,8 @@ func TestLowerAsyncThis2016ES6(t *testing.T) {
 			UnsupportedJSFeatures: es(2016),
 			AbsOutputFile:         "/out.js",
 		},
-		expectedScanLog: `entry.js: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+		debugLogs: true,
+		expectedScanLog: `entry.js: DEBUG: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
 entry.js: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
 `,
 	})
@@ -915,7 +916,6 @@ export-def-2.js: ERROR: Transforming async functions to the configured target en
 fn-expr.js: ERROR: Transforming async functions to the configured target environment is not supported yet
 fn-stmt.js: ERROR: Transforming async functions to the configured target environment is not supported yet
 obj-method.js: ERROR: Transforming async functions to the configured target environment is not supported yet
-obj-method.js: ERROR: Transforming object literal extensions to the configured target environment is not supported yet
 `,
 	})
 }
@@ -2295,6 +2295,48 @@ func TestLowerRegExpNameCollision(t *testing.T) {
 			Mode:                  config.ModeBundle,
 			AbsOutputFile:         "/out.js",
 			UnsupportedJSFeatures: es(2021),
+		},
+	})
+}
+
+func TestLowerForAwait2017(t *testing.T) {
+	lower_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				export default [
+					async () => { for await (x of y) z(x) },
+					async () => { for await (x.y of y) z(x) },
+					async () => { for await (let x of y) z(x) },
+					async () => { for await (const x of y) z(x) },
+				]
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:                  config.ModePassThrough,
+			AbsOutputFile:         "/out.js",
+			UnsupportedJSFeatures: es(2017),
+		},
+	})
+}
+
+func TestLowerForAwait2015(t *testing.T) {
+	lower_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				export default [
+					async () => { for await (x of y) z(x) },
+					async () => { for await (x.y of y) z(x) },
+					async () => { for await (let x of y) z(x) },
+					async () => { for await (const x of y) z(x) },
+				]
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:                  config.ModePassThrough,
+			AbsOutputFile:         "/out.js",
+			UnsupportedJSFeatures: es(2015),
 		},
 	})
 }

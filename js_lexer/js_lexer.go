@@ -245,15 +245,17 @@ type MaybeSubstring struct {
 }
 
 type Lexer struct {
-	CommentsToPreserveBefore []js_ast.Comment
-	AllOriginalComments      []js_ast.Comment
-	Identifier               MaybeSubstring
-	log                      logger.Log
-	source                   logger.Source
-	JSXFactoryPragmaComment  logger.Span
-	JSXFragmentPragmaComment logger.Span
-	SourceMappingURL         logger.Span
-	BadArrowInTSXSuggestion  string
+	CommentsToPreserveBefore     []js_ast.Comment
+	AllOriginalComments          []js_ast.Comment
+	Identifier                   MaybeSubstring
+	log                          logger.Log
+	source                       logger.Source
+	JSXFactoryPragmaComment      logger.Span
+	JSXFragmentPragmaComment     logger.Span
+	JSXRuntimePragmaComment      logger.Span
+	JSXImportSourcePragmaComment logger.Span
+	SourceMappingURL             logger.Span
+	BadArrowInTSXSuggestion      string
 
 	// Escape sequences in string literals are decoded lazily because they are
 	// not interpreted inside tagged templates, and tagged templates can contain
@@ -262,7 +264,8 @@ type Lexer struct {
 	decodedStringLiteralOrNil []uint16
 	encodedStringLiteralText  string
 
-	tracker logger.LineColumnTracker
+	errorSuffix string
+	tracker     logger.LineColumnTracker
 
 	encodedStringLiteralStart int
 
@@ -325,13 +328,14 @@ func NewLexerGlobalName(log logger.Log, source logger.Source) Lexer {
 	return lexer
 }
 
-func NewLexerJSON(log logger.Log, source logger.Source, allowComments bool) Lexer {
+func NewLexerJSON(log logger.Log, source logger.Source, allowComments bool, errorSuffix string) Lexer {
 	lexer := Lexer{
 		log:               log,
 		source:            source,
 		tracker:           logger.MakeLineColumnTracker(&source),
 		prevErrorLoc:      logger.Loc{Start: -1},
 		FnOrArrowStartLoc: logger.Loc{Start: -1},
+		errorSuffix:       errorSuffix,
 		json: json{
 			parse:         true,
 			allowComments: allowComments,
@@ -484,7 +488,7 @@ func (lexer *Lexer) ExpectedString(text string) {
 		suggestion = text[1 : len(text)-1]
 	}
 
-	lexer.addRangeErrorWithSuggestion(lexer.Range(), fmt.Sprintf("Expected %s but found %s", text, found), suggestion)
+	lexer.addRangeErrorWithSuggestion(lexer.Range(), fmt.Sprintf("Expected %s%s but found %s", text, lexer.errorSuffix, found), suggestion)
 	panic(LexerPanic{})
 }
 
@@ -501,7 +505,7 @@ func (lexer *Lexer) Unexpected() {
 	if lexer.start == len(lexer.source.Contents) {
 		found = "end of file"
 	}
-	lexer.addRangeError(lexer.Range(), fmt.Sprintf("Unexpected %s", found))
+	lexer.addRangeError(lexer.Range(), fmt.Sprintf("Unexpected %s%s", found, lexer.errorSuffix))
 	panic(LexerPanic{})
 }
 
@@ -2785,6 +2789,14 @@ func (lexer *Lexer) scanCommentText() {
 			} else if hasPrefixWithWordBoundary(rest, "jsxFrag") {
 				if arg, ok := scanForPragmaArg(pragmaSkipSpaceFirst, lexer.start+i+1, "jsxFrag", rest); ok {
 					lexer.JSXFragmentPragmaComment = arg
+				}
+			} else if hasPrefixWithWordBoundary(rest, "jsxRuntime") {
+				if arg, ok := scanForPragmaArg(pragmaSkipSpaceFirst, lexer.start+i+1, "jsxRuntime", rest); ok {
+					lexer.JSXRuntimePragmaComment = arg
+				}
+			} else if hasPrefixWithWordBoundary(rest, "jsxImportSource") {
+				if arg, ok := scanForPragmaArg(pragmaSkipSpaceFirst, lexer.start+i+1, "jsxImportSource", rest); ok {
+					lexer.JSXImportSourcePragmaComment = arg
 				}
 			} else if i == 2 && strings.HasPrefix(rest, " sourceMappingURL=") {
 				if arg, ok := scanForPragmaArg(pragmaNoSpaceFirst, lexer.start+i+1, " sourceMappingURL=", rest); ok {

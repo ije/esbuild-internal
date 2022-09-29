@@ -684,6 +684,69 @@ func TestTSImportEqualsEliminationTest(t *testing.T) {
 	})
 }
 
+func TestTSImportEqualsTreeShakingFalse(t *testing.T) {
+	ts_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.ts": `
+				import { foo } from 'pkg'
+				import used = foo.used
+				import unused = foo.unused
+				export { used }
+			`,
+		},
+		entryPaths: []string{"/entry.ts"},
+		options: config.Options{
+			Mode:          config.ModePassThrough,
+			AbsOutputFile: "/out.js",
+			TreeShaking:   false,
+		},
+	})
+}
+
+func TestTSImportEqualsTreeShakingTrue(t *testing.T) {
+	ts_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.ts": `
+				import { foo } from 'pkg'
+				import used = foo.used
+				import unused = foo.unused
+				export { used }
+			`,
+		},
+		entryPaths: []string{"/entry.ts"},
+		options: config.Options{
+			Mode:          config.ModePassThrough,
+			AbsOutputFile: "/out.js",
+			TreeShaking:   true,
+		},
+	})
+}
+
+func TestTSImportEqualsBundle(t *testing.T) {
+	ts_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.ts": `
+				import { foo } from 'pkg'
+				import used = foo.used
+				import unused = foo.unused
+				export { used }
+			`,
+		},
+		entryPaths: []string{"/entry.ts"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+			ExternalSettings: config.ExternalSettings{
+				PreResolve: config.ExternalMatchers{
+					Exact: map[string]bool{
+						"pkg": true,
+					},
+				},
+			},
+		},
+	})
+}
+
 func TestTSMinifiedBundleES6(t *testing.T) {
 	ts_suite.expectBundled(t, bundled{
 		files: map[string]string{
@@ -1969,10 +2032,9 @@ func TestTSEnumExportClause(t *testing.T) {
 // This checks that we don't generate a warning for code that the TypeScript
 // compiler generates that looks like this:
 //
-//   var __rest = (this && this.__rest) || function (s, e) {
-//     ...
-//   };
-//
+//	var __rest = (this && this.__rest) || function (s, e) {
+//	  ...
+//	};
 func TestTSThisIsUndefinedWarning(t *testing.T) {
 	ts_suite.expectBundled(t, bundled{
 		files: map[string]string{
@@ -1995,12 +2057,31 @@ func TestTSThisIsUndefinedWarning(t *testing.T) {
 			Mode:         config.ModeBundle,
 			AbsOutputDir: "/out",
 		},
-		expectedScanLog: `warning1.ts: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+		debugLogs: true,
+		expectedScanLog: `warning1.ts: DEBUG: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
 warning1.ts: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
-warning2.ts: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+warning2.ts: DEBUG: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
 warning2.ts: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
-warning3.ts: WARNING: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+warning3.ts: DEBUG: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
 warning3.ts: NOTE: This file is considered to be an ECMAScript module because of the "export" keyword here:
+`,
+	})
+}
+
+func TestTSCommonJSVariableInESMTypeModule(t *testing.T) {
+	ts_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.ts":     `module.exports = null`,
+			"/package.json": `{ "type": "module" }`,
+		},
+		entryPaths: []string{"/entry.ts"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+		},
+		expectedScanLog: `entry.ts: WARNING: The CommonJS "module" variable is treated as a global variable in an ECMAScript module and may not work as expected
+package.json: NOTE: This file is considered to be an ECMAScript module because the enclosing "package.json" file sets the type of this file to "module":
+NOTE: Node's package format requires that CommonJS files in a "type": "module" package use the ".cjs" file extension. If you are using TypeScript, you can use the ".cts" file extension with esbuild instead.
 `,
 	})
 }

@@ -521,17 +521,17 @@ var nonDeprecatedElementsSupportedByIE7 = map[string]bool{
 // if any of the selectors are unsafe, since then browsers which don't support
 // that particular feature would ignore the entire merged qualified rule:
 //
-//   Input:
-//     a { color: red }
-//     b { color: red }
-//     input::-moz-placeholder { color: red }
+//	Input:
+//	  a { color: red }
+//	  b { color: red }
+//	  input::-moz-placeholder { color: red }
 //
-//   Valid output:
-//     a, b { color: red }
-//     input::-moz-placeholder { color: red }
+//	Valid output:
+//	  a, b { color: red }
+//	  input::-moz-placeholder { color: red }
 //
-//   Invalid output:
-//     a, b, input::-moz-placeholder { color: red }
+//	Invalid output:
+//	  a, b, input::-moz-placeholder { color: red }
 //
 // This considers IE 7 and above to be a browser that a user could possibly use.
 // Versions of IE less than 6 are not considered.
@@ -832,10 +832,13 @@ abortRuleParser:
 		if p.peek(css_lexer.TIdent) {
 			name = p.decoded()
 			p.advance()
-		} else if !p.expect(css_lexer.TIdent) && !p.eat(css_lexer.TString) && !p.peek(css_lexer.TOpenBrace) {
-			// Consider string names a syntax error even though they are allowed by
-			// the specification and they work in Firefox because they do not work in
-			// Chrome or Safari.
+		} else if p.eat(css_lexer.TString) {
+			// Consider string names to be an unknown rule even though they are allowed
+			// by the specification and they work in Firefox because they do not work in
+			// Chrome or Safari. We don't take the effort to support this Firefox-only
+			// feature natively. Instead, we just pass the syntax through unmodified.
+			break
+		} else if !p.expect(css_lexer.TIdent) {
 			break
 		}
 

@@ -1456,7 +1456,8 @@ func TestPackageJsonExportsErrorUnsupportedDirectoryImport(t *testing.T) {
 Users/user/project/node_modules/pkg1/package.json: NOTE: The module "./foo" was not found on the file system:
 NOTE: You can mark the path "pkg1" as external to exclude it from the bundle, which will remove this error.
 Users/user/project/src/entry.js: ERROR: Could not resolve "pkg2"
-Users/user/project/node_modules/pkg2/package.json: NOTE: Importing the directory "./foo" is not supported:
+Users/user/project/node_modules/pkg2/package.json: NOTE: Importing the directory "./foo" is forbidden by this package:
+Users/user/project/node_modules/pkg2/package.json: NOTE: The presence of "exports" here makes importing a directory forbidden:
 NOTE: You can mark the path "pkg2" as external to exclude it from the bundle, which will remove this error.
 `,
 	})
@@ -1936,6 +1937,7 @@ func TestPackageJsonExportsNotExactMissingExtensionPattern(t *testing.T) {
 		},
 		expectedScanLog: `Users/user/project/src/entry.js: ERROR: Could not resolve "pkg1/foo/bar"
 Users/user/project/node_modules/pkg1/package.json: NOTE: The module "./dir/bar" was not found on the file system:
+Users/user/project/src/entry.js: NOTE: Import from "pkg1/foo/bar.js" to get the file "Users/user/project/node_modules/pkg1/dir/bar.js":
 NOTE: You can mark the path "pkg1/foo/bar" as external to exclude it from the bundle, which will remove this error.
 `,
 	})
@@ -2610,6 +2612,24 @@ Users/user/project/package.json: NOTE: The path "./src/foo.js" is not exported b
 Users/user/project/package.json: NOTE: The file "./src/foo.js" is exported at path "./bar":
 Users/user/project/src/index.js: NOTE: Import from "xyz/bar" to get the file "Users/user/project/src/foo.js":
 NOTE: You can mark the path "xyz/src/foo.js" as external to exclude it from the bundle, which will remove this error.
+`,
+	})
+}
+
+func TestCommonJSVariableInESMTypeModule(t *testing.T) {
+	ts_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js":     `module.exports = null`,
+			"/package.json": `{ "type": "module" }`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+		},
+		expectedScanLog: `entry.js: WARNING: The CommonJS "module" variable is treated as a global variable in an ECMAScript module and may not work as expected
+package.json: NOTE: This file is considered to be an ECMAScript module because the enclosing "package.json" file sets the type of this file to "module":
+NOTE: Node's package format requires that CommonJS files in a "type": "module" package use the ".cjs" file extension.
 `,
 	})
 }

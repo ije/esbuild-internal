@@ -130,18 +130,17 @@ func (p *parser) skipTypeScriptFnArgs() {
 // This is a spot where the TypeScript grammar is highly ambiguous. Here are
 // some cases that are valid:
 //
-//     let x = (y: any): (() => {}) => { };
-//     let x = (y: any): () => {} => { };
-//     let x = (y: any): (y) => {} => { };
-//     let x = (y: any): (y[]) => {};
-//     let x = (y: any): (a | b) => {};
+//	let x = (y: any): (() => {}) => { };
+//	let x = (y: any): () => {} => { };
+//	let x = (y: any): (y) => {} => { };
+//	let x = (y: any): (y[]) => {};
+//	let x = (y: any): (a | b) => {};
 //
 // Here are some cases that aren't valid:
 //
-//     let x = (y: any): (y) => {};
-//     let x = (y: any): (y) => {return 0};
-//     let x = (y: any): asserts y is (y) => {};
-//
+//	let x = (y: any): (y) => {};
+//	let x = (y: any): (y) => {return 0};
+//	let x = (y: any): asserts y is (y) => {};
 func (p *parser) skipTypeScriptParenOrFnType() {
 	if p.trySkipTypeScriptArrowArgsWithBacktracking() {
 		p.skipTypeScriptReturnType()
@@ -1316,9 +1315,10 @@ func (p *parser) parseTypeScriptImportEqualsStmt(loc logger.Loc, opts parseStmtO
 		for p.lexer.Token == js_lexer.TDot {
 			p.lexer.Next()
 			value.Data = &js_ast.EDot{
-				Target:  value,
-				Name:    p.lexer.Identifier.String,
-				NameLoc: p.lexer.Loc(),
+				Target:               value,
+				Name:                 p.lexer.Identifier.String,
+				NameLoc:              p.lexer.Loc(),
+				CanBeRemovedIfUnused: true,
 			}
 			p.lexer.Expect(js_lexer.TIdentifier)
 		}

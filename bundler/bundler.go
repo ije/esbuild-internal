@@ -69,6 +69,7 @@ type Bundle struct {
 	res         resolver.Resolver
 	files       []scannerFile
 	entryPoints []graph.EntryPoint
+	options     config.Options
 }
 
 type parseArgs struct {
@@ -465,13 +466,30 @@ func parseFile(args parseArgs) {
 			sourceMapComment = repr.AST.SourceMapComment
 		}
 		if sourceMapComment.Text != "" {
+			tracker := logger.MakeLineColumnTracker(&source)
 			if path, contents := extractSourceMapFromComment(args.log, args.fs, &args.caches.FSCache,
-				args.res, &source, sourceMapComment, absResolveDir); contents != nil {
-				result.file.inputFile.InputSourceMap = js_parser.ParseSourceMap(args.log, logger.Source{
+				args.res, &source, &tracker, sourceMapComment, absResolveDir); contents != nil {
+				prettyPath := args.res.PrettyPath(path)
+				log := logger.NewDeferLog(logger.DeferLogNoVerboseOrDebug, args.log.Overrides)
+				result.file.inputFile.InputSourceMap = js_parser.ParseSourceMap(log, logger.Source{
 					KeyPath:    path,
-					PrettyPath: args.res.PrettyPath(path),
+					PrettyPath: prettyPath,
 					Contents:   *contents,
 				})
+				msgs := log.Done()
+				if len(msgs) > 0 {
+					var text string
+					if path.Namespace == "file" {
+						text = fmt.Sprintf("The source map %q was referenced by the file %q here:", prettyPath, args.prettyPath)
+					} else {
+						text = fmt.Sprintf("This source map came from the file %q here:", args.prettyPath)
+					}
+					note := tracker.MsgData(sourceMapComment.Range, text)
+					for _, msg := range msgs {
+						msg.Notes = append(msg.Notes, note)
+						args.log.AddMsg(msg)
+					}
+				}
 			}
 		}
 	}
@@ -510,7 +528,11 @@ func ResolveFailureErrorTextSuggestionNotes(
 	}
 
 	if platform != config.PlatformNode {
-		if _, ok := resolver.BuiltInNodeModules[path]; ok {
+		pkg := path
+		if strings.HasPrefix(pkg, "node:") {
+			pkg = pkg[5:]
+		}
+		if resolver.BuiltInNodeModules[pkg] {
 			var how string
 			switch logger.API {
 			case logger.CLIAPI:
@@ -594,17 +616,16 @@ func extractSourceMapFromComment(
 	fsCache *cache.FSCache,
 	res resolver.Resolver,
 	source *logger.Source,
+	tracker *logger.LineColumnTracker,
 	comment logger.Span,
 	absResolveDir string,
 ) (logger.Path, *string) {
-	tracker := logger.MakeLineColumnTracker(source)
-
 	// Support data URLs
 	if parsed, ok := resolver.ParseDataURL(comment.Text); ok {
 		if contents, err := parsed.DecodeData(); err == nil {
 			return logger.Path{Text: source.PrettyPath, IgnoredSuffix: "#sourceMappingURL"}, &contents
 		} else {
-			log.AddID(logger.MsgID_SourceMap_UnsupportedSourceMapComment, logger.Warning, &tracker, comment.Range,
+			log.AddID(logger.MsgID_SourceMap_UnsupportedSourceMapComment, logger.Warning, tracker, comment.Range,
 				fmt.Sprintf("Unsupported source map comment: %s", err.Error()))
 			return logger.Path{}, nil
 		}
@@ -616,7 +637,7 @@ func extractSourceMapFromComment(
 		path := logger.Path{Text: absPath, Namespace: "file"}
 		contents, err, originalError := fsCache.ReadFile(fs, absPath)
 		if log.Level <= logger.LevelDebug && originalError != nil {
-			log.AddID(logger.MsgID_None, logger.Debug, &tracker, comment.Range, fmt.Sprintf("Failed to read file %q: %s", res.PrettyPath(path), originalError.Error()))
+			log.AddID(logger.MsgID_None, logger.Debug, tracker, comment.Range, fmt.Sprintf("Failed to read file %q: %s", res.PrettyPath(path), originalError.Error()))
 		}
 		if err != nil {
 			kind := logger.Warning
@@ -624,7 +645,7 @@ func extractSourceMapFromComment(
 				// Don't report a warning because this is likely unactionable
 				kind = logger.Debug
 			}
-			log.AddID(logger.MsgID_SourceMap_MissingSourceMap, kind, &tracker, comment.Range,
+			log.AddID(logger.MsgID_SourceMap_MissingSourceMap, kind, tracker, comment.Range,
 				fmt.Sprintf("Cannot read file %q: %s", res.PrettyPath(path), err.Error()))
 			return logger.Path{}, nil
 		}
@@ -1144,6 +1165,7 @@ func ScanBundle(
 		files:           files,
 		entryPoints:     entryPointMeta,
 		uniqueKeyPrefix: uniqueKeyPrefix,
+		options:         s.options,
 	}
 }
 
@@ -1194,14 +1216,24 @@ func (s *scanner) maybeParseFile(
 	if len(resolveResult.JSXFragment) > 0 {
 		optionsClone.JSX.Fragment = config.DefineExpr{Parts: resolveResult.JSXFragment}
 	}
+	if resolveResult.JSX != config.TSJSXNone {
+		optionsClone.JSX.SetOptionsFromTSJSX(resolveResult.JSX)
+	}
+	if resolveResult.JSXImportSource != "" {
+		optionsClone.JSX.ImportSource = resolveResult.JSXImportSource
+	}
 	if resolveResult.UseDefineForClassFieldsTS != config.Unspecified {
 		optionsClone.UseDefineForClassFields = resolveResult.UseDefineForClassFieldsTS
 	}
 	if resolveResult.UnusedImportFlagsTS != 0 {
 		optionsClone.UnusedImportFlagsTS = resolveResult.UnusedImportFlagsTS
 	}
-	optionsClone.TSTarget = resolveResult.TSTarget
-	optionsClone.TSAlwaysStrict = resolveResult.TSAlwaysStrict
+	if resolveResult.TSTarget != nil {
+		optionsClone.TSTarget = resolveResult.TSTarget
+	}
+	if resolveResult.TSAlwaysStrict != nil {
+		optionsClone.TSAlwaysStrict = resolveResult.TSAlwaysStrict
+	}
 
 	// Set the module type preference using node's module type rules
 	if strings.HasSuffix(path.Text, ".mjs") {
@@ -1626,6 +1658,11 @@ func lowestCommonAncestorDirectory(fs fs.FS, entryPoints []graph.EntryPoint) str
 					lastSlash = a
 				}
 			} else if boundaryA != boundaryB || unicode.ToLower(runeA) != unicode.ToLower(runeB) {
+				// If we're at the top-level directory, then keep the slash
+				if lastSlash < len(absDir) && !strings.ContainsAny(absDir[:lastSlash], "\\/") {
+					lastSlash++
+				}
+
 				// If both paths are different at this point, stop and set the lowest so
 				// far to the common parent directory. Compare using a case-insensitive
 				// comparison to handle paths on Windows.
@@ -2116,18 +2153,33 @@ func applyOptionDefaults(options *config.Options) {
 	}
 
 	options.ProfilerNames = !options.MinifyIdentifiers
+
+	// Automatically fix invalid configurations of unsupported features
+	fixInvalidUnsupportedJSFeatureOverrides(options, compat.AsyncAwait, compat.AsyncGenerator|compat.ForAwait|compat.TopLevelAwait)
+	fixInvalidUnsupportedJSFeatureOverrides(options, compat.Generator, compat.AsyncGenerator)
+	fixInvalidUnsupportedJSFeatureOverrides(options, compat.ObjectAccessors, compat.ClassPrivateAccessor|compat.ClassPrivateStaticAccessor)
+	fixInvalidUnsupportedJSFeatureOverrides(options, compat.ClassField, compat.ClassPrivateField)
+	fixInvalidUnsupportedJSFeatureOverrides(options, compat.ClassStaticField, compat.ClassPrivateStaticField)
+	fixInvalidUnsupportedJSFeatureOverrides(options, compat.Class,
+		compat.ClassField|compat.ClassPrivateAccessor|compat.ClassPrivateBrandCheck|compat.ClassPrivateField|
+			compat.ClassPrivateMethod|compat.ClassPrivateStaticAccessor|compat.ClassPrivateStaticField|
+			compat.ClassPrivateStaticMethod|compat.ClassStaticBlocks|compat.ClassStaticField)
 }
 
-func (b *Bundle) Compile(log logger.Log, options config.Options, timer *helpers.Timer, mangleCache map[string]interface{}) ([]graph.OutputFile, string) {
+func fixInvalidUnsupportedJSFeatureOverrides(options *config.Options, implies compat.JSFeature, implied compat.JSFeature) {
+	// If this feature is unsupported, that implies that the other features must also be unsupported
+	if options.UnsupportedJSFeatureOverrides.Has(implies) {
+		options.UnsupportedJSFeatures |= implied
+		options.UnsupportedJSFeatureOverrides |= implied
+		options.UnsupportedJSFeatureOverridesMask |= implied
+	}
+}
+
+func (b *Bundle) Compile(log logger.Log, timer *helpers.Timer, mangleCache map[string]interface{}) ([]graph.OutputFile, string) {
 	timer.Begin("Compile phase")
 	defer timer.End("Compile phase")
 
-	applyOptionDefaults(&options)
-
-	// The format can't be "preserve" while bundling
-	if options.Mode == config.ModeBundle && options.OutputFormat == config.FormatPreserve {
-		options.OutputFormat = config.FormatESModule
-	}
+	options := b.options
 
 	// In most cases we don't need synchronized access to the mangle cache
 	options.ExclusiveMangleCacheUpdate = func(cb func(mangleCache map[string]interface{})) {
@@ -2432,9 +2484,9 @@ func (b *Bundle) generateMetadataJSON(results []graph.OutputFile, allReachableFi
 }
 
 type runtimeCacheKey struct {
-	MinifySyntax      bool
-	MinifyIdentifiers bool
-	ES6               bool
+	unsupportedJSFeatures compat.JSFeature
+	minifySyntax          bool
+	minifyIdentifiers     bool
 }
 
 type runtimeCache struct {
@@ -2447,17 +2499,13 @@ var globalRuntimeCache runtimeCache
 func (cache *runtimeCache) parseRuntime(options *config.Options) (source logger.Source, runtimeAST js_ast.AST, ok bool) {
 	key := runtimeCacheKey{
 		// All configuration options that the runtime code depends on must go here
-		MinifySyntax:      options.MinifySyntax,
-		MinifyIdentifiers: options.MinifyIdentifiers,
-		ES6:               runtime.CanUseES6(options.UnsupportedJSFeatures),
+		unsupportedJSFeatures: options.UnsupportedJSFeatures,
+		minifySyntax:          options.MinifySyntax,
+		minifyIdentifiers:     options.MinifyIdentifiers,
 	}
 
 	// Determine which source to use
-	if key.ES6 {
-		source = runtime.ES6Source
-	} else {
-		source = runtime.ES5Source
-	}
+	source = runtime.Source(key.unsupportedJSFeatures)
 
 	// Cache hit?
 	(func() {
@@ -2472,19 +2520,12 @@ func (cache *runtimeCache) parseRuntime(options *config.Options) (source logger.
 	}
 
 	// Cache miss
-	var constraint int
-	if key.ES6 {
-		constraint = 2015
-	} else {
-		constraint = 5
-	}
 	log := logger.NewDeferLog(logger.DeferLogAll, nil)
 	runtimeAST, ok = js_parser.Parse(log, source, js_parser.OptionsFromConfig(&config.Options{
 		// These configuration options must only depend on the key
-		MinifySyntax:      key.MinifySyntax,
-		MinifyIdentifiers: key.MinifyIdentifiers,
-		UnsupportedJSFeatures: compat.UnsupportedJSFeatures(
-			map[compat.Engine][]int{compat.ES: {constraint}}),
+		UnsupportedJSFeatures: key.unsupportedJSFeatures,
+		MinifySyntax:          key.minifySyntax,
+		MinifyIdentifiers:     key.minifyIdentifiers,
 
 		// Always do tree shaking for the runtime because we never want to
 		// include unnecessary runtime code
@@ -2493,7 +2534,7 @@ func (cache *runtimeCache) parseRuntime(options *config.Options) (source logger.
 	if log.HasErrors() {
 		msgs := "Internal error: failed to parse runtime:\n"
 		for _, msg := range log.Done() {
-			msgs += msg.String(logger.OutputOptions{}, logger.TerminalInfo{})
+			msgs += msg.String(logger.OutputOptions{IncludeSource: true}, logger.TerminalInfo{})
 		}
 		panic(msgs[:len(msgs)-1])
 	}
