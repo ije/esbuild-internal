@@ -114,7 +114,7 @@ type parser struct {
 	exportStarImportRecords     []uint32
 
 	// These are for handling ES6 imports and exports
-	importItemsForNamespace map[js_ast.Ref]map[string]js_ast.LocRef
+	importItemsForNamespace map[js_ast.Ref]namespaceImportItems
 	isImportItem            map[js_ast.Ref]bool
 	namedImports            map[js_ast.Ref]js_ast.NamedImport
 	namedExports            map[string]js_ast.NamedExport
@@ -342,6 +342,11 @@ type parser struct {
 	latestReturnHadSemicolon    bool
 	messageAboutThisIsUndefined bool
 	isControlFlowDead           bool
+}
+
+type namespaceImportItems struct {
+	entries           map[string]js_ast.LocRef
+	importRecordIndex uint32
 }
 
 type stringLocalForYarnPnP struct {
@@ -1744,6 +1749,64 @@ func (p *parser) logDeferredArrowArgErrors(errors *deferredErrors) {
 	}
 }
 
+func defineValueCanBeUsedInAssignTarget(data js_ast.E) bool {
+	switch data.(type) {
+	case *js_ast.EIdentifier, *js_ast.EDot:
+		return true
+	}
+
+	// Substituting a constant into an assignment target (e.g. "x = 1" becomes
+	// "0 = 1") will cause a syntax error, so we avoid doing this. The caller
+	// will log a warning instead.
+	return false
+}
+
+func (p *parser) logAssignToDefine(r logger.Range, name string, expr js_ast.Expr) {
+	// If this is a compound expression, pretty-print it for the error message.
+	// We don't use a literal slice of the source text in case it contains
+	// problematic things (e.g. spans multiple lines, has embedded comments).
+	if expr.Data != nil {
+		var parts []string
+		for {
+			if id, ok := expr.Data.(*js_ast.EIdentifier); ok {
+				parts = append(parts, p.loadNameFromRef(id.Ref))
+				break
+			} else if dot, ok := expr.Data.(*js_ast.EDot); ok {
+				parts = append(parts, dot.Name)
+				parts = append(parts, ".")
+				expr = dot.Target
+			} else if index, ok := expr.Data.(*js_ast.EIndex); ok {
+				if str, ok := index.Index.Data.(*js_ast.EString); ok {
+					parts = append(parts, "]")
+					parts = append(parts, string(helpers.QuoteSingle(helpers.UTF16ToString(str.Value), false)))
+					parts = append(parts, "[")
+					expr = index.Target
+				} else {
+					return
+				}
+			} else {
+				return
+			}
+		}
+		for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
+			parts[i], parts[j] = parts[j], parts[i]
+		}
+		name = strings.Join(parts, "")
+	}
+
+	kind := logger.Warning
+	if p.suppressWarningsAboutWeirdCode {
+		kind = logger.Debug
+	}
+
+	p.log.AddIDWithNotes(logger.MsgID_JS_AssignToDefine, kind, &p.tracker, r,
+		fmt.Sprintf("Suspicious assignment to defined constant %q", name),
+		[]logger.MsgData{{Text: fmt.Sprintf(
+			"The expression %q has been configured to be replaced with a constant using the \"define\" feature. "+
+				"If this expression is supposed to be a compile-time constant, then it doesn't make sense to assign to it here. "+
+				"Or if this expression is supposed to change at run-time, this \"define\" substitution should be removed.", name)}})
+}
+
 // The "await" and "yield" expressions are never allowed in argument lists but
 // may or may not be allowed otherwise depending on the details of the enclosing
 // function or module. This needs to be handled when parsing an arrow function
@@ -1797,6 +1860,14 @@ func (p *parser) checkForLegacyOctalLiteral(e js_ast.E) {
 		}
 		p.legacyOctalLiterals[e] = p.lexer.Range()
 	}
+}
+
+func (p *parser) notesForAssertTypeJSON(record *ast.ImportRecord, alias string) []logger.MsgData {
+	return []logger.MsgData{p.tracker.MsgData(
+		js_lexer.RangeOfImportAssertion(p.source, *ast.FindAssertion(*record.Assertions, "type")),
+		"This is considered an import of a standard JSON module because of the import assertion here:"),
+		{Text: fmt.Sprintf("You can either keep the import assertion and only use the \"default\" import, "+
+			"or you can remove the import assertion and use the %q import (which is non-standard behavior).", alias)}}
 }
 
 // This assumes the caller has already checked for TStringLiteral or TNoSubstitutionTemplateLiteral
@@ -3341,19 +3412,21 @@ func (p *parser) parsePrefix(level js_ast.L, errors *deferredErrors, flags exprF
 		}
 
 		target := p.parseExprWithFlags(js_ast.LMember, flags)
+		var webpackComments []js_ast.Comment
 		args := []js_ast.Expr{}
 		var closeParenLoc logger.Loc
 		var isMultiLine bool
 
 		if p.lexer.Token == js_lexer.TOpenParen {
-			args, closeParenLoc, isMultiLine = p.parseCallArgs()
+			webpackComments, args, closeParenLoc, isMultiLine = p.parseCallArgs()
 		}
 
 		return js_ast.Expr{Loc: loc, Data: &js_ast.ENew{
-			Target:        target,
-			Args:          args,
-			CloseParenLoc: closeParenLoc,
-			IsMultiLine:   isMultiLine,
+			Target:          target,
+			Args:            args,
+			WebpackComments: webpackComments,
+			CloseParenLoc:   closeParenLoc,
+			IsMultiLine:     isMultiLine,
 		}}
 
 	case js_lexer.TOpenBracket:
@@ -3673,10 +3746,10 @@ func (p *parser) parseImportExpr(loc logger.Loc, level js_ast.L) js_ast.Expr {
 	oldAllowIn := p.allowIn
 	p.allowIn = true
 
-	p.lexer.PreserveAllCommentsBefore = true
+	var webpackComments []js_ast.Comment
+	oldWebpackComments := p.lexer.WebpackComments
+	p.lexer.WebpackComments = &webpackComments
 	p.lexer.Expect(js_lexer.TOpenParen)
-	comments := p.lexer.CommentsToPreserveBefore
-	p.lexer.PreserveAllCommentsBefore = false
 
 	value := p.parseExpr(js_ast.LComma)
 	var optionsOrNil js_ast.Expr
@@ -3696,13 +3769,14 @@ func (p *parser) parseImportExpr(loc logger.Loc, level js_ast.L) js_ast.Expr {
 		}
 	}
 
+	p.lexer.WebpackComments = oldWebpackComments
 	p.lexer.Expect(js_lexer.TCloseParen)
 
 	p.allowIn = oldAllowIn
 	return js_ast.Expr{Loc: loc, Data: &js_ast.EImportCall{
-		Expr:                    value,
-		OptionsOrNil:            optionsOrNil,
-		LeadingInteriorComments: comments,
+		Expr:            value,
+		OptionsOrNil:    optionsOrNil,
+		WebpackComments: webpackComments,
 	}}
 }
 
@@ -3838,7 +3912,7 @@ func (p *parser) parseSuffix(left js_ast.Expr, level js_ast.L, errors *deferredE
 				if level >= js_ast.LCall {
 					return left
 				}
-				args, closeParenLoc, isMultiLine := p.parseCallArgs()
+				_, args, closeParenLoc, isMultiLine := p.parseCallArgs()
 				left = js_ast.Expr{Loc: left.Loc, Data: &js_ast.ECall{
 					Target:        left,
 					Args:          args,
@@ -3860,7 +3934,7 @@ func (p *parser) parseSuffix(left js_ast.Expr, level js_ast.L, errors *deferredE
 				if level >= js_ast.LCall {
 					return left
 				}
-				args, closeParenLoc, isMultiLine := p.parseCallArgs()
+				_, args, closeParenLoc, isMultiLine := p.parseCallArgs()
 				left = js_ast.Expr{Loc: left.Loc, Data: &js_ast.ECall{
 					Target:        left,
 					Args:          args,
@@ -3962,7 +4036,7 @@ func (p *parser) parseSuffix(left js_ast.Expr, level js_ast.L, errors *deferredE
 			if level >= js_ast.LCall {
 				return left
 			}
-			args, closeParenLoc, isMultiLine := p.parseCallArgs()
+			_, args, closeParenLoc, isMultiLine := p.parseCallArgs()
 			left = js_ast.Expr{Loc: left.Loc, Data: &js_ast.ECall{
 				Target:        left,
 				Args:          args,
@@ -4405,8 +4479,8 @@ func (p *parser) parseSuffix(left js_ast.Expr, level js_ast.L, errors *deferredE
 			left = js_ast.Expr{Loc: left.Loc, Data: &js_ast.EBinary{Op: js_ast.BinOpInstanceof, Left: left, Right: p.parseExpr(js_ast.LCompare)}}
 
 		default:
-			// Handle the TypeScript "as" operator
-			if p.options.ts.Parse && level < js_ast.LCompare && !p.lexer.HasNewlineBefore && p.lexer.IsContextualKeyword("as") {
+			// Handle the TypeScript "as"/"satisfies" operator
+			if p.options.ts.Parse && level < js_ast.LCompare && !p.lexer.HasNewlineBefore && (p.lexer.IsContextualKeyword("as") || p.lexer.IsContextualKeyword("satisfies")) {
 				p.lexer.Next()
 				p.skipTypeScriptType(js_ast.LLowest)
 
@@ -4473,11 +4547,13 @@ func (p *parser) parseExprOrLetStmt(opts parseStmtOpts) (js_ast.Expr, js_ast.Stm
 	return p.parseSuffix(expr, js_ast.LLowest, nil, 0), js_ast.Stmt{}, nil
 }
 
-func (p *parser) parseCallArgs() (args []js_ast.Expr, closeParenLoc logger.Loc, isMultiLine bool) {
+func (p *parser) parseCallArgs() (webpackComments []js_ast.Comment, args []js_ast.Expr, closeParenLoc logger.Loc, isMultiLine bool) {
 	// Allow "in" inside call arguments
 	oldAllowIn := p.allowIn
 	p.allowIn = true
 
+	oldWebpackComments := p.lexer.WebpackComments
+	p.lexer.WebpackComments = &webpackComments
 	p.lexer.Expect(js_lexer.TOpenParen)
 
 	for p.lexer.Token != js_lexer.TCloseParen {
@@ -4508,6 +4584,7 @@ func (p *parser) parseCallArgs() (args []js_ast.Expr, closeParenLoc logger.Loc, 
 		isMultiLine = true
 	}
 	closeParenLoc = p.lexer.Loc()
+	p.lexer.WebpackComments = oldWebpackComments
 	p.lexer.Expect(js_lexer.TCloseParen)
 	p.allowIn = oldAllowIn
 	return
@@ -4608,9 +4685,14 @@ func (p *parser) parseJSXElement(loc logger.Loc) js_ast.Expr {
 	// Parse attributes
 	var previousStringWithBackslashLoc logger.Loc
 	properties := []js_ast.Property{}
+	isSingleLine := true
 	if startTagOrNil.Data != nil {
 	parseAttributes:
 		for {
+			if p.lexer.HasNewlineBefore {
+				isSingleLine = false
+			}
+
 			switch p.lexer.Token {
 			case js_lexer.TIdentifier:
 				// Parse the key
@@ -4749,9 +4831,10 @@ func (p *parser) parseJSXElement(loc logger.Loc) js_ast.Expr {
 			p.lexer.Expected(js_lexer.TGreaterThan)
 		}
 		return js_ast.Expr{Loc: loc, Data: &js_ast.EJSXElement{
-			TagOrNil:   startTagOrNil,
-			Properties: properties,
-			CloseLoc:   closeLoc,
+			TagOrNil:        startTagOrNil,
+			Properties:      properties,
+			CloseLoc:        closeLoc,
+			IsTagSingleLine: isSingleLine,
 		}}
 	}
 
@@ -4841,10 +4924,11 @@ func (p *parser) parseJSXElement(loc logger.Loc) js_ast.Expr {
 			}
 
 			return js_ast.Expr{Loc: loc, Data: &js_ast.EJSXElement{
-				TagOrNil:   startTagOrNil,
-				Properties: properties,
-				Children:   children,
-				CloseLoc:   lessThanLoc,
+				TagOrNil:        startTagOrNil,
+				Properties:      properties,
+				Children:        children,
+				CloseLoc:        lessThanLoc,
+				IsTagSingleLine: isSingleLine,
 			}}
 
 		default:
@@ -5809,7 +5893,8 @@ func (p *parser) parseLabelName() *js_ast.LocRef {
 	return &name
 }
 
-func (p *parser) parsePath() (logger.Loc, string, *[]ast.AssertEntry) {
+func (p *parser) parsePath() (logger.Loc, string, *[]ast.AssertEntry, ast.ImportRecordFlags) {
+	var flags ast.ImportRecordFlags
 	pathLoc := p.lexer.Loc()
 	pathText := helpers.UTF16ToString(p.lexer.StringLiteral())
 	if p.lexer.Token == js_lexer.TNoSubstitutionTemplateLiteral {
@@ -5864,6 +5949,11 @@ func (p *parser) parsePath() (logger.Loc, string, *[]ast.AssertEntry) {
 				PreferQuotedKey: preferQuotedKey,
 			})
 
+			// Using "assert: { type: 'json' }" triggers special behavior
+			if helpers.UTF16EqualsString(key, "type") && helpers.UTF16EqualsString(value, "json") {
+				flags |= ast.AssertTypeJSON
+			}
+
 			if p.lexer.Token != js_lexer.TComma {
 				break
 			}
@@ -5874,7 +5964,7 @@ func (p *parser) parsePath() (logger.Loc, string, *[]ast.AssertEntry) {
 		assertions = &entries
 	}
 
-	return pathLoc, pathText, assertions
+	return pathLoc, pathText, assertions, flags
 }
 
 // This assumes the "function" token has already been parsed
@@ -6263,6 +6353,7 @@ func (p *parser) parseStmt(opts parseStmtOpts) js_ast.Stmt {
 			var pathLoc logger.Loc
 			var pathText string
 			var assertions *[]ast.AssertEntry
+			var flags ast.ImportRecordFlags
 
 			if p.lexer.IsContextualKeyword("as") {
 				// "export * as ns from 'path'"
@@ -6272,15 +6363,15 @@ func (p *parser) parseStmt(opts parseStmtOpts) js_ast.Stmt {
 				alias = &js_ast.ExportStarAlias{Loc: p.lexer.Loc(), OriginalName: name.String}
 				p.lexer.Next()
 				p.lexer.ExpectContextualKeyword("from")
-				pathLoc, pathText, assertions = p.parsePath()
+				pathLoc, pathText, assertions, flags = p.parsePath()
 			} else {
 				// "export * from 'path'"
 				p.lexer.ExpectContextualKeyword("from")
-				pathLoc, pathText, assertions = p.parsePath()
+				pathLoc, pathText, assertions, flags = p.parsePath()
 				name := js_ast.GenerateNonUniqueNameFromPath(pathText) + "_star"
 				namespaceRef = p.storeNameInRef(js_lexer.MaybeSubstring{String: name})
 			}
-			importRecordIndex := p.addImportRecord(ast.ImportStmt, pathLoc, pathText, assertions)
+			importRecordIndex := p.addImportRecord(ast.ImportStmt, pathLoc, pathText, assertions, flags)
 
 			// Export-star statements anywhere in the file disable top-level const
 			// local prefix because import cycles can be used to trigger TDZ
@@ -6302,8 +6393,8 @@ func (p *parser) parseStmt(opts parseStmtOpts) js_ast.Stmt {
 			if p.lexer.IsContextualKeyword("from") {
 				// "export {} from 'path'"
 				p.lexer.Next()
-				pathLoc, pathText, assertions := p.parsePath()
-				importRecordIndex := p.addImportRecord(ast.ImportStmt, pathLoc, pathText, assertions)
+				pathLoc, pathText, assertions, flags := p.parsePath()
+				importRecordIndex := p.addImportRecord(ast.ImportStmt, pathLoc, pathText, assertions, flags)
 				name := "import_" + js_ast.GenerateNonUniqueNameFromPath(pathText)
 				namespaceRef := p.storeNameInRef(js_lexer.MaybeSubstring{String: name})
 
@@ -6902,7 +6993,7 @@ func (p *parser) parseStmt(opts parseStmtOpts) js_ast.Stmt {
 			return js_ast.Stmt{}
 		}
 
-		pathLoc, pathText, assertions := p.parsePath()
+		pathLoc, pathText, assertions, flags := p.parsePath()
 		p.lexer.ExpectOrInsertSemicolon()
 
 		// If TypeScript's "preserveValueImports": true setting is active, TypeScript's
@@ -6931,10 +7022,10 @@ func (p *parser) parseStmt(opts parseStmtOpts) js_ast.Stmt {
 			stmt.Items = nil
 		}
 
-		stmt.ImportRecordIndex = p.addImportRecord(ast.ImportStmt, pathLoc, pathText, assertions)
 		if wasOriginallyBareImport {
-			p.importRecords[stmt.ImportRecordIndex].Flags |= ast.WasOriginallyBareImport
+			flags |= ast.WasOriginallyBareImport
 		}
+		stmt.ImportRecordIndex = p.addImportRecord(ast.ImportStmt, pathLoc, pathText, assertions, flags)
 
 		if stmt.StarNameLoc != nil {
 			name := p.loadNameFromRef(stmt.NamespaceRef)
@@ -6968,7 +7059,10 @@ func (p *parser) parseStmt(opts parseStmtOpts) js_ast.Stmt {
 		}
 
 		// Track the items for this namespace
-		p.importItemsForNamespace[stmt.NamespaceRef] = itemRefs
+		p.importItemsForNamespace[stmt.NamespaceRef] = namespaceImportItems{
+			entries:           itemRefs,
+			importRecordIndex: stmt.ImportRecordIndex,
+		}
 
 		// Import statements anywhere in the file disable top-level const
 		// local prefix because import cycles can be used to trigger TDZ
@@ -7203,13 +7297,14 @@ func extractDeclsForBinding(binding js_ast.Binding, decls []js_ast.Decl) []js_as
 	return decls
 }
 
-func (p *parser) addImportRecord(kind ast.ImportKind, loc logger.Loc, text string, assertions *[]ast.AssertEntry) uint32 {
+func (p *parser) addImportRecord(kind ast.ImportKind, loc logger.Loc, text string, assertions *[]ast.AssertEntry, flags ast.ImportRecordFlags) uint32 {
 	index := uint32(len(p.importRecords))
 	p.importRecords = append(p.importRecords, ast.ImportRecord{
 		Kind:       kind,
 		Range:      p.source.RangeOfString(loc),
 		Path:       logger.Path{Text: text},
 		Assertions: assertions,
+		Flags:      flags,
 	})
 	return index
 }
@@ -7249,7 +7344,7 @@ func (p *parser) parseStmtsUpTo(end js_lexer.T, opts parseStmtOpts) []js_ast.Stm
 
 	for {
 		// Preserve some statement-level comments
-		comments := p.lexer.CommentsToPreserveBefore
+		comments := p.lexer.LegalCommentsBeforeToken
 		if len(comments) > 0 {
 			for _, comment := range comments {
 				stmts = append(stmts, js_ast.Stmt{
@@ -8467,17 +8562,30 @@ func (p *parser) substituteSingleUseSymbolInExpr(
 				return expr, status
 			}
 		} else if !p.exprCanBeRemovedIfUnused(e.Left) {
-			// Do not reorder past a side effect
+			// Do not reorder past a side effect in an assignment target, as that may
+			// change the replacement value. For example, "fn()" may change "a" here:
+			//
+			//   let a = 1;
+			//   foo[fn()] = a;
+			//
+			return expr, substituteFailure
+		} else if e.Op.BinaryAssignTarget() == js_ast.AssignTargetUpdate && !replacementCanBeRemoved {
+			// If this is a read-modify-write assignment and the replacement has side
+			// effects, don't reorder it past the assignment target. The assignment
+			// target is being read so it may be changed by the side effect. For
+			// example, "fn()" may change "foo" here:
+			//
+			//   let a = fn();
+			//   foo += a;
+			//
 			return expr, substituteFailure
 		}
 
-		// Do not substitute our unconditionally-executed value into a branching
-		// short-circuit operator unless the value itself has no side effects
-		if replacementCanBeRemoved || !e.Op.IsShortCircuit() {
-			if value, status := p.substituteSingleUseSymbolInExpr(e.Right, ref, replacement, replacementCanBeRemoved); status != substituteContinue {
-				e.Right = value
-				return expr, status
-			}
+		// If we get here then it should be safe to attempt to substitute the
+		// replacement past the left operand into the right operand.
+		if value, status := p.substituteSingleUseSymbolInExpr(e.Right, ref, replacement, replacementCanBeRemoved); status != substituteContinue {
+			e.Right = value
+			return expr, status
 		}
 
 	case *js_ast.EIf:
@@ -8609,6 +8717,11 @@ func (p *parser) substituteSingleUseSymbolInExpr(
 	// If both the replacement and this expression have no observable side
 	// effects, then we can reorder the replacement past this expression
 	if replacementCanBeRemoved && p.exprCanBeRemovedIfUnused(expr) {
+		return expr, substituteContinue
+	}
+
+	// We can always reorder past primitive values
+	if isPrimitiveLiteral(expr.Data) {
 		return expr, substituteContinue
 	}
 
@@ -11025,7 +11138,7 @@ func (p *parser) instantiateDefineExpr(loc logger.Loc, expr config.DefineExpr, o
 
 	// Build up a chain of property access expressions for subsequent parts
 	for _, part := range parts {
-		if expr, ok := p.maybeRewritePropertyAccess(loc, js_ast.AssignTargetNone, false, value, part, loc, false, false); ok {
+		if expr, ok := p.maybeRewritePropertyAccess(loc, js_ast.AssignTargetNone, false, value, part, loc, false, false, false); ok {
 			value = expr
 		} else if p.isMangledProp(part) {
 			value = js_ast.Expr{Loc: loc, Data: &js_ast.EIndex{
@@ -11237,6 +11350,7 @@ func (p *parser) maybeRewritePropertyAccess(
 	name string,
 	nameLoc logger.Loc,
 	isCallTarget bool,
+	isTemplateTag bool,
 	preferQuotedKey bool,
 ) (js_ast.Expr, bool) {
 	if id, ok := target.Data.(*js_ast.EIdentifier); ok {
@@ -11247,14 +11361,27 @@ func (p *parser) maybeRewritePropertyAccess(
 		if p.options.mode == config.ModeBundle {
 			if importItems, ok := p.importItemsForNamespace[id.Ref]; ok {
 				// Cache translation so each property access resolves to the same import
-				item, ok := importItems[name]
+				item, ok := importItems.entries[name]
 				if !ok {
+					// Replace non-default imports with "undefined" for standard JSON modules
+					if record := &p.importRecords[importItems.importRecordIndex]; (record.Flags&ast.AssertTypeJSON) != 0 && name != "default" {
+						kind := logger.Warning
+						if p.suppressWarningsAboutWeirdCode {
+							kind = logger.Debug
+						}
+						p.log.AddIDWithNotes(logger.MsgID_JS_AssertTypeJSON, kind, &p.tracker, js_lexer.RangeOfIdentifier(p.source, nameLoc),
+							fmt.Sprintf("Non-default import %q is undefined with a standard JSON module", name),
+							p.notesForAssertTypeJSON(record, name))
+						p.ignoreUsage(id.Ref)
+						return js_ast.Expr{Loc: loc, Data: js_ast.EUndefinedShared}, true
+					}
+
 					// Generate a new import item symbol in the module scope
 					item = js_ast.LocRef{Loc: nameLoc, Ref: p.newSymbol(js_ast.SymbolImport, name)}
 					p.moduleScope.Generated = append(p.moduleScope.Generated, item.Ref)
 
 					// Link the namespace import and the import item together
-					importItems[name] = item
+					importItems.entries[name] = item
 					p.isImportItem[item.Ref] = true
 
 					symbol := &p.symbols[item.Ref.InnerIndex]
@@ -11311,7 +11438,7 @@ func (p *parser) maybeRewritePropertyAccess(
 	}
 
 	// Attempt to simplify statically-determined object literal property accesses
-	if !isCallTarget && p.options.minifySyntax && assignTarget == js_ast.AssignTargetNone {
+	if !isCallTarget && !isTemplateTag && p.options.minifySyntax && assignTarget == js_ast.AssignTargetNone {
 		if object, ok := target.Data.(*js_ast.EObject); ok {
 			var replace js_ast.Expr
 			hasProtoNull := false
@@ -12164,6 +12291,15 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 		if p.options.unsupportedJSFeatures.Has(compat.ImportMeta) {
 			r := logger.Range{Loc: expr.Loc, Len: e.RangeLen}
 			p.markSyntaxFeature(compat.ImportMeta, r)
+		} else if p.options.mode != config.ModePassThrough && !p.options.outputFormat.KeepES6ImportExportSyntax() {
+			r := logger.Range{Loc: expr.Loc, Len: e.RangeLen}
+			kind := logger.Warning
+			if p.suppressWarningsAboutWeirdCode || p.fnOrArrowDataVisit.tryBodyCount > 0 {
+				kind = logger.Debug
+			}
+			p.log.AddIDWithNotes(logger.MsgID_JS_EmptyImportMeta, kind, &p.tracker, r, fmt.Sprintf(
+				"\"import.meta\" is not available with the %q output format and will be empty", p.options.outputFormat.String()),
+				[]logger.MsgData{{Text: "You need to set the output format to \"esm\" for \"import.meta\" to work correctly."}})
 		}
 
 		// Convert "import.meta" to a variable if it's not supported in the output format
@@ -12227,12 +12363,11 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 						isCallTarget:   isCallTarget,
 						isDeleteTarget: isDeleteTarget,
 					})
-
-					// Don't substitute an identifier for a non-identifier if this is an
-					// assignment target, since it'll cause a syntax error
-					if _, ok := new.Data.(*js_ast.EIdentifier); in.assignTarget == js_ast.AssignTargetNone || ok {
+					if in.assignTarget == js_ast.AssignTargetNone || defineValueCanBeUsedInAssignTarget(new.Data) {
 						p.ignoreUsage(e.Ref)
 						return new, exprOut{}
+					} else {
+						p.logAssignToDefine(js_lexer.RangeOfIdentifier(p.source, expr.Loc), name, js_ast.Expr{})
 					}
 				}
 
@@ -12375,7 +12510,8 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 				args := []js_ast.Expr{e.TagOrNil}
 				if len(e.Properties) > 0 {
 					args = append(args, p.lowerObjectSpread(propsLoc, &js_ast.EObject{
-						Properties: e.Properties,
+						Properties:   e.Properties,
+						IsSingleLine: e.IsTagSingleLine,
 					}))
 				} else {
 					args = append(args, js_ast.Expr{Loc: propsLoc, Data: js_ast.ENullShared})
@@ -12399,6 +12535,7 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 					Target:        target,
 					Args:          args,
 					CloseParenLoc: e.CloseLoc,
+					IsMultiLine:   !e.IsTagSingleLine,
 
 					// Enable tree shaking
 					CanBeUnwrappedIfUnused: !p.options.ignoreDCEAnnotations && !p.options.jsx.SideEffects,
@@ -12477,7 +12614,8 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 				}
 
 				args = append(args, p.lowerObjectSpread(propsLoc, &js_ast.EObject{
-					Properties: properties,
+					Properties:   properties,
+					IsSingleLine: e.IsTagSingleLine,
 				}))
 
 				// "key"
@@ -12527,6 +12665,7 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 					Target:        p.importJSXSymbol(expr.Loc, jsx),
 					Args:          args,
 					CloseParenLoc: e.CloseLoc,
+					IsMultiLine:   !e.IsTagSingleLine,
 
 					// Enable tree shaking
 					CanBeUnwrappedIfUnused: !p.options.ignoreDCEAnnotations && !p.options.jsx.SideEffects,
@@ -12576,7 +12715,7 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 
 		// Lower tagged template literals that include "</script"
 		// since we won't be able to escape it without lowering it
-		if !shouldLowerTemplateLiteral && e.TagOrNil.Data != nil {
+		if !p.options.unsupportedJSFeatures.Has(compat.InlineScript) && !shouldLowerTemplateLiteral && e.TagOrNil.Data != nil {
 			if containsClosingScriptTag(e.HeadRaw) {
 				shouldLowerTemplateLiteral = true
 			} else {
@@ -12618,8 +12757,7 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 			break
 		}
 
-		isCallTarget := e == p.callTarget
-		isTemplateTag := e == p.templateTag
+		isCallTargetOrTemplateTag := e == p.callTarget || e == p.templateTag
 		isStmtExpr := e == p.stmtExprValue
 		wasAnonymousNamedExpr := p.isAnonymousNamedExpr(e.Right)
 		oldSilenceWarningAboutThisBeingUndefined := p.fnOnlyDataVisit.silenceMessageAboutThisBeingUndefined
@@ -12707,7 +12845,7 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 					// "(1, fn)()" => "fn()"
 					// "(1, this.fn)" => "this.fn"
 					// "(1, this.fn)()" => "(0, this.fn)()"
-					if (isCallTarget || isTemplateTag) && hasValueForThisInCall(e.Right) {
+					if isCallTargetOrTemplateTag && hasValueForThisInCall(e.Right) {
 						return js_ast.JoinWithComma(js_ast.Expr{Loc: e.Left.Loc, Data: &js_ast.ENumber{}}, e.Right), exprOut{}
 					}
 					return e.Right, exprOut{}
@@ -12810,7 +12948,7 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 					// "(null ?? fn)()" => "fn()"
 					// "(null ?? this.fn)" => "this.fn"
 					// "(null ?? this.fn)()" => "(0, this.fn)()"
-					if isCallTarget && hasValueForThisInCall(e.Right) {
+					if isCallTargetOrTemplateTag && hasValueForThisInCall(e.Right) {
 						return js_ast.JoinWithComma(js_ast.Expr{Loc: e.Left.Loc, Data: &js_ast.ENumber{}}, e.Right), exprOut{}
 					}
 
@@ -12838,7 +12976,7 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 					// "(0 || fn)()" => "fn()"
 					// "(0 || this.fn)" => "this.fn"
 					// "(0 || this.fn)()" => "(0, this.fn)()"
-					if isCallTarget && hasValueForThisInCall(e.Right) {
+					if isCallTargetOrTemplateTag && hasValueForThisInCall(e.Right) {
 						return js_ast.JoinWithComma(js_ast.Expr{Loc: e.Left.Loc, Data: &js_ast.ENumber{}}, e.Right), exprOut{}
 					}
 					return e.Right, exprOut{}
@@ -12868,7 +13006,7 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 					// "(1 && fn)()" => "fn()"
 					// "(1 && this.fn)" => "this.fn"
 					// "(1 && this.fn)()" => "(0, this.fn)()"
-					if isCallTarget && hasValueForThisInCall(e.Right) {
+					if isCallTargetOrTemplateTag && hasValueForThisInCall(e.Right) {
 						return js_ast.JoinWithComma(js_ast.Expr{Loc: e.Left.Loc, Data: &js_ast.ENumber{}}, e.Right), exprOut{}
 					}
 					return e.Right, exprOut{}
@@ -13187,6 +13325,7 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 	case *js_ast.EDot:
 		isDeleteTarget := e == p.deleteTarget
 		isCallTarget := e == p.callTarget
+		isTemplateTag := e == p.templateTag
 
 		// Check both user-specified defines and known globals
 		if defines, ok := p.options.defines.DotDefines[e.Name]; ok {
@@ -13194,11 +13333,19 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 				if p.isDotOrIndexDefineMatch(expr, define.Parts) {
 					// Substitute user-specified defines
 					if define.Data.DefineExpr != nil {
-						return p.instantiateDefineExpr(expr.Loc, *define.Data.DefineExpr, identifierOpts{
+						new := p.instantiateDefineExpr(expr.Loc, *define.Data.DefineExpr, identifierOpts{
 							assignTarget:   in.assignTarget,
 							isCallTarget:   isCallTarget,
 							isDeleteTarget: isDeleteTarget,
-						}), exprOut{}
+						})
+						if in.assignTarget == js_ast.AssignTargetNone || defineValueCanBeUsedInAssignTarget(new.Data) {
+							// Note: We don't need to "ignoreRef" on the underlying identifier
+							// because we have only parsed it but not visited it yet
+							return new, exprOut{}
+						} else {
+							r := logger.Range{Loc: expr.Loc, Len: js_lexer.RangeOfIdentifier(p.source, e.NameLoc).End() - expr.Loc.Start}
+							p.logAssignToDefine(r, "", expr)
+						}
 					}
 
 					// Copy the side effect flags over in case this expression is unused
@@ -13241,7 +13388,18 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 			!isCallTarget && p.shouldLowerSuperPropertyAccess(e.Target) {
 			// "super.foo" => "__superGet('foo')"
 			key := js_ast.Expr{Loc: e.NameLoc, Data: &js_ast.EString{Value: helpers.StringToUTF16(e.Name)}}
-			return p.lowerSuperPropertyGet(expr.Loc, key), exprOut{}
+			value := p.lowerSuperPropertyGet(expr.Loc, key)
+			if isTemplateTag {
+				value.Data = &js_ast.ECall{
+					Target: js_ast.Expr{Loc: value.Loc, Data: &js_ast.EDot{
+						Target:  value,
+						Name:    "bind",
+						NameLoc: value.Loc,
+					}},
+					Args: []js_ast.Expr{{Loc: value.Loc, Data: js_ast.EThisShared}},
+				}
+			}
+			return value, exprOut{}
 		}
 
 		// Lower optional chaining if we're the top of the chain
@@ -13263,7 +13421,7 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 		}
 		if e.OptionalChain == js_ast.OptionalChainNone {
 			if value, ok := p.maybeRewritePropertyAccess(expr.Loc, in.assignTarget,
-				isDeleteTarget, e.Target, e.Name, e.NameLoc, isCallTarget, false); ok {
+				isDeleteTarget, e.Target, e.Name, e.NameLoc, isCallTarget, isTemplateTag, false); ok {
 				return value, out
 			}
 		}
@@ -13281,11 +13439,23 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 					if p.isDotOrIndexDefineMatch(expr, define.Parts) {
 						// Substitute user-specified defines
 						if define.Data.DefineExpr != nil {
-							return p.instantiateDefineExpr(expr.Loc, *define.Data.DefineExpr, identifierOpts{
+							new := p.instantiateDefineExpr(expr.Loc, *define.Data.DefineExpr, identifierOpts{
 								assignTarget:   in.assignTarget,
 								isCallTarget:   isCallTarget,
 								isDeleteTarget: isDeleteTarget,
-							}), exprOut{}
+							})
+							if in.assignTarget == js_ast.AssignTargetNone || defineValueCanBeUsedInAssignTarget(new.Data) {
+								// Note: We don't need to "ignoreRef" on the underlying identifier
+								// because we have only parsed it but not visited it yet
+								return new, exprOut{}
+							} else {
+								r := logger.Range{Loc: expr.Loc}
+								afterIndex := logger.Loc{Start: p.source.RangeOfString(e.Index.Loc).End()}
+								if closeBracket := p.source.RangeOfOperatorAfter(afterIndex, "]"); closeBracket.Len > 0 {
+									r.Len = closeBracket.End() - r.Loc.Start
+								}
+								p.logAssignToDefine(r, "", expr)
+							}
 						}
 
 						// Copy the side effect flags over in case this expression is unused
@@ -13307,6 +13477,9 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 				dot := p.dotOrMangledPropParse(e.Target, js_lexer.MaybeSubstring{String: helpers.UTF16ToString(str.Value)}, e.Index.Loc, e.OptionalChain, wasOriginallyIndex)
 				if isCallTarget {
 					p.callTarget = dot
+				}
+				if isTemplateTag {
+					p.templateTag = dot
 				}
 				if isDeleteTarget {
 					p.deleteTarget = dot
@@ -13377,7 +13550,18 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 		if e.OptionalChain == js_ast.OptionalChainNone && in.assignTarget == js_ast.AssignTargetNone &&
 			!isCallTarget && p.shouldLowerSuperPropertyAccess(e.Target) {
 			// "super[foo]" => "__superGet(foo)"
-			return p.lowerSuperPropertyGet(expr.Loc, e.Index), exprOut{}
+			value := p.lowerSuperPropertyGet(expr.Loc, e.Index)
+			if isTemplateTag {
+				value.Data = &js_ast.ECall{
+					Target: js_ast.Expr{Loc: value.Loc, Data: &js_ast.EDot{
+						Target:  value,
+						Name:    "bind",
+						NameLoc: value.Loc,
+					}},
+					Args: []js_ast.Expr{{Loc: value.Loc, Data: js_ast.EThisShared}},
+				}
+			}
+			return value, exprOut{}
 		}
 
 		// Lower optional chaining if we're the top of the chain
@@ -13400,7 +13584,7 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 		if str, ok := e.Index.Data.(*js_ast.EString); ok && e.OptionalChain == js_ast.OptionalChainNone {
 			preferQuotedKey := !p.options.minifySyntax
 			if value, ok := p.maybeRewritePropertyAccess(expr.Loc, in.assignTarget, isDeleteTarget,
-				e.Target, helpers.UTF16ToString(str.Value), e.Index.Loc, isCallTarget, preferQuotedKey); ok {
+				e.Target, helpers.UTF16ToString(str.Value), e.Index.Loc, isCallTarget, isTemplateTag, preferQuotedKey); ok {
 				return value, out
 			}
 		}
@@ -13877,6 +14061,7 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 		e.Expr = p.visitExpr(e.Expr)
 
 		var assertions *[]ast.AssertEntry
+		var flags ast.ImportRecordFlags
 		if e.OptionsOrNil.Data != nil {
 			e.OptionsOrNil = p.visitExpr(e.OptionsOrNil)
 
@@ -13907,6 +14092,9 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 													ValueLoc:        p.ValueOrNil.Loc,
 													PreferQuotedKey: p.Flags.Has(js_ast.PropertyPreferQuotedKey),
 												})
+												if helpers.UTF16EqualsString(key.Value, "type") && helpers.UTF16EqualsString(value.Value, "json") {
+													flags |= ast.AssertTypeJSON
+												}
 												continue
 											} else {
 												why = fmt.Sprintf("the value for the property %q was not a string literal",
@@ -13987,7 +14175,7 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 					return js_ast.Expr{Loc: arg.Loc, Data: js_ast.ENullShared}
 				}
 
-				importRecordIndex := p.addImportRecord(ast.ImportDynamic, arg.Loc, helpers.UTF16ToString(str.Value), assertions)
+				importRecordIndex := p.addImportRecord(ast.ImportDynamic, arg.Loc, helpers.UTF16ToString(str.Value), assertions, flags)
 				if isAwaitTarget && p.fnOrArrowDataVisit.tryBodyCount != 0 {
 					record := &p.importRecords[importRecordIndex]
 					record.Flags |= ast.HandlesImportErrors
@@ -13999,8 +14187,8 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 				}
 				p.importRecordsForCurrentPart = append(p.importRecordsForCurrentPart, importRecordIndex)
 				return js_ast.Expr{Loc: expr.Loc, Data: &js_ast.EImportString{
-					ImportRecordIndex:       importRecordIndex,
-					LeadingInteriorComments: e.LeadingInteriorComments,
+					ImportRecordIndex: importRecordIndex,
+					WebpackComments:   e.WebpackComments,
 				}}
 			}
 
@@ -14053,9 +14241,9 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 			}
 
 			return js_ast.Expr{Loc: expr.Loc, Data: &js_ast.EImportCall{
-				Expr:                    arg,
-				OptionsOrNil:            e.OptionsOrNil,
-				LeadingInteriorComments: e.LeadingInteriorComments,
+				Expr:            arg,
+				OptionsOrNil:    e.OptionsOrNil,
+				WebpackComments: e.WebpackComments,
 			}}
 		}), exprOut{}
 
@@ -14150,15 +14338,19 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 									case *js_ast.EString:
 										// "hydrateRuntimeState(JSON.parse(<string literal>))"
 										source := logger.Source{KeyPath: p.source.KeyPath, Contents: helpers.UTF16ToString(a.Value)}
-										log := logger.NewStringInJSLog(p.log, &p.tracker, arg.Loc, source.Contents)
+										stringInJSTable := logger.GenerateStringInJSTable(p.source.Contents, arg.Loc, source.Contents)
+										log := logger.NewStringInJSLog(p.log, &p.tracker, stringInJSTable)
 										p.manifestForYarnPnP, _ = ParseJSON(log, source, JSONOptions{})
+										remapExprLocsInJSON(&p.manifestForYarnPnP, stringInJSTable)
 
 									case *js_ast.EIdentifier:
 										// "hydrateRuntimeState(JSON.parse(<identifier>))"
 										if data, ok := p.stringLocalsForYarnPnP[a.Ref]; ok {
 											source := logger.Source{KeyPath: p.source.KeyPath, Contents: helpers.UTF16ToString(data.value)}
-											log := logger.NewStringInJSLog(p.log, &p.tracker, data.loc, source.Contents)
+											stringInJSTable := logger.GenerateStringInJSTable(p.source.Contents, data.loc, source.Contents)
+											log := logger.NewStringInJSLog(p.log, &p.tracker, stringInJSTable)
 											p.manifestForYarnPnP, _ = ParseJSON(log, source, JSONOptions{})
+											remapExprLocsInJSON(&p.manifestForYarnPnP, stringInJSTable)
 										}
 									}
 								}
@@ -14248,7 +14440,7 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 								return js_ast.Expr{Loc: arg.Loc, Data: js_ast.ENullShared}
 							}
 
-							importRecordIndex := p.addImportRecord(ast.ImportRequireResolve, e.Args[0].Loc, helpers.UTF16ToString(str.Value), nil)
+							importRecordIndex := p.addImportRecord(ast.ImportRequireResolve, e.Args[0].Loc, helpers.UTF16ToString(str.Value), nil, 0)
 							if p.fnOrArrowDataVisit.tryBodyCount != 0 {
 								record := &p.importRecords[importRecordIndex]
 								record.Flags |= ast.HandlesImportErrors
@@ -14360,7 +14552,7 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 									return js_ast.Expr{Loc: expr.Loc, Data: js_ast.ENullShared}
 								}
 
-								importRecordIndex := p.addImportRecord(ast.ImportRequire, arg.Loc, helpers.UTF16ToString(str.Value), nil)
+								importRecordIndex := p.addImportRecord(ast.ImportRequire, arg.Loc, helpers.UTF16ToString(str.Value), nil, 0)
 								if p.fnOrArrowDataVisit.tryBodyCount != 0 {
 									record := &p.importRecords[importRecordIndex]
 									record.Flags |= ast.HandlesImportErrors
@@ -14521,6 +14713,25 @@ func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprO
 	return expr, exprOut{}
 }
 
+func remapExprLocsInJSON(expr *js_ast.Expr, table []logger.StringInJSTableEntry) {
+	expr.Loc = logger.RemapStringInJSLoc(table, expr.Loc)
+
+	switch e := expr.Data.(type) {
+	case *js_ast.EArray:
+		e.CloseBracketLoc = logger.RemapStringInJSLoc(table, e.CloseBracketLoc)
+		for i := range e.Items {
+			remapExprLocsInJSON(&e.Items[i], table)
+		}
+
+	case *js_ast.EObject:
+		e.CloseBraceLoc = logger.RemapStringInJSLoc(table, e.CloseBraceLoc)
+		for i := range e.Properties {
+			remapExprLocsInJSON(&e.Properties[i].Key, table)
+			remapExprLocsInJSON(&e.Properties[i].ValueOrNil, table)
+		}
+	}
+}
+
 func (p *parser) convertSymbolUseToCall(ref js_ast.Ref, isSingleNonSpreadArgCall bool) {
 	// Remove the normal symbol use
 	use := p.symbolUses[ref]
@@ -14545,7 +14756,7 @@ func (p *parser) convertSymbolUseToCall(ref js_ast.Ref, isSingleNonSpreadArgCall
 
 func (p *parser) warnAboutImportNamespaceCall(target js_ast.Expr, kind importNamespaceCallKind) {
 	if p.options.outputFormat != config.FormatPreserve {
-		if id, ok := target.Data.(*js_ast.EIdentifier); ok && p.importItemsForNamespace[id.Ref] != nil {
+		if id, ok := target.Data.(*js_ast.EIdentifier); ok && p.importItemsForNamespace[id.Ref].entries != nil {
 			key := importNamespaceCall{
 				ref:  id.Ref,
 				kind: kind,
@@ -15052,6 +15263,21 @@ func (p *parser) scanForImportsAndExports(stmts []js_ast.Stmt) (result importsEx
 			keepUnusedImports := p.options.ts.Parse && (p.options.unusedImportFlagsTS&config.UnusedImportKeepValues) != 0 &&
 				p.options.mode != config.ModeBundle && !p.options.minifyIdentifiers
 
+			// Forbid non-default imports for standard JSON modules
+			if (record.Flags&ast.AssertTypeJSON) != 0 && p.options.mode == config.ModeBundle && s.Items != nil {
+				for _, item := range *s.Items {
+					if p.options.ts.Parse && p.tsUseCounts[item.Name.Ref.InnerIndex] == 0 && (p.options.unusedImportFlagsTS&config.UnusedImportKeepValues) == 0 {
+						// Do not count imports that TypeScript interprets as type annotations
+						continue
+					}
+					if item.Alias != "default" {
+						p.log.AddErrorWithNotes(&p.tracker, js_lexer.RangeOfIdentifier(p.source, item.AliasLoc),
+							fmt.Sprintf("Cannot use non-default import %q with a standard JSON module", item.Alias),
+							p.notesForAssertTypeJSON(record, item.Alias))
+					}
+				}
+			}
+
 			// TypeScript always trims unused imports. This is important for
 			// correctness since some imports might be fake (only in the type
 			// system and used for type-only imports).
@@ -15089,7 +15315,7 @@ func (p *parser) scanForImportsAndExports(stmts []js_ast.Stmt) (result importsEx
 					if symbol.UseCountEstimate == 0 && (p.options.ts.Parse || !p.moduleScope.ContainsDirectEval) {
 						// Make sure we don't remove this if it was used for a property
 						// access while bundling
-						if importItems, ok := p.importItemsForNamespace[s.NamespaceRef]; ok && len(importItems) == 0 {
+						if importItems, ok := p.importItemsForNamespace[s.NamespaceRef]; ok && len(importItems.entries) == 0 {
 							s.StarNameLoc = nil
 						}
 					}
@@ -15149,10 +15375,10 @@ func (p *parser) scanForImportsAndExports(stmts []js_ast.Stmt) (result importsEx
 			if p.options.mode != config.ModePassThrough {
 				if s.StarNameLoc != nil {
 					// "importItemsForNamespace" has property accesses off the namespace
-					if importItems, ok := p.importItemsForNamespace[s.NamespaceRef]; ok && len(importItems) > 0 {
+					if importItems, ok := p.importItemsForNamespace[s.NamespaceRef]; ok && len(importItems.entries) > 0 {
 						// Sort keys for determinism
-						sorted := make([]string, 0, len(importItems))
-						for alias := range importItems {
+						sorted := make([]string, 0, len(importItems.entries))
+						for alias := range importItems.entries {
 							sorted = append(sorted, alias)
 						}
 						sort.Strings(sorted)
@@ -15164,7 +15390,7 @@ func (p *parser) scanForImportsAndExports(stmts []js_ast.Stmt) (result importsEx
 						// by still converting property accesses off the namespace into
 						// bare identifiers even if the namespace is still needed.
 						for _, alias := range sorted {
-							name := importItems[alias]
+							name := importItems.entries[alias]
 							p.namedImports[name.Ref] = js_ast.NamedImport{
 								Alias:             alias,
 								AliasLoc:          name.Loc,
@@ -15308,6 +15534,17 @@ func (p *parser) scanForImportsAndExports(stmts []js_ast.Stmt) (result importsEx
 					record.Flags |= ast.ContainsDefaultAlias
 				} else if item.OriginalName == "__esModule" {
 					record.Flags |= ast.ContainsESModuleAlias
+				}
+			}
+
+			// Forbid non-default imports for standard JSON modules
+			if (record.Flags&ast.AssertTypeJSON) != 0 && p.options.mode == config.ModeBundle {
+				for _, item := range s.Items {
+					if item.Alias != "default" {
+						p.log.AddErrorWithNotes(&p.tracker, js_lexer.RangeOfIdentifier(p.source, item.AliasLoc),
+							fmt.Sprintf("Cannot use non-default import %q with a standard JSON module", item.Alias),
+							p.notesForAssertTypeJSON(record, item.Alias))
+					}
 				}
 			}
 		}
@@ -15767,7 +16004,7 @@ func newParser(log logger.Log, source logger.Source, lexer js_lexer.Lexer, optio
 		localTypeNames:             make(map[string]bool),
 
 		// These are for handling ES6 imports and exports
-		importItemsForNamespace: make(map[js_ast.Ref]map[string]js_ast.LocRef),
+		importItemsForNamespace: make(map[js_ast.Ref]namespaceImportItems),
 		isImportItem:            make(map[js_ast.Ref]bool),
 		namedImports:            make(map[js_ast.Ref]js_ast.NamedImport),
 		namedExports:            make(map[string]js_ast.NamedExport),
@@ -16305,8 +16542,8 @@ func (p *parser) computeCharacterFrequency() *js_ast.CharFreq {
 	charFreq.Scan(p.source.Contents, 1)
 
 	// Subtract out all comments
-	for _, comment := range p.lexer.AllOriginalComments {
-		charFreq.Scan(comment.Text, -1)
+	for _, commentRange := range p.lexer.AllOriginalComments {
+		charFreq.Scan(p.source.TextForRange(commentRange), -1)
 	}
 
 	// Subtract out all import paths
@@ -16366,7 +16603,7 @@ func (p *parser) generateImportStmt(
 	p.moduleScope.Generated = append(p.moduleScope.Generated, namespaceRef)
 	declaredSymbols := make([]js_ast.DeclaredSymbol, 1+len(imports))
 	clauseItems := make([]js_ast.ClauseItem, len(imports))
-	importRecordIndex := p.addImportRecord(ast.ImportStmt, loc, path, nil)
+	importRecordIndex := p.addImportRecord(ast.ImportStmt, loc, path, nil, 0)
 	if sourceIndex != nil {
 		p.importRecords[importRecordIndex].SourceIndex = ast.MakeIndex32(*sourceIndex)
 	}

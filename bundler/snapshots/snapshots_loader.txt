@@ -129,21 +129,62 @@ var x_b64 = require_x();
 console.log(x_b64, y_default);
 
 ================================================================================
+TestLoaderDataURLBase64InvalidUTF8
+---------- /out.js ----------
+// binary.txt
+var binary_default = "data:text/plain;charset=utf-8;base64,/w==";
+
+// entry.js
+console.log(binary_default);
+
+================================================================================
+TestLoaderDataURLBase64VsPercentEncoding
+---------- /out.js ----------
+// shouldUsePercent_1.txt
+var shouldUsePercent_1_default = "data:text/plain;charset=utf-8,%0A%0A%0A";
+
+// shouldUsePercent_2.txt
+var shouldUsePercent_2_default = "data:text/plain;charset=utf-8,%0A%0A%0A%0A";
+
+// shouldUseBase64_1.txt
+var shouldUseBase64_1_default = "data:text/plain;charset=utf-8;base64,CgoKCgo=";
+
+// shouldUseBase64_2.txt
+var shouldUseBase64_2_default = "data:text/plain;charset=utf-8;base64,CgoKCgoK";
+
+// entry.js
+console.log(
+  shouldUsePercent_1_default,
+  shouldUsePercent_2_default,
+  shouldUseBase64_1_default,
+  shouldUseBase64_2_default
+);
+
+================================================================================
 TestLoaderDataURLCommonJSAndES6
 ---------- /out.js ----------
 // x.txt
 var require_x = __commonJS({
   "x.txt"(exports, module) {
-    module.exports = "data:text/plain;charset=utf-8;base64,eA==";
+    module.exports = "data:text/plain;charset=utf-8,x";
   }
 });
 
 // y.txt
-var y_default = "data:text/plain;charset=utf-8;base64,eQ==";
+var y_default = "data:text/plain;charset=utf-8,y";
 
 // entry.js
 var x_url = require_x();
 console.log(x_url, y_default);
+
+================================================================================
+TestLoaderDataURLEscapePercents
+---------- /out.js ----------
+// percents.txt
+var percents_default = "data:text/plain;charset=utf-8,%0A%, %3, %2533, %25333%0A%, %e, %25ee, %25eee%0A%, %E, %25EE, %25EEE%0A";
+
+// entry.js
+console.log(percents_default);
 
 ================================================================================
 TestLoaderFile
@@ -643,9 +684,7 @@ let Foo = {
     console.log("Fragment", ...args);
   }
 };
-export default /* @__PURE__ */ Foo.a(Foo.b, {
-  c: Foo.e
-});
+export default /* @__PURE__ */ Foo.a(Foo.b, { c: Foo.e });
 
 ================================================================================
 TestManglePropsJSXTransformNamespace
@@ -653,9 +692,7 @@ TestManglePropsJSXTransformNamespace
 export default [
   /* @__PURE__ */ React.createElement(KEEP_THIS_, null),
   /* @__PURE__ */ React.createElement("KEEP:THIS_", null),
-  /* @__PURE__ */ React.createElement("foo", {
-    "KEEP:THIS_": true
-  })
+  /* @__PURE__ */ React.createElement("foo", { "KEEP:THIS_": true })
 ];
 
 ================================================================================
@@ -927,6 +964,29 @@ var { a: x } = y, { ["a"]: x } = y, { [(z, "a")]: x } = y;
 "a" in x, (y ? "a" : z) in x, (y ? z : "a") in x, y, "a" in x;
 
 ================================================================================
+TestMinifiedJSXPreserveWithObjectSpread
+---------- /out.js ----------
+// entry.jsx
+var obj = {
+  before,
+  [key]: value,
+  key: value,
+  after
+};
+<Foo
+  before
+  {...{ [key]: value }}
+  key={value}
+  after
+/>;
+<Bar
+  a={a}
+  {...{ [b]: c }}
+  {...d}
+  e={e}
+/>;
+
+================================================================================
 TestMinifyIdentifiersImportPathFrequencyAnalysis
 ---------- /out/import.js ----------
 var o=123;console.log(o,"no identifier in this file should be named W, X, Y, or Z");
@@ -977,6 +1037,59 @@ function b(o, e) {
 export {
   b as aap
 };
+
+================================================================================
+TestOutputForAssertTypeJSON
+---------- /out/foo-FYKHFNL2.copy ----------
+{}
+---------- /out/js-entry.js ----------
+// foo.json
+var foo_default = {};
+
+// js-entry.js
+import copy from "./foo-FYKHFNL2.copy" assert { type: "json" };
+use(foo_default, copy, foo_default, void 0);
+export {
+  foo_default as default
+};
+
+---------- /out/ts-entry.js ----------
+// foo.json
+var foo_default = {};
+
+// ts-entry.ts
+import copy from "./foo-FYKHFNL2.copy" assert { type: "json" };
+use(foo_default, copy, foo_default, void 0);
+export {
+  foo_default as default
+};
+
+================================================================================
+TestPackageAlias
+---------- /out.js ----------
+// node_modules/alias1/index.js
+console.log(1);
+
+// node_modules/alias2/foo.js
+console.log(2);
+
+// node_modules/alias3/index.js
+console.log(3);
+
+// node_modules/alias4/index.js
+console.log(4);
+
+// node_modules/alias5/foo.js
+console.log(5);
+
+// alias6/dir/index.js
+console.log(6);
+
+// alias7/dir/foo/index.js
+console.log(7);
+
+// alias8/dir/pkg8/index.js
+console.log(8);
 
 ================================================================================
 TestRequireCustomExtensionBase64

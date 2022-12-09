@@ -492,8 +492,12 @@ var SEmptyShared = &SEmpty{}
 var SDebuggerShared = &SDebugger{}
 
 type ENew struct {
-	Target        Expr
-	Args          []Expr
+	Target Expr
+	Args   []Expr
+
+	// See this for more context: https://github.com/evanw/esbuild/issues/2439
+	WebpackComments []Comment
+
 	CloseParenLoc logger.Loc
 	IsMultiLine   bool
 
@@ -660,10 +664,11 @@ type EMangledProp struct {
 }
 
 type EJSXElement struct {
-	TagOrNil   Expr
-	Properties []Property
-	Children   []Expr
-	CloseLoc   logger.Loc
+	TagOrNil        Expr
+	Properties      []Property
+	Children        []Expr
+	CloseLoc        logger.Loc
+	IsTagSingleLine bool
 }
 
 type ENumber struct{ Value float64 }
@@ -742,7 +747,7 @@ type EImportString struct {
 	// because esbuild is not Webpack. But we do preserve them since doing so is
 	// harmless, easy to maintain, and useful to people. See the Webpack docs for
 	// more info: https://webpack.js.org/api/module-methods/#magic-comments.
-	LeadingInteriorComments []Comment
+	WebpackComments []Comment
 
 	ImportRecordIndex uint32
 }
@@ -752,7 +757,7 @@ type EImportCall struct {
 	OptionsOrNil Expr
 
 	// See the comment for this same field on "EImportString" for more information
-	LeadingInteriorComments []Comment
+	WebpackComments []Comment
 }
 
 type Stmt struct {

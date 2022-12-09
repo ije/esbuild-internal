@@ -172,11 +172,25 @@ func TestEscapes(t *testing.T) {
 	expectPrinted(t, "a { value: 10\\65m }", "a {\n  value: 10em;\n}\n")
 	expectPrinted(t, "a { value: 10p\\32x }", "a {\n  value: 10p2x;\n}\n")
 	expectPrinted(t, "a { value: 10e\\32x }", "a {\n  value: 10\\65 2x;\n}\n")
+	expectPrinted(t, "a { value: 10e-\\32x }", "a {\n  value: 10\\65-2x;\n}\n")
+	expectPrinted(t, "a { value: 10E\\32x }", "a {\n  value: 10\\45 2x;\n}\n")
+	expectPrinted(t, "a { value: 10E-\\32x }", "a {\n  value: 10\\45-2x;\n}\n")
+	expectPrinted(t, "a { value: 10e1e\\32x }", "a {\n  value: 10e1e2x;\n}\n")
+	expectPrinted(t, "a { value: 10e1e-\\32x }", "a {\n  value: 10e1e-2x;\n}\n")
+	expectPrinted(t, "a { value: 10e1E\\32x }", "a {\n  value: 10e1E2x;\n}\n")
+	expectPrinted(t, "a { value: 10e1E-\\32x }", "a {\n  value: 10e1E-2x;\n}\n")
+	expectPrinted(t, "a { value: 10E1e\\32x }", "a {\n  value: 10E1e2x;\n}\n")
+	expectPrinted(t, "a { value: 10E1e-\\32x }", "a {\n  value: 10E1e-2x;\n}\n")
+	expectPrinted(t, "a { value: 10E1E\\32x }", "a {\n  value: 10E1E2x;\n}\n")
+	expectPrinted(t, "a { value: 10E1E-\\32x }", "a {\n  value: 10E1E-2x;\n}\n")
 	expectPrinted(t, "a { value: 10\\32x }", "a {\n  value: 10\\32x;\n}\n")
 	expectPrinted(t, "a { value: 10\\2cx }", "a {\n  value: 10\\,x;\n}\n")
 	expectPrinted(t, "a { value: 10\\,x }", "a {\n  value: 10\\,x;\n}\n")
 	expectPrinted(t, "a { value: 10x\\2c }", "a {\n  value: 10x\\,;\n}\n")
 	expectPrinted(t, "a { value: 10x\\, }", "a {\n  value: 10x\\,;\n}\n")
+
+	// This must remain unescaped. See https://github.com/evanw/esbuild/issues/2677
+	expectPrinted(t, "@font-face { unicode-range: U+0e2e-0e2f }", "@font-face {\n  unicode-range: U+0e2e-0e2f;\n}\n")
 
 	// RDeclaration
 	expectPrintedMangle(t, "a { c\\6flor: #f00 }", "a {\n  color: red;\n}\n")
@@ -1377,35 +1391,6 @@ func TestBoxShadow(t *testing.T) {
 	expectPrintedMangleMinify(t, "a { box-shadow: rgb(255, 0, 17) 0 0 1 inset }", "a{box-shadow:#f01 0 0 1 inset}")
 }
 
-func TestDeduplicateRules(t *testing.T) {
-	expectPrinted(t, "a { color: red; color: green; color: red }",
-		"a {\n  color: red;\n  color: green;\n  color: red;\n}\n")
-	expectPrintedMangle(t, "a { color: red; color: green; color: red }",
-		"a {\n  color: green;\n  color: red;\n}\n")
-
-	expectPrinted(t, "a { color: red } a { color: green } a { color: red }",
-		"a {\n  color: red;\n}\na {\n  color: green;\n}\na {\n  color: red;\n}\n")
-	expectPrintedMangle(t, "a { color: red } a { color: green } a { color: red }",
-		"a {\n  color: green;\n}\na {\n  color: red;\n}\n")
-
-	expectPrintedMangle(t, "@media screen { a { color: red } } @media screen { a { color: red } }",
-		"@media screen {\n  a {\n    color: red;\n  }\n}\n")
-	expectPrintedMangle(t, "@media screen { a { color: red } } @media screen { & a { color: red } }",
-		"@media screen {\n  a {\n    color: red;\n  }\n}\n@media screen {\n  & a {\n    color: red;\n  }\n}\n")
-	expectPrintedMangle(t, "@media screen { a { color: red } } @media screen { a[x] { color: red } }",
-		"@media screen {\n  a {\n    color: red;\n  }\n}\n@media screen {\n  a[x] {\n    color: red;\n  }\n}\n")
-	expectPrintedMangle(t, "@media screen { a { color: red } } @media screen { a.x { color: red } }",
-		"@media screen {\n  a {\n    color: red;\n  }\n}\n@media screen {\n  a.x {\n    color: red;\n  }\n}\n")
-	expectPrintedMangle(t, "@media screen { a { color: red } } @media screen { a#x { color: red } }",
-		"@media screen {\n  a {\n    color: red;\n  }\n}\n@media screen {\n  a#x {\n    color: red;\n  }\n}\n")
-	expectPrintedMangle(t, "@media screen { a { color: red } } @media screen { a:x { color: red } }",
-		"@media screen {\n  a {\n    color: red;\n  }\n}\n@media screen {\n  a:x {\n    color: red;\n  }\n}\n")
-	expectPrintedMangle(t, "@media screen { a:x { color: red } } @media screen { a:x(y) { color: red } }",
-		"@media screen {\n  a:x {\n    color: red;\n  }\n}\n@media screen {\n  a:x(y) {\n    color: red;\n  }\n}\n")
-	expectPrintedMangle(t, "@media screen { a b { color: red } } @media screen { a + b { color: red } }",
-		"@media screen {\n  a b {\n    color: red;\n  }\n}\n@media screen {\n  a + b {\n    color: red;\n  }\n}\n")
-}
-
 func TestMangleTime(t *testing.T) {
 	expectPrintedMangle(t, "a { animation: b 1s }", "a {\n  animation: b 1s;\n}\n")
 	expectPrintedMangle(t, "a { animation: b 1.s }", "a {\n  animation: b 1s;\n}\n")
@@ -1765,7 +1750,7 @@ func TestMangleDuplicateSelectorRules(t *testing.T) {
 	expectPrintedMangle(t, "a { color: red } div { color: red } b { color: red }", "a,\ndiv,\nb {\n  color: red;\n}\n")
 	expectPrintedMangle(t, "a { color: red } div { color: red } a { color: red }", "a,\ndiv {\n  color: red;\n}\n")
 	expectPrintedMangle(t, "a { color: red } div { color: blue } b { color: red }", "a {\n  color: red;\n}\ndiv {\n  color: #00f;\n}\nb {\n  color: red;\n}\n")
-	expectPrintedMangle(t, "a { color: red } div { color: blue } a { color: red }", "div {\n  color: #00f;\n}\na {\n  color: red;\n}\n")
+	expectPrintedMangle(t, "a { color: red } div { color: blue } a { color: red }", "a {\n  color: red;\n}\ndiv {\n  color: #00f;\n}\na {\n  color: red;\n}\n")
 	expectPrintedMangle(t, "a { color: red; color: red } b { color: red }", "a,\nb {\n  color: red;\n}\n")
 	expectPrintedMangle(t, "a { color: red } b { color: red; color: red }", "a,\nb {\n  color: red;\n}\n")
 	expectPrintedMangle(t, "a { color: red } b { color: blue }", "a {\n  color: red;\n}\nb {\n  color: #00f;\n}\n")

@@ -396,6 +396,24 @@ for (const e of x)
   console.log(e);
 
 ================================================================================
+TestDefineAssignWarning
+---------- /out/read.js ----------
+// read.js
+console.log(
+  [null, null, null],
+  [ident, ident, ident],
+  [dot.chain, dot.chain, dot.chain]
+);
+
+---------- /out/write.js ----------
+// write.js
+console.log(
+  [a = 0, b.c = 0, b["c"] = 0],
+  [ident = 0, ident = 0, ident = 0],
+  [dot.chain = 0, dot.chain = 0, dot.chain = 0]
+);
+
+================================================================================
 TestDefineImportMeta
 ---------- /out.js ----------
 // entry.js
@@ -553,16 +571,10 @@ console.log(123);
 TestDuplicatePropertyWarning
 ---------- /out/entry.js ----------
 // outside-node-modules/index.jsx
-console.log({ a: 1, a: 2 }, /* @__PURE__ */ React.createElement("div", {
-  a2: true,
-  a2: 3
-}));
+console.log({ a: 1, a: 2 }, /* @__PURE__ */ React.createElement("div", { a2: true, a2: 3 }));
 
 // node_modules/inside-node-modules/index.jsx
-console.log({ c: 1, c: 2 }, /* @__PURE__ */ React.createElement("div", {
-  c2: true,
-  c2: 3
-}));
+console.log({ c: 1, c: 2 }, /* @__PURE__ */ React.createElement("div", { c2: true, c2: 3 }));
 
 ================================================================================
 TestDynamicImportWithExpressionCJS
@@ -1047,6 +1059,12 @@ import config from "/api/config?a=1&b=2";
 console.log(foo, out, sha256, config);
 
 ================================================================================
+TestExternalWildcardDoesNotMatchEntryPoint
+---------- /out.js ----------
+// entry.js
+import "foo";
+
+================================================================================
 TestFalseRequire
 ---------- /out.js ----------
 // entry.js
@@ -1439,11 +1457,7 @@ var require_custom_react = __commonJS({
 // entry.jsx
 var import_custom_react = __toESM(require_custom_react());
 import { Fragment as Fragment2, jsx as jsx2 } from "react/jsx-runtime";
-console.log(/* @__PURE__ */ jsx2("div", {
-  jsx: import_custom_react.jsx
-}), /* @__PURE__ */ jsx2(Fragment2, {
-  children: /* @__PURE__ */ jsx2(import_custom_react.Fragment, {})
-}));
+console.log(/* @__PURE__ */ jsx2("div", { jsx: import_custom_react.jsx }), /* @__PURE__ */ jsx2(Fragment2, { children: /* @__PURE__ */ jsx2(import_custom_react.Fragment, {}) }));
 
 ================================================================================
 TestJSXAutomaticImportsES6
@@ -1456,21 +1470,14 @@ function Fragment() {
 
 // entry.jsx
 import { Fragment as Fragment2, jsx as jsx2 } from "react/jsx-runtime";
-console.log(/* @__PURE__ */ jsx2("div", {
-  jsx
-}), /* @__PURE__ */ jsx2(Fragment2, {
-  children: /* @__PURE__ */ jsx2(Fragment, {})
-}));
+console.log(/* @__PURE__ */ jsx2("div", { jsx }), /* @__PURE__ */ jsx2(Fragment2, { children: /* @__PURE__ */ jsx2(Fragment, {}) }));
 
 ================================================================================
 TestJSXAutomaticNoNameCollision
 ---------- /out.js ----------
 var import_react = require("react");
 var import_react2 = require("@remix-run/react");
-const x = /* @__PURE__ */ (0, import_react.createElement)(import_react2.Link, {
-  ...y,
-  key: z
-});
+const x = /* @__PURE__ */ (0, import_react.createElement)(import_react2.Link, { ...y, key: z });
 
 ================================================================================
 TestJSXConstantFragments
@@ -2067,67 +2074,67 @@ console.log([
 TestLoaderDataURLExtensionBasedMIME
 ---------- /out/entry.js ----------
 // example.css
-var example_default = "data:text/css;charset=utf-8;base64,Y3Nz";
+var example_default = "data:text/css;charset=utf-8,css";
 
 // example.eot
-var example_default2 = "data:application/vnd.ms-fontobject;base64,ZW90";
+var example_default2 = "data:application/vnd.ms-fontobject,eot";
 
 // example.gif
-var example_default3 = "data:image/gif;base64,Z2lm";
+var example_default3 = "data:image/gif,gif";
 
 // example.htm
-var example_default4 = "data:text/html;charset=utf-8;base64,aHRt";
+var example_default4 = "data:text/html;charset=utf-8,htm";
 
 // example.html
-var example_default5 = "data:text/html;charset=utf-8;base64,aHRtbA==";
+var example_default5 = "data:text/html;charset=utf-8,html";
 
 // example.jpeg
-var example_default6 = "data:image/jpeg;base64,anBlZw==";
+var example_default6 = "data:image/jpeg,jpeg";
 
 // example.jpg
-var example_default7 = "data:image/jpeg;base64,anBn";
+var example_default7 = "data:image/jpeg,jpg";
 
 // example.js
-var example_default8 = "data:text/javascript;charset=utf-8;base64,anM=";
+var example_default8 = "data:text/javascript;charset=utf-8,js";
 
 // example.json
-var example_default9 = "data:application/json;base64,anNvbg==";
+var example_default9 = "data:application/json,json";
 
 // example.mjs
-var example_default10 = "data:text/javascript;charset=utf-8;base64,bWpz";
+var example_default10 = "data:text/javascript;charset=utf-8,mjs";
 
 // example.otf
-var example_default11 = "data:font/otf;base64,b3Rm";
+var example_default11 = "data:font/otf,otf";
 
 // example.pdf
-var example_default12 = "data:application/pdf;base64,cGRm";
+var example_default12 = "data:application/pdf,pdf";
 
 // example.png
-var example_default13 = "data:image/png;base64,cG5n";
+var example_default13 = "data:image/png,png";
 
 // example.sfnt
-var example_default14 = "data:font/sfnt;base64,c2ZudA==";
+var example_default14 = "data:font/sfnt,sfnt";
 
 // example.svg
-var example_default15 = "data:image/svg+xml;base64,c3Zn";
+var example_default15 = "data:image/svg+xml,svg";
 
 // example.ttf
-var example_default16 = "data:font/ttf;base64,dHRm";
+var example_default16 = "data:font/ttf,ttf";
 
 // example.wasm
-var example_default17 = "data:application/wasm;base64,d2FzbQ==";
+var example_default17 = "data:application/wasm,wasm";
 
 // example.webp
-var example_default18 = "data:image/webp;base64,d2VicA==";
+var example_default18 = "data:image/webp,webp";
 
 // example.woff
-var example_default19 = "data:font/woff;base64,d29mZg==";
+var example_default19 = "data:font/woff,woff";
 
 // example.woff2
-var example_default20 = "data:font/woff2;base64,d29mZjI=";
+var example_default20 = "data:font/woff2,woff2";
 
 // example.xml
-var example_default21 = "data:text/xml;charset=utf-8;base64,eG1s";
+var example_default21 = "data:text/xml;charset=utf-8,xml";
 export {
   example_default as css,
   example_default2 as eot,

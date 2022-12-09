@@ -2548,6 +2548,27 @@ entry.js: ERROR: Could not resolve "./file.ping"
 	})
 }
 
+func TestExternalWildcardDoesNotMatchEntryPoint(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			// The "*" pattern should not apply to this entry point
+			"/entry.js": `
+				import "foo"
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+			ExternalSettings: config.ExternalSettings{
+				PreResolve: config.ExternalMatchers{Patterns: []config.WildcardPattern{
+					{},
+				}},
+			},
+		},
+	})
+}
+
 // This test case makes sure many entry points don't cause a crash
 func TestManyEntryPoints(t *testing.T) {
 	default_suite.expectBundled(t, bundled{
@@ -3176,6 +3197,11 @@ func TestImportMetaCommonJS(t *testing.T) {
 			OutputFormat:  config.FormatCommonJS,
 			AbsOutputFile: "/out.js",
 		},
+		expectedScanLog: `entry.js: WARNING: "import.meta" is not available with the "cjs" output format and will be empty
+NOTE: You need to set the output format to "esm" for "import.meta" to work correctly.
+entry.js: WARNING: "import.meta" is not available with the "cjs" output format and will be empty
+NOTE: You need to set the output format to "esm" for "import.meta" to work correctly.
+`,
 	})
 }
 
@@ -4735,6 +4761,75 @@ func TestDefineInfiniteLoopIssue2407(t *testing.T) {
 			AbsOutputFile: "/out.js",
 			Defines:       &defines,
 		},
+	})
+}
+
+func TestDefineAssignWarning(t *testing.T) {
+	defines := config.ProcessDefines(map[string]config.DefineData{
+		"a": {
+			DefineExpr: &config.DefineExpr{
+				Constant: js_ast.ENullShared,
+			},
+		},
+		"b.c": {
+			DefineExpr: &config.DefineExpr{
+				Constant: js_ast.ENullShared,
+			},
+		},
+		"d": {
+			DefineExpr: &config.DefineExpr{
+				Parts: []string{"ident"},
+			},
+		},
+		"e.f": {
+			DefineExpr: &config.DefineExpr{
+				Parts: []string{"ident"},
+			},
+		},
+		"g": {
+			DefineExpr: &config.DefineExpr{
+				Parts: []string{"dot", "chain"},
+			},
+		},
+		"h.i": {
+			DefineExpr: &config.DefineExpr{
+				Parts: []string{"dot", "chain"},
+			},
+		},
+	})
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/read.js": `
+				console.log(
+					[a, b.c, b['c']],
+					[d, e.f, e['f']],
+					[g, h.i, h['i']],
+				)
+			`,
+			"/write.js": `
+				console.log(
+					[a = 0, b.c = 0, b['c'] = 0],
+					[d = 0, e.f = 0, e['f'] = 0],
+					[g = 0, h.i = 0, h['i'] = 0],
+				)
+			`,
+		},
+		entryPaths: []string{
+			"/read.js",
+			"/write.js",
+		},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
+			Defines:      &defines,
+		},
+		expectedScanLog: `write.js: WARNING: Suspicious assignment to defined constant "a"
+NOTE: The expression "a" has been configured to be replaced with a constant using the "define" feature. If this expression is supposed to be a compile-time constant, then it doesn't make sense to assign to it here. Or if this expression is supposed to change at run-time, this "define" substitution should be removed.
+write.js: WARNING: Suspicious assignment to defined constant "b.c"
+NOTE: The expression "b.c" has been configured to be replaced with a constant using the "define" feature. If this expression is supposed to be a compile-time constant, then it doesn't make sense to assign to it here. Or if this expression is supposed to change at run-time, this "define" substitution should be removed.
+write.js: WARNING: Suspicious assignment to defined constant "b['c']"
+NOTE: The expression "b['c']" has been configured to be replaced with a constant using the "define" feature. If this expression is supposed to be a compile-time constant, then it doesn't make sense to assign to it here. Or if this expression is supposed to change at run-time, this "define" substitution should be removed.
+`,
 	})
 }
 
@@ -6775,5 +6870,212 @@ func TestNonDeterminismIssue2537(t *testing.T) {
 			AbsOutputFile:     "/out.js",
 			MinifyIdentifiers: true,
 		},
+	})
+}
+
+// See: https://github.com/evanw/esbuild/issues/2697
+func TestMinifiedJSXPreserveWithObjectSpread(t *testing.T) {
+	loader_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.jsx": `
+				const obj = {
+					before,
+					...{ [key]: value },
+					...{ key: value },
+					after,
+				};
+				<Foo
+					before
+					{...{ [key]: value }}
+					{...{ key: value }}
+					after
+				/>;
+				<Bar
+					{...{
+						a,
+						[b]: c,
+						...d,
+						e,
+					}}
+				/>;
+			`,
+		},
+		entryPaths: []string{"/entry.jsx"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+			MinifySyntax:  true,
+			JSX: config.JSXOptions{
+				Preserve: true,
+			},
+		},
+	})
+}
+
+func TestPackageAlias(t *testing.T) {
+	loader_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import "pkg1"
+				import "pkg2/foo"
+				import "./nested3"
+				import "@scope/pkg4"
+				import "@scope/pkg5/foo"
+				import "@abs-path/pkg6"
+				import "@abs-path/pkg7/foo"
+				import "@scope-only/pkg8"
+			`,
+			"/nested3/index.js":                     `import "pkg3"`,
+			"/nested3/node_modules/alias3/index.js": `test failure`,
+			"/node_modules/alias1/index.js":         `console.log(1)`,
+			"/node_modules/alias2/foo.js":           `console.log(2)`,
+			"/node_modules/alias3/index.js":         `console.log(3)`,
+			"/node_modules/alias4/index.js":         `console.log(4)`,
+			"/node_modules/alias5/foo.js":           `console.log(5)`,
+			"/alias6/dir/index.js":                  `console.log(6)`,
+			"/alias7/dir/foo/index.js":              `console.log(7)`,
+			"/alias8/dir/pkg8/index.js":             `console.log(8)`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+			PackageAliases: map[string]string{
+				"pkg1":           "alias1",
+				"pkg2":           "alias2",
+				"pkg3":           "alias3",
+				"@scope/pkg4":    "alias4",
+				"@scope/pkg5":    "alias5",
+				"@abs-path/pkg6": `/alias6/dir`,
+				"@abs-path/pkg7": `/alias7/dir`,
+				"@scope-only":    "/alias8/dir",
+			},
+		},
+	})
+}
+
+func TestErrorsForAssertTypeJSON(t *testing.T) {
+	loader_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/js-entry.js": `
+				import all from './foo.json' assert { type: 'json' }
+				import { default as def } from './foo.json' assert { type: 'json' }
+				import { unused } from './foo.json' assert { type: 'json' }
+				import { used } from './foo.json' assert { type: 'json' }
+				import * as ns from './foo.json' assert { type: 'json' }
+				use(used, ns.prop)
+				export { exported } from './foo.json' assert { type: 'json' }
+				import text from './foo.text' assert { type: 'json' }
+				import file from './foo.file' assert { type: 'json' }
+				import copy from './foo.copy' assert { type: 'json' }
+			`,
+			"/ts-entry.ts": `
+				import all from './foo.json' assert { type: 'json' }
+				import { default as def } from './foo.json' assert { type: 'json' }
+				import { unused } from './foo.json' assert { type: 'json' }
+				import { used } from './foo.json' assert { type: 'json' }
+				import * as ns from './foo.json' assert { type: 'json' }
+				use(used, ns.prop)
+				export { exported } from './foo.json' assert { type: 'json' }
+				import text from './foo.text' assert { type: 'json' }
+				import file from './foo.file' assert { type: 'json' }
+				import copy from './foo.copy' assert { type: 'json' }
+			`,
+			"/foo.json": `{}`,
+			"/foo.text": `{}`,
+			"/foo.file": `{}`,
+			"/foo.copy": `{}`,
+		},
+		entryPaths: []string{
+			"/js-entry.js",
+			"/ts-entry.ts",
+		},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
+			ExtensionToLoader: map[string]config.Loader{
+				".js":   config.LoaderJS,
+				".ts":   config.LoaderTS,
+				".json": config.LoaderJSON,
+				".text": config.LoaderText,
+				".file": config.LoaderFile,
+				".copy": config.LoaderCopy,
+			},
+		},
+		expectedScanLog: `js-entry.js: ERROR: Cannot use non-default import "unused" with a standard JSON module
+js-entry.js: NOTE: This is considered an import of a standard JSON module because of the import assertion here:
+NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "unused" import (which is non-standard behavior).
+js-entry.js: ERROR: Cannot use non-default import "used" with a standard JSON module
+js-entry.js: NOTE: This is considered an import of a standard JSON module because of the import assertion here:
+NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "used" import (which is non-standard behavior).
+js-entry.js: WARNING: Non-default import "prop" is undefined with a standard JSON module
+js-entry.js: NOTE: This is considered an import of a standard JSON module because of the import assertion here:
+NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "prop" import (which is non-standard behavior).
+js-entry.js: ERROR: Cannot use non-default import "exported" with a standard JSON module
+js-entry.js: NOTE: This is considered an import of a standard JSON module because of the import assertion here:
+NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "exported" import (which is non-standard behavior).
+js-entry.js: ERROR: The file "foo.text" was loaded with the "text" loader
+js-entry.js: NOTE: This import assertion requires the loader to be "json" instead:
+NOTE: You need to either reconfigure esbuild to ensure that the loader for this file is "json" or you need to remove this import assertion.
+js-entry.js: ERROR: The file "foo.file" was loaded with the "file" loader
+js-entry.js: NOTE: This import assertion requires the loader to be "json" instead:
+NOTE: You need to either reconfigure esbuild to ensure that the loader for this file is "json" or you need to remove this import assertion.
+ts-entry.ts: ERROR: Cannot use non-default import "used" with a standard JSON module
+ts-entry.ts: NOTE: This is considered an import of a standard JSON module because of the import assertion here:
+NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "used" import (which is non-standard behavior).
+ts-entry.ts: WARNING: Non-default import "prop" is undefined with a standard JSON module
+ts-entry.ts: NOTE: This is considered an import of a standard JSON module because of the import assertion here:
+NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "prop" import (which is non-standard behavior).
+ts-entry.ts: ERROR: Cannot use non-default import "exported" with a standard JSON module
+ts-entry.ts: NOTE: This is considered an import of a standard JSON module because of the import assertion here:
+NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "exported" import (which is non-standard behavior).
+`,
+	})
+}
+
+func TestOutputForAssertTypeJSON(t *testing.T) {
+	loader_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/js-entry.js": `
+				import all from './foo.json' assert { type: 'json' }
+				import copy from './foo.copy' assert { type: 'json' }
+				import { default as def } from './foo.json' assert { type: 'json' }
+				import * as ns from './foo.json' assert { type: 'json' }
+				use(all, copy, def, ns.prop)
+				export { default } from './foo.json' assert { type: 'json' }
+			`,
+			"/ts-entry.ts": `
+				import all from './foo.json' assert { type: 'json' }
+				import copy from './foo.copy' assert { type: 'json' }
+				import { default as def } from './foo.json' assert { type: 'json' }
+				import { unused } from './foo.json' assert { type: 'json' }
+				import * as ns from './foo.json' assert { type: 'json' }
+				use(all, copy, def, ns.prop)
+				export { default } from './foo.json' assert { type: 'json' }
+			`,
+			"/foo.json": `{}`,
+			"/foo.copy": `{}`,
+		},
+		entryPaths: []string{
+			"/js-entry.js",
+			"/ts-entry.ts",
+		},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
+			ExtensionToLoader: map[string]config.Loader{
+				".js":   config.LoaderJS,
+				".ts":   config.LoaderTS,
+				".json": config.LoaderJSON,
+				".copy": config.LoaderCopy,
+			},
+		},
+		expectedScanLog: `js-entry.js: WARNING: Non-default import "prop" is undefined with a standard JSON module
+js-entry.js: NOTE: This is considered an import of a standard JSON module because of the import assertion here:
+NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "prop" import (which is non-standard behavior).
+ts-entry.ts: WARNING: Non-default import "prop" is undefined with a standard JSON module
+ts-entry.ts: NOTE: This is considered an import of a standard JSON module because of the import assertion here:
+NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "prop" import (which is non-standard behavior).
+`,
 	})
 }

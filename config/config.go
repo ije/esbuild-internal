@@ -106,6 +106,24 @@ const (
 	LoaderTSX
 )
 
+var LoaderToString = []string{
+	"none",
+	"base64",
+	"binary",
+	"copy",
+	"css",
+	"dataurl",
+	"default",
+	"file",
+	"js",
+	"json",
+	"jsx",
+	"text",
+	"ts",
+	"ts",
+	"tsx",
+}
+
 func (loader Loader) IsTypeScript() bool {
 	switch loader {
 	case LoaderTS, LoaderTSNoAmbiguousLessThan, LoaderTSX:
@@ -253,6 +271,7 @@ type Options struct {
 	Conditions       []string
 	AbsNodePaths     []string // The "NODE_PATH" variable from Node.js
 	ExternalSettings ExternalSettings
+	PackageAliases   map[string]string
 
 	AbsOutputFile      string
 	AbsOutputDir       string

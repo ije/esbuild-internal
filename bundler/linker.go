@@ -15,6 +15,7 @@ import (
 	"github.com/ije/esbuild-internal/compat"
 	"github.com/ije/esbuild-internal/config"
 	"github.com/ije/esbuild-internal/css_ast"
+	"github.com/ije/esbuild-internal/css_parser"
 	"github.com/ije/esbuild-internal/css_printer"
 	"github.com/ije/esbuild-internal/fs"
 	"github.com/ije/esbuild-internal/graph"
@@ -170,6 +171,9 @@ type chunkReprJS struct {
 	importsFromOtherChunks map[uint32]crossChunkImportItemArray
 	crossChunkPrefixStmts  []js_ast.Stmt
 	crossChunkSuffixStmts  []js_ast.Stmt
+
+	cssChunkIndex uint32
+	hasCSSChunk   bool
 }
 
 type chunkReprCSS struct {
@@ -3160,7 +3164,8 @@ func (c *linkerContext) computeChunks() []chunkInfo {
 
 		switch file.InputFile.Repr.(type) {
 		case *graph.JSRepr:
-			chunk.chunkRepr = &chunkReprJS{}
+			chunkRepr := &chunkReprJS{}
+			chunk.chunkRepr = chunkRepr
 			jsChunks[key] = chunk
 
 			// If this JS entry point has an associated CSS entry point, generate it
@@ -3169,6 +3174,7 @@ func (c *linkerContext) computeChunks() []chunkInfo {
 			// discovered in JS source order, where JS source order is arbitrary but
 			// consistent for dynamic imports. Then we run the CSS import order
 			// algorithm to determine the final CSS file order for the chunk.
+
 			if cssSourceIndices := c.findImportedCSSFilesInJSOrder(entryPoint.SourceIndex); len(cssSourceIndices) > 0 {
 				externalOrder, internalOrder := c.findImportedFilesInCSSOrder(cssSourceIndices)
 				cssFilesWithPartsInChunk := make(map[uint32]bool)
@@ -3186,6 +3192,7 @@ func (c *linkerContext) computeChunks() []chunkInfo {
 						filesInChunkInOrder:    internalOrder,
 					},
 				}
+				chunkRepr.hasCSSChunk = true
 			}
 
 		case *graph.CSSRepr:
@@ -3226,8 +3233,13 @@ func (c *linkerContext) computeChunks() []chunkInfo {
 		sortedKeys = append(sortedKeys, key)
 	}
 	sort.Strings(sortedKeys)
+	jsChunkIndicesForCSS := make(map[string]uint32)
 	for _, key := range sortedKeys {
-		sortedChunks = append(sortedChunks, jsChunks[key])
+		chunk := jsChunks[key]
+		if chunk.chunkRepr.(*chunkReprJS).hasCSSChunk {
+			jsChunkIndicesForCSS[key] = uint32(len(sortedChunks))
+		}
+		sortedChunks = append(sortedChunks, chunk)
 	}
 	sortedKeys = sortedKeys[:0]
 	for key := range cssChunks {
@@ -3235,7 +3247,11 @@ func (c *linkerContext) computeChunks() []chunkInfo {
 	}
 	sort.Strings(sortedKeys)
 	for _, key := range sortedKeys {
-		sortedChunks = append(sortedChunks, cssChunks[key])
+		chunk := cssChunks[key]
+		if jsChunkIndex, ok := jsChunkIndicesForCSS[key]; ok {
+			sortedChunks[jsChunkIndex].chunkRepr.(*chunkReprJS).cssChunkIndex = uint32(len(sortedChunks))
+		}
+		sortedChunks = append(sortedChunks, chunk)
 	}
 
 	// Map from the entry point file to this chunk. We will need this later if
@@ -4187,6 +4203,7 @@ func (c *linkerContext) generateCodeForFileInChunkJS(
 		ConstValues:                  c.graph.ConstValues,
 		LegalComments:                c.options.LegalComments,
 		UnsupportedFeatures:          c.options.UnsupportedJSFeatures,
+		SourceMap:                    c.options.SourceMap,
 		AddSourceMappings:            addSourceMappings,
 		InputSourceMap:               inputSourceMap,
 		LineOffsetTables:             lineOffsetTables,
@@ -4981,12 +4998,15 @@ func (c *linkerContext) generateChunkJS(chunks []chunkInfo, chunkIndex int, chun
 		if !isFirstMeta {
 			jMeta.AddString("\n      ")
 		}
+		jMeta.AddString("],\n")
 		if chunk.isEntryPoint {
 			entryPoint := c.graph.Files[chunk.sourceIndex].InputFile.Source.PrettyPath
-			jMeta.AddString(fmt.Sprintf("],\n      \"entryPoint\": %s,\n      \"inputs\": {", helpers.QuoteForJSON(entryPoint, c.options.ASCIIOnly)))
-		} else {
-			jMeta.AddString("],\n      \"inputs\": {")
+			jMeta.AddString(fmt.Sprintf("      \"entryPoint\": %s,\n", helpers.QuoteForJSON(entryPoint, c.options.ASCIIOnly)))
 		}
+		if chunkRepr.hasCSSChunk {
+			jMeta.AddString(fmt.Sprintf("      \"cssBundle\": %s,\n", helpers.QuoteForJSON(chunks[chunkRepr.cssChunkIndex].uniqueKey, c.options.ASCIIOnly)))
+		}
+		jMeta.AddString("      \"inputs\": {")
 	}
 
 	// Concatenate the generated JavaScript chunks together
@@ -5244,32 +5264,52 @@ func (c *linkerContext) generateChunkCSS(chunks []chunkInfo, chunkIndex int, chu
 	// never change the "../" count.
 	chunkAbsDir := c.fs.Dir(c.fs.Join(c.options.AbsOutputDir, config.TemplateToString(chunk.finalTemplate)))
 
+	// Remove duplicate rules across files. This must be done in serial, not
+	// in parallel, and must be done from the last rule to the first rule.
+	timer.Begin("Prepare CSS ASTs")
+	asts := make([]css_ast.AST, len(chunkRepr.filesInChunkInOrder))
+	var remover css_parser.DuplicateRuleRemover
+	if c.options.MinifySyntax {
+		remover = css_parser.MakeDuplicateRuleMangler()
+	}
+	for i := len(chunkRepr.filesInChunkInOrder) - 1; i >= 0; i-- {
+		sourceIndex := chunkRepr.filesInChunkInOrder[i]
+		file := &c.graph.Files[sourceIndex]
+		ast := file.InputFile.Repr.(*graph.CSSRepr).AST
+
+		// Filter out "@charset" and "@import" rules
+		rules := make([]css_ast.Rule, 0, len(ast.Rules))
+		for _, rule := range ast.Rules {
+			switch rule.Data.(type) {
+			case *css_ast.RAtCharset:
+				compileResults[i].hasCharset = true
+				continue
+			case *css_ast.RAtImport:
+				continue
+			}
+			rules = append(rules, rule)
+		}
+
+		// Remove top-level duplicate rules across files
+		if c.options.MinifySyntax {
+			rules = remover.RemoveDuplicateRulesInPlace(rules)
+		}
+
+		ast.Rules = rules
+		asts[i] = ast
+	}
+	timer.End("Prepare CSS ASTs")
+
 	// Generate CSS for each file in parallel
 	timer.Begin("Print CSS files")
 	waitGroup := sync.WaitGroup{}
 	for i, sourceIndex := range chunkRepr.filesInChunkInOrder {
 		// Create a goroutine for this file
 		waitGroup.Add(1)
-		go func(sourceIndex uint32, compileResult *compileResultCSS) {
+		go func(i int, sourceIndex uint32, compileResult *compileResultCSS) {
 			defer c.recoverInternalError(&waitGroup, sourceIndex)
 
 			file := &c.graph.Files[sourceIndex]
-			ast := file.InputFile.Repr.(*graph.CSSRepr).AST
-
-			// Filter out "@charset" and "@import" rules
-			rules := make([]css_ast.Rule, 0, len(ast.Rules))
-			hasCharset := false
-			for _, rule := range ast.Rules {
-				switch rule.Data.(type) {
-				case *css_ast.RAtCharset:
-					hasCharset = true
-					continue
-				case *css_ast.RAtImport:
-					continue
-				}
-				rules = append(rules, rule)
-			}
-			ast.Rules = rules
 
 			// Only generate a source map if needed
 			var addSourceMappings bool
@@ -5282,20 +5322,19 @@ func (c *linkerContext) generateChunkCSS(chunks []chunkInfo, chunkIndex int, chu
 			}
 
 			cssOptions := css_printer.Options{
-				MinifyWhitespace:  c.options.MinifyWhitespace,
-				ASCIIOnly:         c.options.ASCIIOnly,
-				LegalComments:     c.options.LegalComments,
-				AddSourceMappings: addSourceMappings,
-				InputSourceMap:    inputSourceMap,
-				LineOffsetTables:  lineOffsetTables,
+				MinifyWhitespace:    c.options.MinifyWhitespace,
+				ASCIIOnly:           c.options.ASCIIOnly,
+				LegalComments:       c.options.LegalComments,
+				SourceMap:           c.options.SourceMap,
+				UnsupportedFeatures: c.options.UnsupportedCSSFeatures,
+				AddSourceMappings:   addSourceMappings,
+				InputSourceMap:      inputSourceMap,
+				LineOffsetTables:    lineOffsetTables,
 			}
-			*compileResult = compileResultCSS{
-				PrintResult: css_printer.Print(ast, cssOptions),
-				sourceIndex: sourceIndex,
-				hasCharset:  hasCharset,
-			}
+			compileResult.PrintResult = css_printer.Print(asts[i], cssOptions)
+			compileResult.sourceIndex = sourceIndex
 			waitGroup.Done()
-		}(sourceIndex, &compileResults[i])
+		}(i, sourceIndex, &compileResults[i])
 	}
 
 	waitGroup.Wait()

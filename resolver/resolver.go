@@ -136,10 +136,11 @@ const (
 )
 
 type DebugMeta struct {
-	notes             []logger.MsgData
-	suggestionText    string
-	suggestionMessage string
-	suggestionRange   suggestionRange
+	notes              []logger.MsgData
+	suggestionText     string
+	suggestionMessage  string
+	suggestionRange    suggestionRange
+	ModifiedImportPath string
 }
 
 func (dm DebugMeta) LogErrorMsg(log logger.Log, source *logger.Source, r logger.Range, text string, suggestion string, notes []logger.MsgData) {
@@ -297,8 +298,39 @@ func (rr *resolver) Resolve(sourceDir string, importPath string, kind ast.Import
 			importPath, sourceDir, kind.StringForMetafile())}
 	}
 
+	// Apply package alias substitutions first
+	if r.options.PackageAliases != nil && IsPackagePath(importPath) {
+		if r.debugLogs != nil {
+			r.debugLogs.addNote("Checking for package alias matches")
+		}
+		foundMatch := false
+		for key, value := range r.options.PackageAliases {
+			if strings.HasPrefix(importPath, key) && (len(importPath) == len(key) || importPath[len(key)] == '/') {
+				// Resolve the package using the current path instead of the original
+				// path. This is trying to resolve the substitute in the top-level
+				// package instead of the nested package, which lets the top-level
+				// package control the version of the substitution. It's also critical
+				// when using Yarn PnP because Yarn PnP doesn't allow nested packages
+				// to "reach outside" of their normal dependency lists.
+				sourceDir = r.fs.Cwd()
+				debugMeta.ModifiedImportPath = value + importPath[len(key):]
+				if r.debugLogs != nil {
+					r.debugLogs.addNote(fmt.Sprintf("  Matched with alias from %q to %q", key, value))
+					r.debugLogs.addNote(fmt.Sprintf("  Modified import path from %q to %q", importPath, debugMeta.ModifiedImportPath))
+					r.debugLogs.addNote(fmt.Sprintf("  Changed resolve directory to %q", sourceDir))
+				}
+				importPath = debugMeta.ModifiedImportPath
+				foundMatch = true
+				break
+			}
+		}
+		if r.debugLogs != nil && !foundMatch {
+			r.debugLogs.addNote("  Failed to find any package alias matches")
+		}
+	}
+
 	// Certain types of URLs default to being external for convenience
-	if isExplicitlyExternal := r.isExternal(r.options.ExternalSettings.PreResolve, importPath); isExplicitlyExternal ||
+	if isExplicitlyExternal := r.isExternal(r.options.ExternalSettings.PreResolve, importPath, kind); isExplicitlyExternal ||
 
 		// "fill: url(#filter);"
 		(kind == ast.ImportURL && strings.HasPrefix(importPath, "#")) ||
@@ -437,12 +469,12 @@ func (rr *resolver) Resolve(sourceDir string, importPath string, kind ast.Import
 		for dirInfo := r.dirInfoCached(r.fs.Cwd()); dirInfo != nil; dirInfo = dirInfo.parent {
 			if absPath := dirInfo.pnpManifestAbsPath; absPath != "" {
 				if strings.HasSuffix(absPath, ".json") {
-					if json := r.extractYarnPnPDataFromJSON(absPath, pnpReportErrorsAboutMissingFiles); json.Data != nil {
-						r.pnpManifest = compileYarnPnPData(absPath, r.fs.Dir(absPath), json)
+					if json, source := r.extractYarnPnPDataFromJSON(absPath, pnpReportErrorsAboutMissingFiles); json.Data != nil {
+						r.pnpManifest = compileYarnPnPData(absPath, r.fs.Dir(absPath), json, source)
 					}
 				} else {
-					if json := r.tryToExtractYarnPnPDataFromJS(absPath, pnpReportErrorsAboutMissingFiles); json.Data != nil {
-						r.pnpManifest = compileYarnPnPData(absPath, r.fs.Dir(absPath), json)
+					if json, source := r.tryToExtractYarnPnPDataFromJS(absPath, pnpReportErrorsAboutMissingFiles); json.Data != nil {
+						r.pnpManifest = compileYarnPnPData(absPath, r.fs.Dir(absPath), json, source)
 					}
 				}
 				if r.debugLogs != nil && r.pnpManifest != nil && r.pnpManifest.invalidIgnorePatternData != "" {
@@ -504,7 +536,11 @@ func (r *resolverQuery) loadModuleSuffixesForSourceDir(sourceDir string) *dirInf
 	return sourceDirInfo
 }
 
-func (r resolverQuery) isExternal(matchers config.ExternalMatchers, path string) bool {
+func (r resolverQuery) isExternal(matchers config.ExternalMatchers, path string, kind ast.ImportKind) bool {
+	if kind == ast.ImportEntryPoint {
+		// Never mark an entry point as external. This is not useful.
+		return false
+	}
 	if _, ok := matchers.Exact[path]; ok {
 		return true
 	}
@@ -597,7 +633,7 @@ func (r resolverQuery) flushDebugLogs(mode flushMode) {
 }
 
 func (r resolverQuery) finalizeResolve(result *ResolveResult) {
-	if !result.IsExternal && r.isExternal(r.options.ExternalSettings.PostResolve, result.PathPair.Primary.Text) {
+	if !result.IsExternal && r.isExternal(r.options.ExternalSettings.PostResolve, result.PathPair.Primary.Text, r.kind) {
 		if r.debugLogs != nil {
 			r.debugLogs.addNote(fmt.Sprintf("The path %q was marked as external by the user", result.PathPair.Primary.Text))
 		}
@@ -774,7 +810,7 @@ func (r resolverQuery) resolveWithoutSymlinks(sourceDir string, sourceDirInfo *d
 		absPath := r.fs.Join(sourceDir, importPath)
 
 		// Check for external packages first
-		if r.isExternal(r.options.ExternalSettings.PostResolve, absPath) {
+		if r.isExternal(r.options.ExternalSettings.PostResolve, absPath, r.kind) {
 			if r.debugLogs != nil {
 				r.debugLogs.addNote(fmt.Sprintf("The path %q was marked as external by the user", absPath))
 			}
@@ -915,7 +951,7 @@ func (r resolverQuery) dirInfoCached(path string) *dirInfo {
 		if cached == nil {
 			r.debugLogs.addNote(fmt.Sprintf("Failed to read directory %q", path))
 		} else {
-			count := len(cached.entries.SortedKeys())
+			count := cached.entries.PeekEntryCount()
 			entries := "entries"
 			if count == 1 {
 				entries = "entry"
@@ -979,20 +1015,20 @@ func (r resolverQuery) parseTSConfig(file string, visited map[string]bool) (*TSC
 				for {
 					if _, _, ok := fs.ParseYarnPnPVirtualPath(current); !ok {
 						absPath := r.fs.Join(current, ".pnp.data.json")
-						if json := r.extractYarnPnPDataFromJSON(absPath, pnpIgnoreErrorsAboutMissingFiles); json.Data != nil {
-							pnpData = compileYarnPnPData(absPath, current, json)
+						if json, source := r.extractYarnPnPDataFromJSON(absPath, pnpIgnoreErrorsAboutMissingFiles); json.Data != nil {
+							pnpData = compileYarnPnPData(absPath, current, json, source)
 							break
 						}
 
 						absPath = r.fs.Join(current, ".pnp.cjs")
-						if json := r.tryToExtractYarnPnPDataFromJS(absPath, pnpIgnoreErrorsAboutMissingFiles); json.Data != nil {
-							pnpData = compileYarnPnPData(absPath, current, json)
+						if json, source := r.tryToExtractYarnPnPDataFromJS(absPath, pnpIgnoreErrorsAboutMissingFiles); json.Data != nil {
+							pnpData = compileYarnPnPData(absPath, current, json, source)
 							break
 						}
 
 						absPath = r.fs.Join(current, ".pnp.js")
-						if json := r.tryToExtractYarnPnPDataFromJS(absPath, pnpIgnoreErrorsAboutMissingFiles); json.Data != nil {
-							pnpData = compileYarnPnPData(absPath, current, json)
+						if json, source := r.tryToExtractYarnPnPDataFromJS(absPath, pnpIgnoreErrorsAboutMissingFiles); json.Data != nil {
+							pnpData = compileYarnPnPData(absPath, current, json, source)
 							break
 						}
 					}
@@ -1007,7 +1043,7 @@ func (r resolverQuery) parseTSConfig(file string, visited map[string]bool) (*TSC
 			}
 
 			if pnpData != nil {
-				if result := r.resolveToUnqualified(extends, fileDir, pnpData); result.status == pnpError {
+				if result := r.resolveToUnqualified(extends, fileDir, pnpData); result.status == pnpErrorGeneric {
 					if r.debugLogs != nil {
 						r.debugLogs.addNote("The Yarn PnP path resolution algorithm returned an error")
 					}
@@ -1063,10 +1099,28 @@ func (r resolverQuery) parseTSConfig(file string, visited map[string]bool) (*TSC
 				current = next
 			}
 		} else {
-			// If this is a regular path, search relative to the enclosing directory
 			extendsFile := extends
-			if !r.fs.IsAbs(extends) {
-				extendsFile = r.fs.Join(fileDir, extends)
+
+			// The TypeScript compiler has a strange behavior that seems like a bug
+			// where "." and ".." behave differently than other forms such as "./."
+			// or "../." and are interpreted as having an implicit "tsconfig.json"
+			// suffix.
+			//
+			// I believe their bug is caused by some parts of their code checking for
+			// relative paths using the literal "./" and "../" prefixes (requiring
+			// the slash) and other parts checking using the regular expression
+			// /^\.\.?($|[\\/])/ (with the slash optional).
+			//
+			// In any case, people are now relying on this behavior. One example is
+			// this: https://github.com/esbuild-kit/tsx/pull/158. So we replicate this
+			// bug in esbuild as well.
+			if extendsFile == "." || extendsFile == ".." {
+				extendsFile += "/tsconfig.json"
+			}
+
+			// If this is a regular path, search relative to the enclosing directory
+			if !r.fs.IsAbs(extendsFile) {
+				extendsFile = r.fs.Join(fileDir, extendsFile)
 			}
 			base, err := r.parseTSConfig(extendsFile, visited)
 
@@ -1999,12 +2053,35 @@ func (r resolverQuery) loadNodeModules(importPath string, dirInfo *dirInfo, forb
 		}
 	}
 
+	// Find the parent directory with the "package.json" file
+	dirInfoPackageJSON := dirInfo
+	for dirInfoPackageJSON != nil && dirInfoPackageJSON.packageJSON == nil {
+		dirInfoPackageJSON = dirInfoPackageJSON.parent
+	}
+
+	// Check for subpath imports: https://nodejs.org/api/packages.html#subpath-imports
+	if dirInfoPackageJSON != nil && strings.HasPrefix(importPath, "#") && !forbidImports && dirInfoPackageJSON.packageJSON.importsMap != nil {
+		return r.loadPackageImports(importPath, dirInfoPackageJSON)
+	}
+
 	// If Yarn PnP is active, use it to find the package
 	if r.pnpManifest != nil {
-		if result := r.resolveToUnqualified(importPath, dirInfo.absPath, r.pnpManifest); result.status == pnpError {
+		if result := r.resolveToUnqualified(importPath, dirInfo.absPath, r.pnpManifest); result.status.isError() {
 			if r.debugLogs != nil {
 				r.debugLogs.addNote("The Yarn PnP path resolution algorithm returned an error")
 			}
+
+			// Try to provide more information about this error if it's available
+			switch result.status {
+			case pnpErrorDependencyNotFound:
+				r.debugMeta.notes = []logger.MsgData{r.pnpManifest.tracker.MsgData(result.errorRange,
+					fmt.Sprintf("The Yarn Plug'n'Play manifest forbids importing %q here because it's not listed as a dependency of this package:", result.errorIdent))}
+
+			case pnpErrorUnfulfilledPeerDependency:
+				r.debugMeta.notes = []logger.MsgData{r.pnpManifest.tracker.MsgData(result.errorRange,
+					fmt.Sprintf("The Yarn Plug'n'Play manifest says this package has a peer dependency on %q, but the package %q has not been installed:", result.errorIdent, result.errorIdent))}
+			}
+
 			return PathPair{}, false, nil
 		} else if result.status == pnpSuccess {
 			absPath := r.fs.Join(result.pkgDirPath, result.pkgSubpath)
@@ -2040,17 +2117,6 @@ func (r resolverQuery) loadNodeModules(importPath string, dirInfo *dirInfo, forb
 			}
 			return PathPair{}, false, nil
 		}
-	}
-
-	// Find the parent directory with the "package.json" file
-	dirInfoPackageJSON := dirInfo
-	for dirInfoPackageJSON != nil && dirInfoPackageJSON.packageJSON == nil {
-		dirInfoPackageJSON = dirInfoPackageJSON.parent
-	}
-
-	// Check for subpath imports: https://nodejs.org/api/packages.html#subpath-imports
-	if dirInfoPackageJSON != nil && strings.HasPrefix(importPath, "#") && !forbidImports && dirInfoPackageJSON.packageJSON.importsMap != nil {
-		return r.loadPackageImports(importPath, dirInfoPackageJSON)
 	}
 
 	// Try to parse the package name using node's ESM-specific rules
