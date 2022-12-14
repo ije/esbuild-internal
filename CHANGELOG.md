@@ -1,5 +1,205 @@
 # Changelog
 
+## 0.16.6
+
+* Do not mark subpath imports as external with `--packages=external` ([#2741](https://github.com/evanw/esbuild/issues/2741))
+
+    Node has a feature called [subpath imports](https://nodejs.org/api/packages.html#subpath-imports) where special import paths that start with `#` are resolved using the `imports` field in the `package.json` file of the enclosing package. The intent of the newly-added `--packages=external` setting is to exclude a package's dependencies from the bundle. Since a package's subpath imports are only accessible within that package, it's wrong for them to be affected by `--packages=external`. This release changes esbuild so that `--packages=external` no longer affects subpath imports.
+
+* Forbid invalid numbers in JSON files
+
+    Previously esbuild parsed numbers in JSON files using the same syntax as JavaScript. But starting from this release, esbuild will now parse them with JSON syntax instead. This means the following numbers are no longer allowed by esbuild in JSON files:
+
+    * Legacy octal literals (non-zero integers starting with `0`)
+    * The `0b`, `0o`, and `0x` numeric prefixes
+    * Numbers containing `_` such as `1_000`
+    * Leading and trailing `.` such as `0.` and `.0`
+    * Numbers with a space after the `-` such as `- 1`
+
+* Add external imports to metafile ([#905](https://github.com/evanw/esbuild/issues/905), [#1768](https://github.com/evanw/esbuild/issues/1768), [#1933](https://github.com/evanw/esbuild/issues/1933), [#1939](https://github.com/evanw/esbuild/issues/1939))
+
+    External imports now appear in `imports` arrays in the metafile (which is present when bundling with `metafile: true`) next to normal imports, but additionally have `external: true` to set them apart. This applies both to files in the `inputs` section and the `outputs` section. Here's an example:
+
+    ```diff
+     {
+       "inputs": {
+         "style.css": {
+           "bytes": 83,
+           "imports": [
+    +        {
+    +          "path": "https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/css/bootstrap.min.css",
+    +          "kind": "import-rule",
+    +          "external": true
+    +        }
+           ]
+         },
+         "app.js": {
+           "bytes": 100,
+           "imports": [
+    +        {
+    +          "path": "https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/js/bootstrap.min.js",
+    +          "kind": "import-statement",
+    +          "external": true
+    +        },
+             {
+               "path": "style.css",
+               "kind": "import-statement"
+             }
+           ]
+         }
+       },
+       "outputs": {
+         "out/app.js": {
+           "imports": [
+    +        {
+    +          "path": "https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/js/bootstrap.min.js",
+    +          "kind": "require-call",
+    +          "external": true
+    +        }
+           ],
+           "exports": [],
+           "entryPoint": "app.js",
+           "cssBundle": "out/app.css",
+           "inputs": {
+             "app.js": {
+               "bytesInOutput": 113
+             },
+             "style.css": {
+               "bytesInOutput": 0
+             }
+           },
+           "bytes": 528
+         },
+         "out/app.css": {
+           "imports": [
+    +        {
+    +          "path": "https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/css/bootstrap.min.css",
+    +          "kind": "import-rule",
+    +          "external": true
+    +        }
+           ],
+           "inputs": {
+             "style.css": {
+               "bytesInOutput": 0
+             }
+           },
+           "bytes": 100
+         }
+       }
+     }
+    ```
+
+    One additional useful consequence of this is that the `imports` array is now populated when bundling is disabled. So you can now use esbuild with bundling disabled to inspect a file's imports.
+
+## 0.16.5
+
+* Make it easy to exclude all packages from a bundle ([#1958](https://github.com/evanw/esbuild/issues/1958), [#1975](https://github.com/evanw/esbuild/issues/1975), [#2164](https://github.com/evanw/esbuild/issues/2164), [#2246](https://github.com/evanw/esbuild/issues/2246), [#2542](https://github.com/evanw/esbuild/issues/2542))
+
+    When bundling for node, it's often necessary to exclude npm packages from the bundle since they weren't designed with esbuild bundling in mind and don't work correctly after being bundled. For example, they may use `__dirname` and run-time file system calls to load files, which doesn't work after bundling with esbuild. Or they may compile a native `.node` extension that has similar expectations about the layout of the file system that are no longer true after bundling (even if the `.node` extension is copied next to the bundle).
+
+    The way to get this to work with esbuild is to use the `--external:` flag. For example, the [`fsevents`](https://www.npmjs.com/package/fsevents) package contains a native `.node` extension and shouldn't be bundled. To bundle code that uses it, you can pass `--external:fsevents` to esbuild to exclude it from your bundle. You will then need to ensure that the `fsevents` package is still present when you run your bundle (e.g. by publishing your bundle to npm as a package with a dependency on `fsevents`).
+
+    It was possible to automatically do this for all of your dependencies, but it was inconvenient. You had to write some code that read your `package.json` file and passed the keys of the `dependencies`, `devDependencies`, `peerDependencies`, and/or `optionalDependencies` maps to esbuild as external packages (either that or write a plugin to mark all package paths as external). Previously esbuild's recommendation for making this easier was to do `--external:./node_modules/*` (added in version 0.14.13). However, this was a bad idea because it caused compatibility problems with many node packages as it caused esbuild to mark the post-resolve path as external instead of the pre-resolve path. Doing that could break packages that are published as both CommonJS and ESM if esbuild's bundler is also used to do a module format conversion.
+
+    With this release, you can now do the following to automatically exclude all packages from your bundle:
+
+    * CLI:
+
+        ```
+        esbuild --bundle --packages=external
+        ```
+
+    * JS:
+
+        ```js
+        esbuild.build({
+          bundle: true,
+          packages: 'external',
+        })
+        ```
+
+    * Go:
+
+        ```go
+        api.Build(api.BuildOptions{
+          Bundle:   true,
+          Packages: api.PackagesExternal,
+        })
+        ```
+
+    Doing `--external:./node_modules/*` is still possible and still has the same behavior, but is no longer recommended. I recommend that you use the new `packages` feature instead.
+
+* Fix some subtle bugs with tagged template literals
+
+    This release fixes a bug where minification could incorrectly change the value of `this` within tagged template literal function calls:
+
+    ```js
+    // Original code
+    function f(x) {
+      let z = y.z
+      return z``
+    }
+
+    // Old output (with --minify)
+    function f(n){return y.z``}
+
+    // New output (with --minify)
+    function f(n){return(0,y.z)``}
+    ```
+
+    This release also fixes a bug where using optional chaining with `--target=es2019` or earlier could incorrectly change the value of `this` within tagged template literal function calls:
+
+    ```js
+    // Original code
+    var obj = {
+      foo: function() {
+        console.log(this === obj);
+      }
+    };
+    (obj?.foo)``;
+
+    // Old output (with --target=es6)
+    var obj = {
+      foo: function() {
+        console.log(this === obj);
+      }
+    };
+    (obj == null ? void 0 : obj.foo)``;
+
+    // New output (with --target=es6)
+    var __freeze = Object.freeze;
+    var __defProp = Object.defineProperty;
+    var __template = (cooked, raw) => __freeze(__defProp(cooked, "raw", { value: __freeze(raw || cooked.slice()) }));
+    var _a;
+    var obj = {
+      foo: function() {
+        console.log(this === obj);
+      }
+    };
+    (obj == null ? void 0 : obj.foo).call(obj, _a || (_a = __template([""])));
+    ```
+
+* Some slight minification improvements
+
+    The following minification improvements were implemented:
+
+    * `if (~a !== 0) throw x;` => `if (~a) throw x;`
+    * `if ((a | b) !== 0) throw x;` => `if (a | b) throw x;`
+    * `if ((a & b) !== 0) throw x;` => `if (a & b) throw x;`
+    * `if ((a ^ b) !== 0) throw x;` => `if (a ^ b) throw x;`
+    * `if ((a << b) !== 0) throw x;` => `if (a << b) throw x;`
+    * `if ((a >> b) !== 0) throw x;` => `if (a >> b) throw x;`
+    * `if ((a >>> b) !== 0) throw x;` => `if (a >>> b) throw x;`
+    * `if (!!a || !!b) throw x;` => `if (a || b) throw x;`
+    * `if (!!a && !!b) throw x;` => `if (a && b) throw x;`
+    * `if (a ? !!b : !!c) throw x;` => `if (a ? b : c) throw x;`
+
+## 0.16.4
+
+* Fix binary downloads from the `@esbuild/` scope for Deno ([#2729](https://github.com/evanw/esbuild/issues/2729))
+
+    Version 0.16.0 of esbuild moved esbuild's binary executables into npm packages under the `@esbuild/` scope, which accidentally broke the binary downloader script for Deno. This release fixes this script so it should now be possible to use esbuild version 0.16.4+ with Deno.
+
 ## 0.16.3
 
 * Fix a hang with the JS API in certain cases ([#2727](https://github.com/evanw/esbuild/issues/2727))

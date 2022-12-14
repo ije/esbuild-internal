@@ -7079,3 +7079,135 @@ NOTE: You can either keep the import assertion and only use the "default" import
 `,
 	})
 }
+
+func TestExternalPackages(t *testing.T) {
+	loader_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/project/entry.js": `
+				import 'pkg1'
+				import './file'
+				import './node_modules/pkg2/index.js'
+				import '#pkg3'
+			`,
+			"/project/package.json": `{
+				"imports": {
+					"#pkg3": "./libs/pkg3.js"
+				}
+			}`,
+			"/project/file.js": `
+				console.log('file')
+			`,
+			"/project/node_modules/pkg2/index.js": `
+				console.log('pkg2')
+			`,
+			"/project/libs/pkg3.js": `
+				console.log('pkg3')
+			`,
+		},
+		entryPaths: []string{"/project/entry.js"},
+		options: config.Options{
+			Mode:             config.ModeBundle,
+			AbsOutputFile:    "/out.js",
+			ExternalPackages: true,
+		},
+	})
+}
+
+func TestMetafileVariousCases(t *testing.T) {
+	loader_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/project/entry.js": `
+				import a from 'extern-esm'
+				import b from './esm'
+				import c from 'data:application/json,2'
+				import d from './file.file'
+				import e from './copy.copy'
+				console.log(
+					a,
+					b,
+					c,
+					d,
+					e,
+					require('extern-cjs'),
+					require('./cjs'),
+					import('./dynamic'),
+				)
+				export let exported
+			`,
+			"/project/entry.css": `
+				@import "extern.css";
+				a { background: url(inline.svg) }
+				b { background: url(file.file) }
+				c { background: url(copy.copy) }
+				d { background: url(extern.png) }
+			`,
+			"/project/esm.js":     `export default 1`,
+			"/project/cjs.js":     `module.exports = 4`,
+			"/project/dynamic.js": `export default 5`,
+			"/project/file.file":  `file`,
+			"/project/copy.copy":  `copy`,
+			"/project/inline.svg": `<svg/>`,
+		},
+		entryPaths: []string{
+			"/project/entry.js",
+			"/project/entry.css",
+		},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
+			ExtensionToLoader: map[string]config.Loader{
+				".js":   config.LoaderJS,
+				".css":  config.LoaderCSS,
+				".file": config.LoaderFile,
+				".copy": config.LoaderCopy,
+				".svg":  config.LoaderDataURL,
+			},
+			ExternalSettings: config.ExternalSettings{
+				PreResolve: config.ExternalMatchers{
+					Exact: map[string]bool{
+						"extern-esm": true,
+						"extern-cjs": true,
+						"extern.css": true,
+						"extern.png": true,
+					},
+				},
+			},
+			NeedsMetafile: true,
+			CodeSplitting: true,
+		},
+	})
+}
+
+func TestMetafileNoBundle(t *testing.T) {
+	loader_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/project/entry.js": `
+				import a from 'pkg'
+				import b from './file'
+				console.log(
+					a,
+					b,
+					require('pkg2'),
+					require('./file2'),
+					import('./dynamic'),
+				)
+				export let exported
+			`,
+			"/project/entry.css": `
+				@import "pkg";
+				@import "./file";
+				a { background: url(pkg2) }
+				a { background: url(./file2) }
+			`,
+		},
+		entryPaths: []string{
+			"/project/entry.js",
+			"/project/entry.css",
+		},
+		options: config.Options{
+			Mode:          config.ModeConvertFormat,
+			AbsOutputDir:  "/out",
+			NeedsMetafile: true,
+		},
+	})
+}
