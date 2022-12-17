@@ -1,4 +1,4 @@
-package bundler
+package bundler_tests
 
 // Bundling test results are stored in snapshot files, located in the
 // "snapshots" directory. This allows test results to be updated easily without
@@ -16,10 +16,12 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/ije/esbuild-internal/bundler"
 	"github.com/ije/esbuild-internal/cache"
 	"github.com/ije/esbuild-internal/compat"
 	"github.com/ije/esbuild-internal/config"
 	"github.com/ije/esbuild-internal/fs"
+	"github.com/ije/esbuild-internal/linker"
 	"github.com/ije/esbuild-internal/logger"
 	"github.com/ije/esbuild-internal/resolver"
 	"github.com/ije/esbuild-internal/test"
@@ -52,7 +54,7 @@ func hasErrors(msgs []logger.Msg) bool {
 type bundled struct {
 	files              map[string]string
 	entryPaths         []string
-	entryPathsAdvanced []EntryPoint
+	entryPathsAdvanced []bundler.EntryPoint
 	expectedScanLog    string
 	expectedCompileLog string
 	options            config.Options
@@ -115,9 +117,9 @@ func (s *suite) __expectBundledImpl(t *testing.T, args bundled, fsKind fs.MockKi
 		if args.debugLogs {
 			logKind = logger.DeferLogAll
 		}
-		entryPoints := make([]EntryPoint, 0, len(args.entryPaths)+len(args.entryPathsAdvanced))
+		entryPoints := make([]bundler.EntryPoint, 0, len(args.entryPaths)+len(args.entryPathsAdvanced))
 		for _, path := range args.entryPaths {
-			entryPoints = append(entryPoints, EntryPoint{InputPath: path})
+			entryPoints = append(entryPoints, bundler.EntryPoint{InputPath: path})
 		}
 		entryPoints = append(entryPoints, args.entryPathsAdvanced...)
 
@@ -128,8 +130,8 @@ func (s *suite) __expectBundledImpl(t *testing.T, args bundled, fsKind fs.MockKi
 				entryPoints[i] = entry
 			}
 
-			for i, absPath := range args.options.InjectAbsPaths {
-				args.options.InjectAbsPaths[i] = unix2win(absPath)
+			for i, absPath := range args.options.InjectPaths {
+				args.options.InjectPaths[i] = unix2win(absPath)
 			}
 
 			for key, value := range args.options.PackageAliases {
@@ -156,7 +158,7 @@ func (s *suite) __expectBundledImpl(t *testing.T, args bundled, fsKind fs.MockKi
 		mockFS := fs.MockFS(args.files, fsKind)
 		args.options.OmitRuntimeForTests = true
 		resolver := resolver.NewResolver(mockFS, log, caches, args.options)
-		bundle := ScanBundle(log, mockFS, resolver, caches, entryPoints, args.options, nil)
+		bundle := bundler.ScanBundle(log, mockFS, resolver, caches, entryPoints, args.options, nil)
 		msgs := log.Done()
 		assertLog(t, msgs, args.expectedScanLog)
 
@@ -166,7 +168,7 @@ func (s *suite) __expectBundledImpl(t *testing.T, args bundled, fsKind fs.MockKi
 		}
 
 		log = logger.NewDeferLog(logKind, nil)
-		results, metafileJSON := bundle.Compile(log, nil, nil)
+		results, metafileJSON := bundle.Compile(log, nil, nil, linker.Link)
 		msgs = log.Done()
 		assertLog(t, msgs, args.expectedCompileLog)
 
@@ -180,15 +182,13 @@ func (s *suite) __expectBundledImpl(t *testing.T, args bundled, fsKind fs.MockKi
 		// map parsing library.
 		generated := ""
 		for _, result := range results {
-			if !strings.HasSuffix(result.AbsPath, ".map") {
-				if generated != "" {
-					generated += "\n"
-				}
-				if fsKind == fs.MockWindows {
-					result.AbsPath = win2unix(result.AbsPath)
-				}
-				generated += fmt.Sprintf("---------- %s ----------\n%s", result.AbsPath, string(result.Contents))
+			if generated != "" {
+				generated += "\n"
 			}
+			if fsKind == fs.MockWindows {
+				result.AbsPath = win2unix(result.AbsPath)
+			}
+			generated += fmt.Sprintf("---------- %s ----------\n%s", result.AbsPath, string(result.Contents))
 		}
 		if metafileJSON != "" {
 			generated += fmt.Sprintf("---------- metafile.json ----------\n%s", metafileJSON)

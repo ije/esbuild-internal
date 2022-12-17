@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.16.8
+
+* Allow plugins to resolve injected files ([#2754](https://github.com/evanw/esbuild/issues/2754))
+
+    Previously paths passed to the `inject` feature were always interpreted as file system paths. This meant that `onResolve` plugins would not be run for them and esbuild's default path resolver would always be used. This meant that the `inject` feature couldn't be used in the browser since the browser doesn't have access to a file system. This release runs paths passed to `inject` through esbuild's full path resolution pipeline so plugins now have a chance to handle them using `onResolve` callbacks. This makes it possible to write a plugin that makes esbuild's `inject` work in the browser.
+
+* Add the `empty` loader ([#1541](https://github.com/evanw/esbuild/issues/1541), [#2753](https://github.com/evanw/esbuild/issues/2753))
+
+    The new `empty` loader tells esbuild to pretend that a file is empty. So for example `--loader:.css=empty` effectively skips all imports of `.css` files in JavaScript so that they aren't included in the bundle, since `import "./some-empty-file"` in JavaScript doesn't bundle anything. You can also use the `empty` loader to remove asset references in CSS files. For example `--loader:.png=empty` causes esbuild to replace asset references such as `url(image.png)` with `url()` so that they are no longer included in the resulting style sheet.
+
+* Fix `</script>` and `</style>` escaping for non-default targets ([#2748](https://github.com/evanw/esbuild/issues/2748))
+
+    The change in version 0.16.0 to give control over `</script>` escaping via `--supported:inline-script=false` or `--supported:inline-script=true` accidentally broke automatic escaping of `</script>` when an explicit `target` setting is specified. This release restores the correct automatic escaping of `</script>` (which should not depend on what `target` is set to).
+
+* Enable the `exports` field with `NODE_PATHS` ([#2752](https://github.com/evanw/esbuild/issues/2752))
+
+    Node has a rarely-used feature where you can extend the set of directories that node searches for packages using the `NODE_PATHS` environment variable. While esbuild supports this too, previously it only supported the old `main` field path resolution but did not support the new `exports` field package resolution. This release makes the path resolution rules the same again for both `node_modules` directories and `NODE_PATHS` directories.
+
+## 0.16.7
+
+* Include `file` loader strings in metafile imports ([#2731](https://github.com/evanw/esbuild/issues/2731))
+
+    Bundling a file with the `file` loader copies that file to the output directory and imports a module with the path to the copied file in the `default` export. Previously when bundling with the `file` loader, there was no reference in the metafile from the JavaScript file containing the path string to the copied file. With this release, there will now be a reference in the metafile in the `imports` array with the kind `file-loader`:
+
+    ```diff
+     {
+       ...
+       "outputs": {
+         "out/image-55CCFTCE.svg": {
+           ...
+         },
+         "out/entry.js": {
+           "imports": [
+    +        {
+    +          "path": "out/image-55CCFTCE.svg",
+    +          "kind": "file-loader"
+    +        }
+           ],
+           ...
+         }
+       }
+     }
+    ```
+
+* Fix byte counts in metafile regarding references to other output files ([#2071](https://github.com/evanw/esbuild/issues/2071))
+
+    Previously files that contained references to other output files had slightly incorrect metadata for the byte counts of input files which contributed to that output file. So for example if `app.js` imports `image.png` using the file loader and esbuild generates `out.js` and `image-LSAMBFUD.png`, the metadata for how many bytes of `out.js` are from `app.js` was slightly off (the metadata for the byte count of `out.js` was still correct). The reason is because esbuild substitutes the final paths for references between output files toward the end of the build to handle cyclic references, and the byte counts needed to be adjusted as well during the path substitution. This release fixes these byte counts (specifically the `bytesInOutput` values).
+
+* The alias feature now strips a trailing slash ([#2730](https://github.com/evanw/esbuild/issues/2730))
+
+    People sometimes add a trailing slash to the name of one of node's built-in modules to force node to import from the file system instead of importing the built-in module. For example, importing `util` imports node's built-in module called `util` but importing `util/` tries to find a package called `util` on the file system. Previously attempting to use esbuild's package alias feature to replace imports to `util` with a specific file would fail because the file path would also gain a trailing slash (e.g. mapping `util` to `./file.js` turned `util/` into `./file.js/`). With this release, esbuild will now omit the path suffix if it's a single trailing slash, which should now allow you to successfully apply aliases to these import paths.
+
 ## 0.16.6
 
 * Do not mark subpath imports as external with `--packages=external` ([#2741](https://github.com/evanw/esbuild/issues/2741))

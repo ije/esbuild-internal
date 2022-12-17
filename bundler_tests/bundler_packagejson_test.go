@@ -1,4 +1,4 @@
-package bundler
+package bundler_tests
 
 import (
 	"testing"
@@ -2715,7 +2715,7 @@ NOTE: You can mark the path "xyz/src/foo.js" as external to exclude it from the 
 }
 
 func TestCommonJSVariableInESMTypeModule(t *testing.T) {
-	ts_suite.expectBundled(t, bundled{
+	packagejson_suite.expectBundled(t, bundled{
 		files: map[string]string{
 			"/entry.js":     `module.exports = null`,
 			"/package.json": `{ "type": "module" }`,
@@ -2729,5 +2729,37 @@ func TestCommonJSVariableInESMTypeModule(t *testing.T) {
 package.json: NOTE: This file is considered to be an ECMAScript module because the enclosing "package.json" file sets the type of this file to "module":
 NOTE: Node's package format requires that CommonJS files in a "type": "module" package use the ".cjs" file extension.
 `,
+	})
+}
+
+func TestPackageJsonNodePathsIssue2752(t *testing.T) {
+	packagejson_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/src/entry.js": `
+				import "pkg1"
+				import "pkg2"
+				import "@scope/pkg3/baz"
+				import "@scope/pkg4"
+			`,
+			"/usr/lib/pkg/pkg1/package.json":          `{ "main": "./foo.js" }`,
+			"/usr/lib/pkg/pkg1/foo.js":                `console.log('pkg1')`,
+			"/lib/pkg/pkg2/package.json":              `{ "exports": { ".": "./bar.js" } }`,
+			"/lib/pkg/pkg2/bar.js":                    `console.log('pkg2')`,
+			"/var/lib/pkg/@scope/pkg3/package.json":   `{ "browser": { "./baz.js": "./baz-browser.js" } }`,
+			"/var/lib/pkg/@scope/pkg3/baz-browser.js": `console.log('pkg3')`,
+			"/tmp/pkg/@scope/pkg4/package.json":       `{ "exports": { ".": { "import": "./bat.js" } } }`,
+			"/tmp/pkg/@scope/pkg4/bat.js":             `console.log('pkg4')`,
+		},
+		entryPaths: []string{"/src/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+			AbsNodePaths: []string{
+				"/usr/lib/pkg",
+				"/lib/pkg",
+				"/var/lib/pkg",
+				"/tmp/pkg",
+			},
+		},
 	})
 }
