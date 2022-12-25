@@ -533,6 +533,53 @@ func TestStrictMode(t *testing.T) {
 	expectParseError(t, "with (y) z; await 0", tlaKeyword)
 	expectParseError(t, "for await (x of y); with (y) z", tlaKeyword)
 	expectParseError(t, "with (y) z; for await (x of y);", tlaKeyword)
+
+	fAlreadyDeclaredError := "<stdin>: ERROR: The symbol \"f\" has already been declared\n" +
+		"<stdin>: NOTE: The symbol \"f\" was originally declared here:\n"
+	nestedNote := "<stdin>: NOTE: Duplicate function declarations are not allowed in nested blocks"
+	moduleNote := "<stdin>: NOTE: Duplicate top-level function declarations are not allowed in an ECMAScript module. " +
+		"This file is considered to be an ECMAScript module because of the \"export\" keyword here:\n"
+
+	cases := []string{
+		"function f() {} function f() {}",
+		"function f() {} function *f() {}",
+		"function *f() {} function f() {}",
+		"function f() {} async function f() {}",
+		"async function f() {} function f() {}",
+		"function f() {} async function *f() {}",
+		"async function *f() {} function f() {}",
+	}
+
+	for _, c := range cases {
+		expectParseError(t, c, "")
+		expectParseError(t, "'use strict'; "+c, "")
+		expectParseError(t, "function foo() { 'use strict'; "+c+" }", "")
+	}
+
+	expectParseError(t, "function f() {} function f() {} export {}", fAlreadyDeclaredError+moduleNote)
+	expectParseError(t, "function f() {} function *f() {} export {}", fAlreadyDeclaredError+moduleNote)
+	expectParseError(t, "function f() {} async function f() {} export {}", fAlreadyDeclaredError+moduleNote)
+	expectParseError(t, "function *f() {} function f() {} export {}", fAlreadyDeclaredError+moduleNote)
+	expectParseError(t, "async function f() {} function f() {} export {}", fAlreadyDeclaredError+moduleNote)
+
+	expectParseError(t, "'use strict'; { function f() {} function f() {} }",
+		fAlreadyDeclaredError+nestedNote+" in strict mode. Strict mode is triggered by the \"use strict\" directive here:\n")
+	expectParseError(t, "'use strict'; switch (0) { case 1: function f() {} default: function f() {} }",
+		fAlreadyDeclaredError+nestedNote+" in strict mode. Strict mode is triggered by the \"use strict\" directive here:\n")
+
+	expectParseError(t, "function foo() { 'use strict'; { function f() {} function f() {} } }",
+		fAlreadyDeclaredError+nestedNote+" in strict mode. Strict mode is triggered by the \"use strict\" directive here:\n")
+	expectParseError(t, "function foo() { 'use strict'; switch (0) { case 1: function f() {} default: function f() {} } }",
+		fAlreadyDeclaredError+nestedNote+" in strict mode. Strict mode is triggered by the \"use strict\" directive here:\n")
+
+	expectParseError(t, "{ function f() {} function f() {} } export {}",
+		fAlreadyDeclaredError+nestedNote+" in an ECMAScript module. This file is considered to be an ECMAScript module because of the \"export\" keyword here:\n")
+	expectParseError(t, "switch (0) { case 1: function f() {} default: function f() {} } export {}",
+		fAlreadyDeclaredError+nestedNote+" in an ECMAScript module. This file is considered to be an ECMAScript module because of the \"export\" keyword here:\n")
+
+	expectParseError(t, "var x; var x", "")
+	expectParseError(t, "'use strict'; var x; var x", "")
+	expectParseError(t, "var x; var x; export {}", "")
 }
 
 func TestExponentiation(t *testing.T) {
@@ -1445,7 +1492,33 @@ func TestFunction(t *testing.T) {
 	expectPrintedMangle(t, "var f; function f() { x() } function f() { y() }", "var f;\nfunction f() {\n  y();\n}\n")
 	expectPrintedMangle(t, "function f() { x() } function f() { y() } var f", "function f() {\n  y();\n}\nvar f;\n")
 	expectPrintedMangle(t, "function f() { x() } var f; function f() { y() }", "function f() {\n  x();\n}\nvar f;\nfunction f() {\n  y();\n}\n")
-	expectPrintedMangle(t, "export function f() { x() } function f() { y() }", "export function f() {\n  x();\n}\nfunction f() {\n  y();\n}\n")
+
+	redeclaredError := "<stdin>: ERROR: The symbol \"f\" has already been declared\n" +
+		"<stdin>: NOTE: The symbol \"f\" was originally declared here:\n"
+
+	expectParseError(t, "function *f() {} function *f() {}", "")
+	expectParseError(t, "function f() {} let f", redeclaredError)
+	expectParseError(t, "function f() {} var f", "")
+	expectParseError(t, "function *f() {} var f", "")
+	expectParseError(t, "let f; function f() {}", redeclaredError)
+	expectParseError(t, "var f; function f() {}", "")
+	expectParseError(t, "var f; function *f() {}", "")
+
+	expectParseError(t, "{ function *f() {} function *f() {} }", redeclaredError)
+	expectParseError(t, "{ function f() {} let f }", redeclaredError)
+	expectParseError(t, "{ function f() {} var f }", redeclaredError)
+	expectParseError(t, "{ function *f() {} var f }", redeclaredError)
+	expectParseError(t, "{ let f; function f() {} }", redeclaredError)
+	expectParseError(t, "{ var f; function f() {} }", redeclaredError)
+	expectParseError(t, "{ var f; function *f() {} }", redeclaredError)
+
+	expectParseError(t, "switch (0) { case 1: function *f() {} default: function *f() {} }", redeclaredError)
+	expectParseError(t, "switch (0) { case 1: function f() {} default: let f }", redeclaredError)
+	expectParseError(t, "switch (0) { case 1: function f() {} default: var f }", redeclaredError)
+	expectParseError(t, "switch (0) { case 1: function *f() {} default: var f }", redeclaredError)
+	expectParseError(t, "switch (0) { case 1: let f; default: function f() {} }", redeclaredError)
+	expectParseError(t, "switch (0) { case 1: var f; default: function f() {} }", redeclaredError)
+	expectParseError(t, "switch (0) { case 1: var f; default: function *f() {} }", redeclaredError)
 }
 
 func TestClass(t *testing.T) {
@@ -4565,6 +4638,8 @@ func TestPreservedComments(t *testing.T) {
 	expectPrinted(t, "//!", "//!\n")
 	expectPrinted(t, "//@license", "//@license\n")
 	expectPrinted(t, "//@preserve", "//@preserve\n")
+	expectPrinted(t, "// @license", "// @license\n")
+	expectPrinted(t, "// @preserve", "// @preserve\n")
 
 	expectPrinted(t, "/**/", "")
 	expectPrinted(t, "/*preserve*/", "")
@@ -4572,6 +4647,8 @@ func TestPreservedComments(t *testing.T) {
 	expectPrinted(t, "/*!*/", "/*!*/\n")
 	expectPrinted(t, "/*@license*/", "/*@license*/\n")
 	expectPrinted(t, "/*@preserve*/", "/*@preserve*/\n")
+	expectPrinted(t, "/*\n * @license\n */", "/*\n * @license\n */\n")
+	expectPrinted(t, "/*\n * @preserve\n */", "/*\n * @preserve\n */\n")
 
 	expectPrinted(t, "foo() //! test", "foo();\n//! test\n")
 	expectPrinted(t, "//! test\nfoo()", "//! test\nfoo();\n")

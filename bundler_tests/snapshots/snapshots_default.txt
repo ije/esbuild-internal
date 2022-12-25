@@ -1807,6 +1807,74 @@ console.log([
 };
 
 ================================================================================
+TestKeepNamesClassStaticName
+---------- /out.js ----------
+class A {
+  static foo;
+}
+__name(A, "A");
+class B {
+  static name;
+}
+class C {
+  static name() {
+  }
+}
+class D {
+  static get name() {
+  }
+}
+class E {
+  static set name(x) {
+  }
+}
+class F {
+  static ["name"] = 0;
+}
+let a = /* @__PURE__ */ __name(class a3 {
+  static foo;
+}, "a");
+let b = class b3 {
+  static name;
+};
+let c = class c3 {
+  static name() {
+  }
+};
+let d = class d3 {
+  static get name() {
+  }
+};
+let e = class e3 {
+  static set name(x) {
+  }
+};
+let f = class f3 {
+  static ["name"] = 0;
+};
+let a2 = /* @__PURE__ */ __name(class {
+  static foo;
+}, "a2");
+let b2 = class {
+  static name;
+};
+let c2 = class {
+  static name() {
+  }
+};
+let d2 = class {
+  static get name() {
+  }
+};
+let e2 = class {
+  static set name(x) {
+  }
+};
+let f2 = class {
+  static ["name"] = 0;
+};
+
+================================================================================
 TestKeepNamesTreeShaking
 ---------- /out.js ----------
 // entry.js
@@ -1913,6 +1981,50 @@ c {
 /* entry.css */
 /*! Copyright notice 1 */
 /*! Copyright notice 2 */
+
+================================================================================
+TestLegalCommentsEscapeSlashScriptAndStyleEndOfFile
+---------- /out/entry.js ----------
+x;a;
+/*! <\/script> */
+/*! Bundled license information:
+
+js-pkg/index.js:
+  (*! <\/script> *)
+*/
+
+---------- /out/entry.css ----------
+x{y:z}a{b:c}
+/*! <\/style> */
+/*! Bundled license information:
+
+css-pkg/index.css:
+  (*! <\/style> *)
+*/
+
+================================================================================
+TestLegalCommentsEscapeSlashScriptAndStyleExternal
+---------- /out/entry.js.LEGAL.txt ----------
+/*! </script> */
+
+Bundled license information:
+
+js-pkg/index.js:
+  /*! </script> */
+
+---------- /out/entry.js ----------
+x;a;
+
+---------- /out/entry.css.LEGAL.txt ----------
+/*! </style> */
+
+Bundled license information:
+
+css-pkg/index.css:
+  /*! </style> */
+
+---------- /out/entry.css ----------
+x{y:z}a{b:c}
 
 ================================================================================
 TestLegalCommentsExternal
@@ -2029,6 +2141,94 @@ c {
 /*! For license information please see entry.css.LEGAL.txt */
 
 ================================================================================
+TestLegalCommentsManyEndOfFile
+---------- /out/entry.js ----------
+console.log("in a");console.log("in b");function foo(){console.log("in c");}foo();function bar(){console.log("some-other-pkg")}bar();
+//! Copyright notice 1
+/*
+ * @license
+ * Copyright notice 2
+ */
+// @preserve This is another comment
+/*! Bundled license information:
+
+some-other-pkg/js/index.js:
+  (*
+   * @preserve
+   * (c) Evil Software Corp
+   *)
+
+some-pkg/js/index.js:
+  (*! (c) Good Software Corp *)
+*/
+
+---------- /out/entry.css ----------
+a{zoom:2}b{zoom:2}c{zoom:2}.some-other-pkg{zoom:2}
+/*! Copyright notice 1 */
+/*
+ * @license
+ * Copyright notice 2
+ */
+/* @preserve This is another comment */
+/*! Bundled license information:
+
+some-other-pkg/css/index.css:
+  (** @preserve
+   * (c) Evil Software Corp
+   *)
+
+some-pkg/css/index.css:
+  (*! (c) Good Software Corp *)
+*/
+
+================================================================================
+TestLegalCommentsManyLinked
+---------- /out/entry.js.LEGAL.txt ----------
+//! Copyright notice 1
+/*
+ * @license
+ * Copyright notice 2
+ */
+// @preserve This is another comment
+
+Bundled license information:
+
+some-other-pkg/js/index.js:
+  /*
+   * @preserve
+   * (c) Evil Software Corp
+   */
+
+some-pkg/js/index.js:
+  //! (c) Good Software Corp
+
+---------- /out/entry.js ----------
+console.log("in a");console.log("in b");function foo(){console.log("in c");}foo();function bar(){console.log("some-other-pkg")}bar();
+/*! For license information please see entry.js.LEGAL.txt */
+
+---------- /out/entry.css.LEGAL.txt ----------
+/*! Copyright notice 1 */
+/*
+ * @license
+ * Copyright notice 2
+ */
+/* @preserve This is another comment */
+
+Bundled license information:
+
+some-other-pkg/css/index.css:
+  /** @preserve
+   * (c) Evil Software Corp
+   */
+
+some-pkg/css/index.css:
+  /*! (c) Good Software Corp */
+
+---------- /out/entry.css ----------
+a{zoom:2}b{zoom:2}c{zoom:2}.some-other-pkg{zoom:2}
+/*! For license information please see entry.css.LEGAL.txt */
+
+================================================================================
 TestLegalCommentsModifyIndent
 ---------- /out/entry.js ----------
 // entry.js
@@ -2051,6 +2251,46 @@ export {
     zoom: 2;
   }
 }
+
+================================================================================
+TestLegalCommentsNoEscapeSlashScriptEndOfFile
+---------- /out/entry.js ----------
+x;a;
+/*! </script> */
+/*! Bundled license information:
+
+js-pkg/index.js:
+  (*! </script> *)
+*/
+
+---------- /out/entry.css ----------
+x{y:z}a{b:c}
+/*! <\/style> */
+/*! Bundled license information:
+
+css-pkg/index.css:
+  (*! <\/style> *)
+*/
+
+================================================================================
+TestLegalCommentsNoEscapeSlashStyleEndOfFile
+---------- /out/entry.js ----------
+x;a;
+/*! <\/script> */
+/*! Bundled license information:
+
+js-pkg/index.js:
+  (*! <\/script> *)
+*/
+
+---------- /out/entry.css ----------
+x{y:z}a{b:c}
+/*! </style> */
+/*! Bundled license information:
+
+css-pkg/index.css:
+  (*! </style> *)
+*/
 
 ================================================================================
 TestLegalCommentsNone
@@ -3847,6 +4087,12 @@ console.log(8);
 
 // alias9/some/file.js
 console.log(9);
+
+// node_modules/prefix-foo/index.js
+console.log(10);
+
+// node_modules/@scope/prefix-foo/index.js
+console.log(11);
 
 ================================================================================
 TestQuotedProperty

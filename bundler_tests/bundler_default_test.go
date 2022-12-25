@@ -3477,6 +3477,228 @@ func TestLegalCommentsAvoidSlashTagExternal(t *testing.T) {
 	})
 }
 
+func TestLegalCommentsManyEndOfFile(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/project/entry.js": `
+				import './a'
+				import './b'
+				import './c'
+				import 'some-pkg/js'
+			`,
+			"/project/a.js": `console.log('in a') //! Copyright notice 1`,
+			"/project/b.js": `console.log('in b') //! Copyright notice 1`,
+			"/project/c.js": `
+				function foo() {
+					/*
+					 * @license
+					 * Copyright notice 2
+					 */
+					console.log('in c')
+					// @preserve This is another comment
+				}
+				foo()
+			`,
+			"/project/node_modules/some-pkg/js/index.js": `import "some-other-pkg/js" //! (c) Good Software Corp`,
+			"/project/node_modules/some-other-pkg/js/index.js": `
+				function bar() {
+					/*
+					 * @preserve
+					 * (c) Evil Software Corp
+					 */
+					console.log('some-other-pkg')
+				}
+				bar()
+			`,
+
+			"/project/entry.css": `
+				@import "./a.css";
+				@import "./b.css";
+				@import "./c.css";
+				@import 'some-pkg/css';
+			`,
+			"/project/a.css": `a { zoom: 2 } /*! Copyright notice 1 */`,
+			"/project/b.css": `b { zoom: 2 } /*! Copyright notice 1 */`,
+			"/project/c.css": `
+				/*
+				 * @license
+				 * Copyright notice 2
+				 */
+				c {
+					zoom: 2
+				}
+				/* @preserve This is another comment */
+			`,
+			"/project/node_modules/some-pkg/css/index.css": `@import "some-other-pkg/css"; /*! (c) Good Software Corp */`,
+			"/project/node_modules/some-other-pkg/css/index.css": `
+				.some-other-pkg {
+					zoom: 2
+				}
+				/** @preserve
+				 * (c) Evil Software Corp
+				 */
+			`,
+		},
+		entryPaths: []string{"/project/entry.js", "/project/entry.css"},
+		options: config.Options{
+			Mode:             config.ModeBundle,
+			AbsOutputDir:     "/out",
+			MinifyWhitespace: true,
+			LegalComments:    config.LegalCommentsEndOfFile,
+		},
+	})
+}
+
+func TestLegalCommentsEscapeSlashScriptAndStyleEndOfFile(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/project/entry.js":                     `import "js-pkg"; a /*! </script> */`,
+			"/project/node_modules/js-pkg/index.js": `x /*! </script> */`,
+
+			"/project/entry.css":                      `@import "css-pkg"; a { b: c } /*! </style> */`,
+			"/project/node_modules/css-pkg/index.css": `x { y: z } /*! </style> */`,
+		},
+		entryPaths: []string{"/project/entry.js", "/project/entry.css"},
+		options: config.Options{
+			Mode:             config.ModeBundle,
+			AbsOutputDir:     "/out",
+			MinifyWhitespace: true,
+			LegalComments:    config.LegalCommentsEndOfFile,
+		},
+	})
+}
+
+func TestLegalCommentsEscapeSlashScriptAndStyleExternal(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/project/entry.js":                     `import "js-pkg"; a /*! </script> */`,
+			"/project/node_modules/js-pkg/index.js": `x /*! </script> */`,
+
+			"/project/entry.css":                      `@import "css-pkg"; a { b: c } /*! </style> */`,
+			"/project/node_modules/css-pkg/index.css": `x { y: z } /*! </style> */`,
+		},
+		entryPaths: []string{"/project/entry.js", "/project/entry.css"},
+		options: config.Options{
+			Mode:             config.ModeBundle,
+			AbsOutputDir:     "/out",
+			MinifyWhitespace: true,
+			LegalComments:    config.LegalCommentsExternalWithoutComment,
+		},
+	})
+}
+
+func TestLegalCommentsNoEscapeSlashScriptEndOfFile(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/project/entry.js":                     `import "js-pkg"; a /*! </script> */`,
+			"/project/node_modules/js-pkg/index.js": `x /*! </script> */`,
+
+			"/project/entry.css":                      `@import "css-pkg"; a { b: c } /*! </style> */`,
+			"/project/node_modules/css-pkg/index.css": `x { y: z } /*! </style> */`,
+		},
+		entryPaths: []string{"/project/entry.js", "/project/entry.css"},
+		options: config.Options{
+			Mode:                  config.ModeBundle,
+			AbsOutputDir:          "/out",
+			MinifyWhitespace:      true,
+			LegalComments:         config.LegalCommentsEndOfFile,
+			UnsupportedJSFeatures: compat.InlineScript,
+		},
+	})
+}
+
+func TestLegalCommentsNoEscapeSlashStyleEndOfFile(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/project/entry.js":                     `import "js-pkg"; a /*! </script> */`,
+			"/project/node_modules/js-pkg/index.js": `x /*! </script> */`,
+
+			"/project/entry.css":                      `@import "css-pkg"; a { b: c } /*! </style> */`,
+			"/project/node_modules/css-pkg/index.css": `x { y: z } /*! </style> */`,
+		},
+		entryPaths: []string{"/project/entry.js", "/project/entry.css"},
+		options: config.Options{
+			Mode:                   config.ModeBundle,
+			AbsOutputDir:           "/out",
+			MinifyWhitespace:       true,
+			LegalComments:          config.LegalCommentsEndOfFile,
+			UnsupportedCSSFeatures: compat.InlineStyle,
+		},
+	})
+}
+
+func TestLegalCommentsManyLinked(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/project/entry.js": `
+				import './a'
+				import './b'
+				import './c'
+				import 'some-pkg/js'
+			`,
+			"/project/a.js": `console.log('in a') //! Copyright notice 1`,
+			"/project/b.js": `console.log('in b') //! Copyright notice 1`,
+			"/project/c.js": `
+				function foo() {
+					/*
+					 * @license
+					 * Copyright notice 2
+					 */
+					console.log('in c')
+					// @preserve This is another comment
+				}
+				foo()
+			`,
+			"/project/node_modules/some-pkg/js/index.js": `import "some-other-pkg/js" //! (c) Good Software Corp`,
+			"/project/node_modules/some-other-pkg/js/index.js": `
+				function bar() {
+					/*
+					 * @preserve
+					 * (c) Evil Software Corp
+					 */
+					console.log('some-other-pkg')
+				}
+				bar()
+			`,
+
+			"/project/entry.css": `
+				@import "./a.css";
+				@import "./b.css";
+				@import "./c.css";
+				@import 'some-pkg/css';
+			`,
+			"/project/a.css": `a { zoom: 2 } /*! Copyright notice 1 */`,
+			"/project/b.css": `b { zoom: 2 } /*! Copyright notice 1 */`,
+			"/project/c.css": `
+				/*
+				 * @license
+				 * Copyright notice 2
+				 */
+				c {
+					zoom: 2
+				}
+				/* @preserve This is another comment */
+			`,
+			"/project/node_modules/some-pkg/css/index.css": `@import "some-other-pkg/css"; /*! (c) Good Software Corp */`,
+			"/project/node_modules/some-other-pkg/css/index.css": `
+				.some-other-pkg {
+					zoom: 2
+				}
+				/** @preserve
+				 * (c) Evil Software Corp
+				 */
+			`,
+		},
+		entryPaths: []string{"/project/entry.js", "/project/entry.css"},
+		options: config.Options{
+			Mode:             config.ModeBundle,
+			AbsOutputDir:     "/out",
+			MinifyWhitespace: true,
+			LegalComments:    config.LegalCommentsLinkedWithComment,
+		},
+	})
+}
+
 // The IIFE should not be an arrow function when targeting ES5
 func TestIIFE_ES5(t *testing.T) {
 	default_suite.expectBundled(t, bundled{
@@ -4860,6 +5082,41 @@ func TestKeepNamesTreeShaking(t *testing.T) {
 			AbsOutputFile: "/out.js",
 			KeepNames:     true,
 			MinifySyntax:  true,
+		},
+	})
+}
+
+func TestKeepNamesClassStaticName(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				class A { static foo }
+				class B { static name }
+				class C { static name() {} }
+				class D { static get name() {} }
+				class E { static set name(x) {} }
+				class F { static ['name'] = 0 }
+
+				let a = class a { static foo }
+				let b = class b { static name }
+				let c = class c { static name() {} }
+				let d = class d { static get name() {} }
+				let e = class e { static set name(x) {} }
+				let f = class f { static ['name'] = 0 }
+
+				let a2 = class { static foo }
+				let b2 = class { static name }
+				let c2 = class { static name() {} }
+				let d2 = class { static get name() {} }
+				let e2 = class { static set name(x) {} }
+				let f2 = class { static ['name'] = 0 }
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:          config.ModePassThrough,
+			AbsOutputFile: "/out.js",
+			KeepNames:     true,
 		},
 	})
 }
@@ -6925,18 +7182,22 @@ func TestPackageAlias(t *testing.T) {
 				import "@abs-path/pkg7/foo"
 				import "@scope-only/pkg8"
 				import "slash/"
+				import "prefix-foo"
+				import "@scope/prefix-foo"
 			`,
-			"/nested3/index.js":                     `import "pkg3"`,
-			"/nested3/node_modules/alias3/index.js": `test failure`,
-			"/node_modules/alias1/index.js":         `console.log(1)`,
-			"/node_modules/alias2/foo.js":           `console.log(2)`,
-			"/node_modules/alias3/index.js":         `console.log(3)`,
-			"/node_modules/alias4/index.js":         `console.log(4)`,
-			"/node_modules/alias5/foo.js":           `console.log(5)`,
-			"/alias6/dir/index.js":                  `console.log(6)`,
-			"/alias7/dir/foo/index.js":              `console.log(7)`,
-			"/alias8/dir/pkg8/index.js":             `console.log(8)`,
-			"/alias9/some/file.js":                  `console.log(9)`,
+			"/nested3/index.js":                        `import "pkg3"`,
+			"/nested3/node_modules/alias3/index.js":    `test failure`,
+			"/node_modules/alias1/index.js":            `console.log(1)`,
+			"/node_modules/alias2/foo.js":              `console.log(2)`,
+			"/node_modules/alias3/index.js":            `console.log(3)`,
+			"/node_modules/alias4/index.js":            `console.log(4)`,
+			"/node_modules/alias5/foo.js":              `console.log(5)`,
+			"/alias6/dir/index.js":                     `console.log(6)`,
+			"/alias7/dir/foo/index.js":                 `console.log(7)`,
+			"/alias8/dir/pkg8/index.js":                `console.log(8)`,
+			"/alias9/some/file.js":                     `console.log(9)`,
+			"/node_modules/prefix-foo/index.js":        `console.log(10)`,
+			"/node_modules/@scope/prefix-foo/index.js": `console.log(11)`,
 		},
 		entryPaths: []string{"/entry.js"},
 		options: config.Options{
@@ -6952,6 +7213,8 @@ func TestPackageAlias(t *testing.T) {
 				"@abs-path/pkg7": `/alias7/dir`,
 				"@scope-only":    "/alias8/dir",
 				"slash":          "/alias9/some/file.js",
+				"prefix":         "alias10",
+				"@scope/prefix":  "alias11",
 			},
 		},
 	})

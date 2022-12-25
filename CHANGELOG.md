@@ -1,5 +1,125 @@
 # Changelog
 
+## 0.16.10
+
+* Change the default "legal comment" behavior again ([#2745](https://github.com/evanw/esbuild/issues/2745))
+
+    The legal comments feature automatically gathers comments containing `@license` or `@preserve` and puts the comments somewhere (either in the generated code or in a separate file). This behavior used to be on by default but was disabled by default in version 0.16.0 because automatically inserting comments is potentially confusing and misleading. These comments can appear to be assigning the copyright of your code to another entity. And this behavior can be especially problematic if it happens automatically by default since you may not even be aware of it happening. For example, if you bundle the TypeScript compiler the preserving legal comments means your source code would contain this comment, which appears to be assigning the copyright of all of your code to Microsoft:
+
+    ```js
+    /*! *****************************************************************************
+    Copyright (c) Microsoft Corporation. All rights reserved.
+    Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+    this file except in compliance with the License. You may obtain a copy of the
+    License at http://www.apache.org/licenses/LICENSE-2.0
+
+    THIS CODE IS PROVIDED ON AN *AS IS* BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+    KIND, EITHER EXPRESS OR IMPLIED, INCLUDING WITHOUT LIMITATION ANY IMPLIED
+    WARRANTIES OR CONDITIONS OF TITLE, FITNESS FOR A PARTICULAR PURPOSE,
+    MERCHANTABLITY OR NON-INFRINGEMENT.
+
+    See the Apache Version 2.0 License for specific language governing permissions
+    and limitations under the License.
+    ***************************************************************************** */
+    ```
+
+    However, people have asked for this feature to be re-enabled by default. To resolve the confusion about what these comments are applying to, esbuild's default behavior will now be to attempt to describe which package the comments are coming from. So while this feature has been re-enabled by default, the output will now look something like this instead:
+
+    ```js
+    /*! Bundled license information:
+
+    typescript/lib/typescript.js:
+      (*! *****************************************************************************
+      Copyright (c) Microsoft Corporation. All rights reserved.
+      Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+      this file except in compliance with the License. You may obtain a copy of the
+      License at http://www.apache.org/licenses/LICENSE-2.0
+
+      THIS CODE IS PROVIDED ON AN *AS IS* BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+      KIND, EITHER EXPRESS OR IMPLIED, INCLUDING WITHOUT LIMITATION ANY IMPLIED
+      WARRANTIES OR CONDITIONS OF TITLE, FITNESS FOR A PARTICULAR PURPOSE,
+      MERCHANTABLITY OR NON-INFRINGEMENT.
+
+      See the Apache Version 2.0 License for specific language governing permissions
+      and limitations under the License.
+      ***************************************************************************** *)
+    */
+    ```
+
+    Note that you can still customize this behavior with the `--legal-comments=` flag. For example, you can use `--legal-comments=none` to turn this off, or you can use `--legal-comments=linked` to put these comments in a separate `.LEGAL.txt` file instead.
+
+* Enable `external` legal comments with the transform API ([#2390](https://github.com/evanw/esbuild/issues/2390))
+
+    Previously esbuild's transform API only supported `none`, `inline`, or `eof` legal comments. With this release, `external` legal comments are now also supported with the transform API. This only applies to the JS and Go APIs, not to the CLI, and looks like this:
+
+    * JS:
+
+        ```js
+        const { code, legalComments } = await esbuild.transform(input, {
+          legalComments: 'external',
+        })
+        ```
+
+    * Go:
+
+        ```go
+        result := api.Transform(input, api.TransformOptions{
+          LegalComments: api.LegalCommentsEndOfFile,
+        })
+        code := result.Code
+        legalComments := result.LegalComments
+        ```
+
+* Fix duplicate function declaration edge cases ([#2757](https://github.com/evanw/esbuild/issues/2757))
+
+    The change in the previous release to forbid duplicate function declarations in certain cases accidentally forbid some edge cases that should have been allowed. Specifically duplicate function declarations are forbidden in nested blocks in strict mode and at the top level of modules, but are allowed when they are declared at the top level of function bodies. This release fixes the regression by re-allowing the last case.
+
+* Allow package subpaths with `alias` ([#2715](https://github.com/evanw/esbuild/issues/2715))
+
+    Previously the names passed to the `alias` feature had to be the name of a package (with or without a package scope). With this release, you can now also use the `alias` feature with package subpaths. So for example you can now create an alias that substitutes `@org/pkg/lib` with something else.
+
+## 0.16.9
+
+* Update to Unicode 15.0.0
+
+    The character tables that determine which characters form valid JavaScript identifiers have been updated from Unicode version 14.0.0 to the newly-released Unicode version 15.0.0. I'm not putting an example in the release notes because all of the new characters will likely just show up as little squares since fonts haven't been updated yet. But you can read https://www.unicode.org/versions/Unicode15.0.0/#Summary for more information about the changes.
+
+* Disallow duplicate lexically-declared names in nested blocks and in strict mode
+
+    In strict mode or in a nested block, it's supposed to be a syntax error to declare two symbols with the same name unless all duplicate entries are either `function` declarations or all `var` declarations. However, esbuild was overly permissive and allowed this when duplicate entries were either `function` declarations or `var` declarations (even if they were mixed). This check has now been made more restrictive to match the JavaScript specification:
+
+    ```js
+    // JavaScript allows this
+    var a
+    function a() {}
+    {
+      var b
+      var b
+      function c() {}
+      function c() {}
+    }
+
+    // JavaScript doesn't allow this
+    {
+      var d
+      function d() {}
+    }
+    ```
+
+* Add a type declaration for the new `empty` loader ([#2755](https://github.com/evanw/esbuild/pull/2755))
+
+    I forgot to add this in the previous release. It has now been added.
+
+    This fix was contributed by [@fz6m](https://github.com/fz6m).
+
+* Add support for the `v` flag in regular expression literals
+
+    People are currently working on adding a `v` flag to JavaScript regular expresions. You can read more about this flag here: https://v8.dev/features/regexp-v-flag. This release adds support for parsing this flag, so esbuild will now no longer consider regular expression literals with this flag to be a syntax error. If the target is set to something other than `esnext`, esbuild will transform regular expression literals containing this flag into a `new RegExp()` constructor call so the resulting code doesn't have a syntax error. This enables you to provide a polyfill for `RegExp` that implements the `v` flag to get your code to work at run-time. While esbuild doesn't typically adopt proposals until they're already shipping in a real JavaScript run-time, I'm adding it now because a) esbuild's implementation doesn't need to change as the proposal evolves, b) this isn't really new syntax since regular expression literals already have flags, and c) esbuild's implementation is a trivial pass-through anyway.
+
+* Avoid keeping the name of classes with static `name` properties
+
+    The `--keep-names` property attempts to preserve the original value of the `name` property for functions and classes even when identifiers are renamed by the minifier or to avoid a name collision. This is currently done by generating code to assign a string to the `name` property on the function or class object. However, this should not be done for classes with a static `name` property since in that case the explicitly-defined `name` property overwrites the automatically-generated class name. With this release, esbuild will now no longer attempt to preserve the `name` property for classes with a static `name` property.
+
 ## 0.16.8
 
 * Allow plugins to resolve injected files ([#2754](https://github.com/evanw/esbuild/issues/2754))
