@@ -1,8 +1,8 @@
-import { Untar } from "https://deno.land/std@0.165.0/archive/tar.ts";
-import { readAll } from "https://deno.land/std@0.165.0/streams/conversion.ts";
-import { readerFromStreamReader } from "https://deno.land/std@0.167.0/streams/reader_from_stream_reader.ts";
-import { ensureDir } from "https://deno.land/std@0.165.0/fs/ensure_dir.ts";
-import { join } from "https://deno.land/std@0.165.0/path/mod.ts";
+import { Untar } from "https://deno.land/std@0.170.0/archive/tar.ts";
+import { readAll } from "https://deno.land/std@0.170.0/streams/conversion.ts";
+import { readerFromStreamReader } from "https://deno.land/std@0.170.0/streams/reader_from_stream_reader.ts";
+import { ensureDir } from "https://deno.land/std@0.170.0/fs/ensure_dir.ts";
+import { join } from "https://deno.land/std@0.170.0/path/mod.ts";
 
 const version = Deno.args[0];
 if (!/^\d+\.\d+\.\d+$/.test(version)) {

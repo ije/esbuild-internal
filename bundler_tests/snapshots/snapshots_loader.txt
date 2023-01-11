@@ -42,11 +42,13 @@ a {
       "imports": [
         {
           "path": "a.empty",
-          "kind": "import-rule"
+          "kind": "import-rule",
+          "original": "a.empty"
         },
         {
           "path": "b.empty",
-          "kind": "url-token"
+          "kind": "url-token",
+          "original": "b.empty"
         }
       ]
     }
@@ -129,21 +131,26 @@ console.log(ns, import_c.default, void 0);
       "imports": [
         {
           "path": "a.empty",
-          "kind": "import-statement"
+          "kind": "import-statement",
+          "original": "./a.empty"
         },
         {
           "path": "b.empty",
-          "kind": "import-statement"
+          "kind": "import-statement",
+          "original": "./b.empty"
         },
         {
           "path": "c.empty",
-          "kind": "import-statement"
+          "kind": "import-statement",
+          "original": "./c.empty"
         },
         {
           "path": "d.empty",
-          "kind": "import-statement"
+          "kind": "import-statement",
+          "original": "./d.empty"
         }
-      ]
+      ],
+      "format": "esm"
     }
   },
   "outputs": {
@@ -172,6 +179,22 @@ console.log(ns, import_c.default, void 0);
     }
   }
 }
+
+================================================================================
+TestExtensionlessLoaderCSS
+---------- entry.css ----------
+/* what */
+.foo {
+  color: red;
+}
+
+/* entry.css */
+
+================================================================================
+TestExtensionlessLoaderJS
+---------- entry.js ----------
+// what
+foo();
 
 ================================================================================
 TestJSXAutomaticNoNameCollision

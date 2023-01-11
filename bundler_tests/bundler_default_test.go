@@ -1122,16 +1122,16 @@ func TestRequireBadExtension(t *testing.T) {
 	default_suite.expectBundled(t, bundled{
 		files: map[string]string{
 			"/entry.js": `
-				console.log(require('./test'))
+				console.log(require('./test.bad'))
 			`,
-			"/test": `This is a test.`,
+			"/test.bad": `This is a test.`,
 		},
 		entryPaths: []string{"/entry.js"},
 		options: config.Options{
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/out.js",
 		},
-		expectedScanLog: `entry.js: ERROR: Do not know how to load path: test
+		expectedScanLog: `entry.js: ERROR: No loader is configured for ".bad" files: test.bad
 `,
 	})
 }
@@ -3486,8 +3486,16 @@ func TestLegalCommentsManyEndOfFile(t *testing.T) {
 				import './c'
 				import 'some-pkg/js'
 			`,
-			"/project/a.js": `console.log('in a') //! Copyright notice 1`,
-			"/project/b.js": `console.log('in b') //! Copyright notice 1`,
+			"/project/a.js": `
+				console.log('in a') //! Copyright notice 1
+				//! Duplicate comment
+				//! Duplicate comment
+			`,
+			"/project/b.js": `
+				console.log('in b') //! Copyright notice 1
+				//! Duplicate comment
+				//! Duplicate comment
+			`,
 			"/project/c.js": `
 				function foo() {
 					/*
@@ -3499,7 +3507,11 @@ func TestLegalCommentsManyEndOfFile(t *testing.T) {
 				}
 				foo()
 			`,
-			"/project/node_modules/some-pkg/js/index.js": `import "some-other-pkg/js" //! (c) Good Software Corp`,
+			"/project/node_modules/some-pkg/js/index.js": `
+				import "some-other-pkg/js" //! (c) Good Software Corp
+				//! Duplicate third-party comment
+				//! Duplicate third-party comment
+			`,
 			"/project/node_modules/some-other-pkg/js/index.js": `
 				function bar() {
 					/*
@@ -3508,6 +3520,8 @@ func TestLegalCommentsManyEndOfFile(t *testing.T) {
 					 */
 					console.log('some-other-pkg')
 				}
+				//! Duplicate third-party comment
+				//! Duplicate third-party comment
 				bar()
 			`,
 
@@ -3517,8 +3531,16 @@ func TestLegalCommentsManyEndOfFile(t *testing.T) {
 				@import "./c.css";
 				@import 'some-pkg/css';
 			`,
-			"/project/a.css": `a { zoom: 2 } /*! Copyright notice 1 */`,
-			"/project/b.css": `b { zoom: 2 } /*! Copyright notice 1 */`,
+			"/project/a.css": `
+				a { zoom: 2 } /*! Copyright notice 1 */
+				/*! Duplicate comment */
+				/*! Duplicate comment */
+			`,
+			"/project/b.css": `
+				b { zoom: 2 } /*! Copyright notice 1 */
+				/*! Duplicate comment */
+				/*! Duplicate comment */
+			`,
 			"/project/c.css": `
 				/*
 				 * @license
@@ -3529,8 +3551,14 @@ func TestLegalCommentsManyEndOfFile(t *testing.T) {
 				}
 				/* @preserve This is another comment */
 			`,
-			"/project/node_modules/some-pkg/css/index.css": `@import "some-other-pkg/css"; /*! (c) Good Software Corp */`,
+			"/project/node_modules/some-pkg/css/index.css": `
+				@import "some-other-pkg/css"; /*! (c) Good Software Corp */
+				/*! Duplicate third-party comment */
+				/*! Duplicate third-party comment */
+			`,
 			"/project/node_modules/some-other-pkg/css/index.css": `
+				/*! Duplicate third-party comment */
+				/*! Duplicate third-party comment */
 				.some-other-pkg {
 					zoom: 2
 				}
@@ -7517,6 +7545,244 @@ func TestMetafileVeryLongExternalPaths(t *testing.T) {
 				".copy": config.LoaderCopy,
 			},
 			CodeSplitting: true,
+		},
+	})
+}
+
+func TestCommentPreservation(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				console.log(
+					import(/* before */ foo),
+					import(/* before */ 'foo'),
+					import(foo /* after */),
+					import('foo' /* after */),
+				)
+
+				console.log(
+					import('foo', /* before */ { assert: { type: 'json' } }),
+					import('foo', { /* before */ assert: { type: 'json' } }),
+					import('foo', { assert: /* before */ { type: 'json' } }),
+					import('foo', { assert: { /* before */ type: 'json' } }),
+					import('foo', { assert: { type: /* before */ 'json' } }),
+					import('foo', { assert: { type: 'json' /* before */ } }),
+					import('foo', { assert: { type: 'json' } /* before */ }),
+					import('foo', { assert: { type: 'json' } } /* before */),
+				)
+
+				console.log(
+					require(/* before */ foo),
+					require(/* before */ 'foo'),
+					require(foo /* after */),
+					require('foo' /* after */),
+				)
+
+				console.log(
+					require.resolve(/* before */ foo),
+					require.resolve(/* before */ 'foo'),
+					require.resolve(foo /* after */),
+					require.resolve('foo' /* after */),
+				)
+
+				let [/* foo */] = [/* bar */];
+				let [
+					// foo
+				] = [
+					// bar
+				];
+				let [/*before*/ ...s] = [/*before*/ ...s]
+				let [... /*before*/ s2] = [... /*before*/ s2]
+
+				let { /* foo */ } = { /* bar */ };
+				let {
+					// foo
+				} = {
+					// bar
+				};
+				let { /*before*/ ...s3 } = { /*before*/ ...s3 }
+				let { ... /*before*/ s4 } = { ... /*before*/ s4 }
+
+				let [/* before */ x] = [/* before */ x];
+				let [/* before */ x2 /* after */] = [/* before */ x2 /* after */];
+				let [
+					// before
+					x3
+					// after
+				] = [
+					// before
+					x3
+					// after
+				];
+
+				let { /* before */ y } = { /* before */ y };
+				let { /* before */ y2 /* after */ } = { /* before */ y2 /* after */ };
+				let {
+					// before
+					y3
+					// after
+				} = {
+					// before
+					y3
+					// after
+				};
+				let { /* before */ [y4]: y4 } = { /* before */ [y4]: y4 };
+				let { [/* before */ y5]: y5 } = { [/* before */ y5]: y5 };
+				let { [y6 /* after */]: y6 } = { [y6 /* after */]: y6 };
+
+				foo[/* before */ x] = foo[/* before */ x]
+				foo[x /* after */] = foo[x /* after */]
+
+				console.log(
+					// before
+					foo,
+					/* comment before */
+					bar,
+					// comment after
+				)
+
+				console.log([
+					// before
+					foo,
+					/* comment before */
+					bar,
+					// comment after
+				])
+
+				console.log({
+					// before
+					foo,
+					/* comment before */
+					bar,
+					// comment after
+				})
+
+				console.log(class {
+					// before
+					foo
+					/* comment before */
+					bar
+					// comment after
+				})
+
+				console.log(
+					() => { return /* foo */ null },
+					() => { throw /* foo */ null },
+					() => { return (/* foo */ null) + 1 },
+					() => { throw (/* foo */ null) + 1 },
+					() => {
+						return (// foo
+							null) + 1
+					},
+					() => {
+						throw (// foo
+							null) + 1
+					},
+				)
+
+				console.log(
+					/*a*/ a ? /*b*/ b : /*c*/ c,
+					a /*a*/ ? b /*b*/ : c /*c*/,
+				)
+
+				for (/*foo*/a;;);
+				for (;/*foo*/a;);
+				for (;;/*foo*/a);
+
+				for (/*foo*/a in b);
+				for (a in /*foo*/b);
+
+				for (/*foo*/a of b);
+				for (a of /*foo*/b);
+
+				if (/*foo*/a);
+				with (/*foo*/a);
+				while (/*foo*/a);
+				do {} while (/*foo*/a);
+				switch (/*foo*/a) {}
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
+			OutputFormat: config.FormatCommonJS,
+			ExternalSettings: config.ExternalSettings{
+				PreResolve: config.ExternalMatchers{
+					Exact: map[string]bool{"foo": true},
+				},
+			},
+		},
+	})
+}
+
+func TestCommentPreservationImportAssertions(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.jsx": `
+				import 'foo' /* before */ assert { type: 'json' }
+				import 'foo' assert /* before */ { type: 'json' }
+				import 'foo' assert { /* before */ type: 'json' }
+				import 'foo' assert { type: /* before */ 'json' }
+				import 'foo' assert { type: 'json' /* before */ }
+			`,
+		},
+		entryPaths: []string{"/entry.jsx"},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
+			ExternalSettings: config.ExternalSettings{
+				PreResolve: config.ExternalMatchers{
+					Exact: map[string]bool{"foo": true},
+				},
+			},
+		},
+	})
+}
+
+func TestCommentPreservationTransformJSX(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.jsx": `
+				console.log(
+					<div x={/*before*/x} />,
+					<div x={/*before*/'y'} />,
+					<div x={/*before*/true} />,
+					<div {/*before*/...x} />,
+					<div>{/*before*/x}</div>,
+					<>{/*before*/x}</>,
+				)
+			`,
+		},
+		entryPaths: []string{"/entry.jsx"},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
+		},
+	})
+}
+
+func TestCommentPreservationPreserveJSX(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.jsx": `
+				console.log(
+					<div x={/*before*/x} />,
+					<div x={/*before*/'y'} />,
+					<div x={/*before*/true} />,
+					<div {/*before*/...x} />,
+					<div>{/*before*/x}</div>,
+					<>{/*before*/x}</>,
+				)
+			`,
+		},
+		entryPaths: []string{"/entry.jsx"},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
+			JSX: config.JSXOptions{
+				Preserve: true,
+			},
 		},
 	})
 }

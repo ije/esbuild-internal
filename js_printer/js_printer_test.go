@@ -324,15 +324,11 @@ func TestNew(t *testing.T) {
 	expectPrinted(t, "new Worker(// webpackFoo: 1\n // webpackBar: 2\n 'path');", "new Worker(\n  // webpackFoo: 1\n  // webpackBar: 2\n  \"path\"\n);\n")
 	expectPrinted(t, "new Worker(/* webpackFoo: 1 */ /* webpackBar: 2 */ 'path');", "new Worker(\n  /* webpackFoo: 1 */\n  /* webpackBar: 2 */\n  \"path\"\n);\n")
 	expectPrinted(t, "new Worker(\n    /* multi\n     * line\n     * webpackBar: */ 'path');", "new Worker(\n  /* multi\n   * line\n   * webpackBar: */\n  \"path\"\n);\n")
-	expectPrinted(t, "new Worker(/* webpackFoo: 1 */ 'path' /* webpackBar:2 */);", "new Worker(\n  /* webpackFoo: 1 */\n  /* webpackBar:2 */\n  \"path\"\n);\n")
-	expectPrinted(t, "new Worker(/* webpackFoo: 1 */ 'path' /* webpackBar:2 */ ,);", "new Worker(\n  /* webpackFoo: 1 */\n  /* webpackBar:2 */\n  \"path\"\n);\n")
-	expectPrinted(t, "new Worker(/* webpackFoo: 1 */ 'path', /* webpackBar:2 */ );", "new Worker(\n  /* webpackFoo: 1 */\n  /* webpackBar:2 */\n  \"path\"\n);\n")
+	expectPrinted(t, "new Worker(/* webpackFoo: 1 */ 'path' /* webpackBar:2 */);", "new Worker(\n  /* webpackFoo: 1 */\n  \"path\"\n  /* webpackBar:2 */\n);\n")
+	expectPrinted(t, "new Worker(/* webpackFoo: 1 */ 'path' /* webpackBar:2 */ ,);", "new Worker(\n  /* webpackFoo: 1 */\n  \"path\"\n);\n") // Not currently handled
+	expectPrinted(t, "new Worker(/* webpackFoo: 1 */ 'path', /* webpackBar:2 */ );", "new Worker(\n  /* webpackFoo: 1 */\n  \"path\"\n  /* webpackBar:2 */\n);\n")
 	expectPrinted(t, "new Worker(new URL('path', /* webpackFoo: these can go anywhere */ import.meta.url))",
-		"new Worker(new URL(\n  /* webpackFoo: these can go anywhere */\n  \"path\",\n  import.meta.url\n));\n")
-
-	// Other comments should not be preserved
-	expectPrinted(t, "new Worker(// comment 1\n // comment 2\n 'path');", "new Worker(\n  \"path\"\n);\n")
-	expectPrinted(t, "new Worker(/* comment 1 */ /* comment 2 */ 'path');", "new Worker(\"path\");\n")
+		"new Worker(new URL(\n  \"path\",\n  /* webpackFoo: these can go anywhere */\n  import.meta.url\n));\n")
 }
 
 func TestCall(t *testing.T) {
@@ -547,6 +543,19 @@ func TestFunction(t *testing.T) {
 		"function foo([, ,] = [, ,]) {\n}\n")
 }
 
+func TestCommentsAndParentheses(t *testing.T) {
+	expectPrinted(t, "(/* foo */ { x() { foo() } }.x());", "/* foo */\n({ x() {\n  foo();\n} }).x();\n")
+	expectPrinted(t, "(/* foo */ function f() { foo(f) }());", "/* foo */\n(function f() {\n  foo(f);\n})();\n")
+	expectPrinted(t, "(/* foo */ class x { static y() { foo(x) } }.y());", "/* foo */\n(class x {\n  static y() {\n    foo(x);\n  }\n}).y();\n")
+	expectPrinted(t, "(/* @__PURE__ */ (() => foo())());", "/* @__PURE__ */ (() => foo())();\n")
+	expectPrinted(t, "export default (/* foo */ function f() {});", "export default (\n  /* foo */\n  function f() {\n  }\n);\n")
+	expectPrinted(t, "export default (/* foo */ class x {});", "export default (\n  /* foo */\n  class x {\n  }\n);\n")
+	expectPrinted(t, "x = () => (/* foo */ {});", "x = () => (\n  /* foo */\n  {}\n);\n")
+	expectPrinted(t, "for ((/* foo */ let).x of y) ;", "for (\n  /* foo */\n  (let).x of y\n)\n  ;\n")
+	expectPrinted(t, "for (/* foo */ (let).x of y) ;", "for (\n  /* foo */\n  (let).x of y\n)\n  ;\n")
+	expectPrinted(t, "function *x() { yield (/* foo */ y) }", "function* x() {\n  yield (\n    /* foo */\n    y\n  );\n}\n")
+}
+
 func TestPureComment(t *testing.T) {
 	expectPrinted(t,
 		"(function() {})",
@@ -687,18 +696,12 @@ func TestImport(t *testing.T) {
 	expectPrinted(t, "import(/* webpackFoo: 1 */ /* webpackBar: 2 */ 'path');", "import(\n  /* webpackFoo: 1 */\n  /* webpackBar: 2 */\n  \"path\"\n);\n")
 	expectPrinted(t, "import(/* webpackFoo: 1 */ /* webpackBar: 2 */ 'path', {type: 'module'});", "import(\n  /* webpackFoo: 1 */\n  /* webpackBar: 2 */\n  \"path\",\n  { type: \"module\" }\n);\n")
 	expectPrinted(t, "import(\n    /* multi\n     * line\n     * webpackBar: */ 'path');", "import(\n  /* multi\n   * line\n   * webpackBar: */\n  \"path\"\n);\n")
-	expectPrinted(t, "import(/* webpackFoo: 1 */ 'path' /* webpackBar:2 */);", "import(\n  /* webpackFoo: 1 */\n  /* webpackBar:2 */\n  \"path\"\n);\n")
-	expectPrinted(t, "import(/* webpackFoo: 1 */ 'path' /* webpackBar:2 */ ,);", "import(\n  /* webpackFoo: 1 */\n  /* webpackBar:2 */\n  \"path\"\n);\n")
-	expectPrinted(t, "import(/* webpackFoo: 1 */ 'path', /* webpackBar:2 */ );", "import(\n  /* webpackFoo: 1 */\n  /* webpackBar:2 */\n  \"path\"\n);\n")
-	expectPrinted(t, "import(/* webpackFoo: 1 */ 'path', { type: 'module' } /* webpackBar:2 */ );", "import(\n  /* webpackFoo: 1 */\n  /* webpackBar:2 */\n  \"path\",\n  { type: \"module\" }\n);\n")
+	expectPrinted(t, "import(/* webpackFoo: 1 */ 'path' /* webpackBar:2 */);", "import(\n  /* webpackFoo: 1 */\n  \"path\"\n  /* webpackBar:2 */\n);\n")
+	expectPrinted(t, "import(/* webpackFoo: 1 */ 'path' /* webpackBar:2 */ ,);", "import(\n  /* webpackFoo: 1 */\n  \"path\"\n);\n") // Not currently handled
+	expectPrinted(t, "import(/* webpackFoo: 1 */ 'path', /* webpackBar:2 */ );", "import(\n  /* webpackFoo: 1 */\n  \"path\"\n  /* webpackBar:2 */\n);\n")
+	expectPrinted(t, "import(/* webpackFoo: 1 */ 'path', { type: 'module' } /* webpackBar:2 */ );", "import(\n  /* webpackFoo: 1 */\n  \"path\",\n  { type: \"module\" }\n  /* webpackBar:2 */\n);\n")
 	expectPrinted(t, "import(new URL('path', /* webpackFoo: these can go anywhere */ import.meta.url))",
-		"import(new URL(\n  /* webpackFoo: these can go anywhere */\n  \"path\",\n  import.meta.url\n));\n")
-
-	// Other comments should not be preserved
-	expectPrinted(t, "import(// comment 1\n // comment 2\n 'path');", "import(\"path\");\n")
-	expectPrinted(t, "import(// comment 1\n // comment 2\n 'path', {type: 'module'});", "import(\"path\", { type: \"module\" });\n")
-	expectPrinted(t, "import(/* comment 1 */ /* comment 2 */ 'path');", "import(\"path\");\n")
-	expectPrinted(t, "import(/* comment 1 */ /* comment 2 */ 'path', {type: 'module'});", "import(\"path\", { type: \"module\" });\n")
+		"import(new URL(\n  \"path\",\n  /* webpackFoo: these can go anywhere */\n  import.meta.url\n));\n")
 }
 
 func TestExportDefault(t *testing.T) {

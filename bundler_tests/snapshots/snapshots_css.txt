@@ -425,18 +425,22 @@ console.log("bar");
       "imports": [
         {
           "path": "common.css",
-          "kind": "import-statement"
+          "kind": "import-statement",
+          "original": "../common.css"
         }
-      ]
+      ],
+      "format": "esm"
     },
     "bar/entry.js": {
       "bytes": 54,
       "imports": [
         {
           "path": "common.css",
-          "kind": "import-statement"
+          "kind": "import-statement",
+          "original": "../common.css"
         }
-      ]
+      ],
+      "format": "esm"
     }
   },
   "outputs": {
