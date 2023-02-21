@@ -711,7 +711,50 @@ console.log(
   <>{
     /*before*/
     x
-  }</>
+  }</>,
+  // Comments on absent AST nodes
+  <div>
+    {"before"}
+    {}
+    {"after"}
+  </div>,
+  <div>
+    {"before"}
+    {
+      /* comment 1 */
+      /* comment 2 */
+    }
+    {"after"}
+  </div>,
+  <div>
+    {"before"}
+    {
+      // comment 1
+      // comment 2
+    }
+    {"after"}
+  </div>,
+  <>
+    {"before"}
+    {}
+    {"after"}
+  </>,
+  <>
+    {"before"}
+    {
+      /* comment 1 */
+      /* comment 2 */
+    }
+    {"after"}
+  </>,
+  <>
+    {"before"}
+    {
+      // comment 1
+      // comment 2
+    }
+    {"after"}
+  </>
 );
 
 ================================================================================
@@ -746,7 +789,14 @@ console.log(
     null,
     /*before*/
     x
-  )
+  ),
+  // Comments on absent AST nodes
+  /* @__PURE__ */ React.createElement("div", null, "before", "after"),
+  /* @__PURE__ */ React.createElement("div", null, "before", "after"),
+  /* @__PURE__ */ React.createElement("div", null, "before", "after"),
+  /* @__PURE__ */ React.createElement(React.Fragment, null, "before", "after"),
+  /* @__PURE__ */ React.createElement(React.Fragment, null, "before", "after"),
+  /* @__PURE__ */ React.createElement(React.Fragment, null, "before", "after")
 );
 
 ================================================================================
@@ -1922,9 +1972,14 @@ var replace = {
   test() {
   }
 };
+var replace2 = {
+  test() {
+  }
+};
 
 // re-export.js
 var import_external_pkg = require("external-pkg");
+var import_external_pkg2 = require("external-pkg2");
 
 // entry.js
 var sideEffects2 = console.log("this should be renamed");
@@ -1932,15 +1987,38 @@ var collide = 123;
 console.log(obj.prop);
 console.log("defined");
 console.log("should be used");
+console.log("should be used");
 console.log(replace.test);
+console.log(replace2.test);
 console.log(collide);
 console.log(import_external_pkg.re_export);
+console.log(re_export2);
 
 ================================================================================
 TestInjectDuplicate
 ---------- /out.js ----------
 // inject.js
 console.log("injected");
+
+================================================================================
+TestInjectImportMeta
+---------- /out.js ----------
+// inject.js
+var foo = 1;
+var bar = 2;
+var baz = 3;
+
+// entry.js
+console.log(
+  // These should be fully substituted
+  foo,
+  bar,
+  baz,
+  // Should just substitute "import.meta.foo"
+  bar.baz,
+  // This should not be substituted
+  foo.bar
+);
 
 ================================================================================
 TestInjectImportOrder
@@ -1976,24 +2054,61 @@ function frag() {
 console.log(/* @__PURE__ */ el(frag, null, /* @__PURE__ */ el("div", null)));
 
 ================================================================================
+TestInjectJSXDotNames
+---------- /out.js ----------
+// inject.js
+function el() {
+}
+function frag() {
+}
+
+// entry.jsx
+console.log(/* @__PURE__ */ el(frag, null, /* @__PURE__ */ el("div", null)));
+
+================================================================================
 TestInjectNoBundle
 ---------- /out.js ----------
-var obj = {};
-var sideEffects = console.log("side effects");
+var obj2 = {};
+var sideEffects2 = console.log("this should be renamed");
 console.log("This is unused but still has side effects");
-var replace = {
+var replace2 = {
   test() {
   }
 };
-import { re_export } from "external-pkg";
-let sideEffects2 = console.log("this should be renamed");
+var replaceDot = {
+  test() {
+  }
+};
+import { re_export as re_export2 } from "external-pkg";
+import { "reexpo.rt" as reexpo_rt } from "external-pkg2";
+let sideEffects = console.log("side effects");
 let collide = 123;
-console.log(obj.prop);
+console.log(obj2.prop);
 console.log("defined");
 console.log("should be used");
-console.log(replace.test);
+console.log("should be used");
+console.log(replace2.test);
+console.log(replaceDot.test);
 console.log(collide);
-console.log(re_export);
+console.log(re_export2);
+console.log(reexpo_rt);
+
+================================================================================
+TestInjectWithDefine
+---------- /out.js ----------
+// inject.js
+var second = "success (identifier)";
+var second2 = "success (dot name)";
+
+// entry.js
+console.log(
+  // define wins over inject
+  true,
+  true,
+  // define forwards to inject
+  second === "success (identifier)",
+  second2 === "success (dot name)"
+);
 
 ================================================================================
 TestJSXAutomaticImportsCommonJS
@@ -3109,9 +3224,9 @@ console.log(foo.KEEP_FIELD, foo.a);
 ---------- /out/namespace-exports.js ----------
 var ns;
 ((ns2) => {
-  ns2.b = 1;
-  ns2.c = 2;
-  ns2.d = 3;
+  ns2.c = 1;
+  ns2.d = 2;
+  ns2.e = 3;
   ({ i: { a: ns2.a } } = 4);
   function MANGLE_FUNCTION_() {
   }
@@ -3122,14 +3237,14 @@ var ns;
   let MANGLE_NAMESPACE_;
   ((MANGLE_NAMESPACE_2) => {
     ;
-  })(MANGLE_NAMESPACE_ = ns2.e || (ns2.e = {}));
+  })(MANGLE_NAMESPACE_ = ns2.f || (ns2.f = {}));
   let MANGLE_ENUM_;
   ((MANGLE_ENUM_2) => {
-  })(MANGLE_ENUM_ = ns2.f || (ns2.f = {}));
+  })(MANGLE_ENUM_ = ns2.b || (ns2.b = {}));
   console.log({
-    VAR: ns2.b,
-    LET: ns2.c,
-    CONST: ns2.d,
+    VAR: ns2.c,
+    LET: ns2.d,
+    CONST: ns2.e,
     DESTRUCTURING: ns2.a,
     FUNCTION: MANGLE_FUNCTION_,
     CLASS: MANGLE_CLASS_,
@@ -3138,25 +3253,25 @@ var ns;
   });
 })(ns || (ns = {}));
 console.log({
-  VAR: ns.b,
-  LET: ns.c,
-  CONST: ns.d,
+  VAR: ns.c,
+  LET: ns.d,
+  CONST: ns.e,
   DESTRUCTURING: ns.a,
   FUNCTION: ns.g,
   CLASS: ns.h,
-  NAMESPACE: ns.e,
-  ENUM: ns.f
+  NAMESPACE: ns.f,
+  ENUM: ns.b
 });
 ((ns2) => {
   console.log({
-    VAR: ns2.b,
-    LET: ns2.c,
-    CONST: ns2.d,
+    VAR: ns2.c,
+    LET: ns2.d,
+    CONST: ns2.e,
     DESTRUCTURING: ns2.a,
     FUNCTION: ns2.g,
     CLASS: ns2.h,
-    NAMESPACE: ns2.e,
-    ENUM: ns2.f
+    NAMESPACE: ns2.f,
+    ENUM: ns2.b
   });
 })(ns || (ns = {}));
 
@@ -4267,31 +4382,31 @@ var i=r((t,e)=>{e.exports=123});var s=i();console.log(s,"no identifier in this f
 ================================================================================
 TestMinifyNestedLabelsNoBundle
 ---------- /out.js ----------
-n:{l:{a:{b:{c:{d:{e:{f:{g:{h:{i:{j:{k:{m:{o:{p:{nl(`
-`);q:{r:{s:{t:{u:{v:{w:{x:{y:{z:{A:{B:{C:{D:{E:{F:{nl(`
-`);G:{H:{I:{J:{K:{L:{M:{N:{O:{P:{Q:{R:{S:{T:{U:{V:{nl(`
-`);W:{X:{Y:{Z:{_:{$:{nn:{ln:{an:{bn:{cn:{dn:{en:{fn:{gn:{hn:{nl(`
-`);jn:{kn:{mn:{on:{pn:{qn:{rn:{sn:{tn:{un:{vn:{wn:{xn:{yn:{zn:{An:{nl(`
-`);Bn:{Cn:{Dn:{En:{Fn:{Gn:{Hn:{In:{Jn:{Kn:{Ln:{Mn:{Nn:{On:{Pn:{Qn:{nl(`
-`);Rn:{Sn:{Tn:{Un:{Vn:{Wn:{Xn:{Yn:{Zn:{_n:{$n:{nl:{ll:{al:{bl:{cl:{nl(`
-`);dl:{el:{fl:{gl:{hl:{il:{jl:{kl:{ml:{ol:{pl:{ql:{rl:{sl:{tl:{ul:{nl(`
-`);vl:{wl:{xl:{yl:{zl:{Al:{Bl:{Cl:{Dl:{El:{Fl:{Gl:{Hl:{Il:{Jl:{Kl:{nl(`
-`);Ll:{Ml:{Nl:{Ol:{Pl:{Ql:{Rl:{Sl:{Tl:{Ul:{Vl:{Wl:{Xl:{Yl:{Zl:{_l:{nl(`
-`);$l:{na:{la:{aa:{ba:{ca:{da:{ea:{fa:{ga:{ha:{ia:{ja:{ka:{ma:{oa:{nl(`
-`);pa:{qa:{ra:{sa:{ta:{ua:{va:{wa:{xa:{ya:{za:{Aa:{Ba:{Ca:{Da:{Ea:{nl(`
-`);Fa:{Ga:{Ha:{Ia:{Ja:{Ka:{La:{Ma:{Na:{Oa:{Pa:{Qa:{Ra:{Sa:{Ta:{Ua:{nl(`
-`);Va:{Wa:{Xa:{Ya:{Za:{_a:{$a:{nb:{lb:{ab:{bb:{cb:{db:{eb:{fb:{gb:{nl(`
-`);hb:{ib:{jb:{kb:{mb:{ob:{pb:{qb:{rb:{sb:{tb:{ub:{vb:{wb:{xb:{yb:{nl(`
-`);zb:{Ab:{Bb:{Cb:{Db:{Eb:{Fb:{Gb:{Hb:{Ib:{Jb:{Kb:{Lb:{Mb:{Nb:{Ob:{nl(`
-`);Pb:{Qb:{Rb:{Sb:{Tb:{Ub:{Vb:{Wb:{Xb:{Yb:{Zb:{_b:{$b:{nc:{lc:{ac:{nl(`
-`);bc:{cc:{dc:{ec:{fc:{gc:{hc:{ic:{jc:{kc:{mc:{oc:{pc:{qc:{rc:{sc:{nl(`
-`);tc:{uc:{vc:{wc:{xc:{yc:{zc:{Ac:{Bc:{Cc:{Dc:{Ec:{Fc:{Gc:{Hc:{Ic:{nl(`
-`);Jc:{Kc:{Lc:{Mc:{Nc:{Oc:{Pc:{Qc:{Rc:{Sc:{Tc:{Uc:{Vc:{Wc:{Xc:{Yc:{nl(`
-`);Zc:{_c:{$c:{nd:{ld:{ad:{bd:{cd:{dd:{ed:{fd:{gd:{hd:;}}}}}}}}}}}}}}}}}nl(`
-`)}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}nl(`
-`)}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}nl(`
-`)}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}nl(`
-`)}}}}}}}}}}}}}}}}}}}}}}}}}}}
+n:l:a:b:c:d:e:f:g:h:i:j:k:m:o:p:{nl(`
+`);q:r:s:t:u:v:w:x:y:z:A:{B:C:D:E:F:{nl(`
+`);G:H:I:J:K:L:M:N:O:P:Q:R:S:T:U:V:{nl(`
+`);W:X:Y:Z:_:$:nn:ln:an:bn:cn:dn:en:fn:gn:hn:{nl(`
+`);jn:kn:mn:on:pn:qn:rn:sn:tn:un:vn:wn:xn:yn:zn:An:{nl(`
+`);Bn:Cn:Dn:En:Fn:Gn:Hn:In:Jn:Kn:Ln:Mn:Nn:On:Pn:Qn:{nl(`
+`);Rn:Sn:Tn:Un:Vn:Wn:Xn:Yn:Zn:_n:$n:nl:ll:al:bl:cl:{nl(`
+`);dl:el:fl:gl:hl:il:jl:kl:ml:ol:pl:{ql:rl:sl:tl:ul:{nl(`
+`);vl:wl:xl:yl:zl:Al:Bl:Cl:Dl:El:Fl:Gl:Hl:Il:Jl:Kl:{nl(`
+`);Ll:Ml:Nl:Ol:Pl:Ql:Rl:Sl:Tl:Ul:Vl:Wl:Xl:Yl:Zl:_l:{nl(`
+`);$l:na:la:aa:ba:ca:da:ea:fa:ga:ha:ia:ja:ka:ma:oa:{nl(`
+`);pa:qa:ra:sa:ta:ua:va:wa:xa:ya:za:Aa:Ba:Ca:Da:Ea:{nl(`
+`);Fa:Ga:Ha:Ia:Ja:Ka:La:Ma:Na:Oa:Pa:Qa:Ra:Sa:Ta:Ua:{nl(`
+`);Va:Wa:Xa:Ya:Za:_a:$a:nb:lb:ab:bb:{cb:db:eb:fb:gb:{nl(`
+`);hb:ib:jb:kb:mb:ob:pb:qb:rb:sb:tb:ub:vb:wb:xb:yb:{nl(`
+`);zb:Ab:Bb:Cb:Db:Eb:Fb:Gb:Hb:Ib:Jb:Kb:Lb:Mb:Nb:Ob:{nl(`
+`);Pb:Qb:Rb:Sb:Tb:Ub:Vb:Wb:Xb:Yb:Zb:_b:$b:nc:lc:ac:{nl(`
+`);bc:cc:dc:ec:fc:gc:hc:ic:jc:kc:mc:oc:pc:qc:rc:sc:{nl(`
+`);tc:uc:vc:wc:xc:yc:zc:Ac:Bc:Cc:Dc:Ec:Fc:Gc:Hc:Ic:{nl(`
+`);Jc:Kc:Lc:Mc:Nc:Oc:Pc:Qc:Rc:Sc:Tc:{Uc:Vc:Wc:Xc:Yc:{nl(`
+`);Zc:_c:$c:nd:ld:ad:bd:cd:dd:ed:fd:gd:hd:;}nl(`
+`)}}}}}}}nl(`
+`)}}}}}}}nl(`
+`)}}}}}}}nl(`
+`)}}
 
 ================================================================================
 TestMinifyPrivateIdentifiersNoBundle
@@ -5549,12 +5664,90 @@ var init_entry = __esm({
 await init_entry();
 
 ================================================================================
+TestTopLevelAwaitCJSDeadBranch
+---------- /out.js ----------
+// entry.js
+if (false)
+  foo;
+if (false)
+  for (foo of bar)
+    ;
+
+================================================================================
 TestTopLevelAwaitESM
 ---------- /out.js ----------
 // entry.js
 await foo;
 for await (foo of bar)
   ;
+
+================================================================================
+TestTopLevelAwaitESMDeadBranch
+---------- /out.js ----------
+// entry.js
+if (false)
+  await foo;
+if (false)
+  for await (foo of bar)
+    ;
+
+================================================================================
+TestTopLevelAwaitForbiddenRequireDeadBranch
+---------- /out.js ----------
+(() => {
+  // c.js
+  var c_exports = {};
+  var init_c = __esm({
+    "c.js"() {
+      if (false)
+        for (let x of y)
+          ;
+    }
+  });
+
+  // b.js
+  var b_exports = {};
+  var init_b = __esm({
+    "b.js"() {
+      init_c();
+    }
+  });
+
+  // a.js
+  var a_exports = {};
+  var init_a = __esm({
+    "a.js"() {
+      init_b();
+    }
+  });
+
+  // entry.js
+  var entry_exports = {};
+  var init_entry = __esm({
+    "entry.js"() {
+      init_a();
+      init_b();
+      init_c();
+      init_entry();
+      if (false)
+        for (let x of y)
+          ;
+    }
+  });
+  init_entry();
+})();
+
+================================================================================
+TestTopLevelAwaitIIFEDeadBranch
+---------- /out.js ----------
+(() => {
+  // entry.js
+  if (false)
+    foo;
+  if (false)
+    for (foo of bar)
+      ;
+})();
 
 ================================================================================
 TestTopLevelAwaitNoBundle
@@ -5564,11 +5757,49 @@ for await (foo of bar)
   ;
 
 ================================================================================
-TestTopLevelAwaitNoBundleES6
+TestTopLevelAwaitNoBundleCommonJSDeadBranch
+---------- /out.js ----------
+if (false)
+  foo;
+if (false)
+  for (foo of bar)
+    ;
+
+================================================================================
+TestTopLevelAwaitNoBundleDeadBranch
+---------- /out.js ----------
+if (false)
+  await foo;
+if (false)
+  for await (foo of bar)
+    ;
+
+================================================================================
+TestTopLevelAwaitNoBundleESM
 ---------- /out.js ----------
 await foo;
 for await (foo of bar)
   ;
+
+================================================================================
+TestTopLevelAwaitNoBundleESMDeadBranch
+---------- /out.js ----------
+if (false)
+  await foo;
+if (false)
+  for await (foo of bar)
+    ;
+
+================================================================================
+TestTopLevelAwaitNoBundleIIFEDeadBranch
+---------- /out.js ----------
+(() => {
+  if (false)
+    foo;
+  if (false)
+    for (foo of bar)
+      ;
+})();
 
 ================================================================================
 TestUseStrictDirectiveBundleCJSIssue2264

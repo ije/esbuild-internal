@@ -404,7 +404,7 @@ func (res *Resolver) Resolve(sourceDir string, importPath string, kind ast.Impor
 		}
 
 		// Check whether the path will end up as "import" or "require"
-		convertImportToRequire := !r.options.OutputFormat.KeepES6ImportExportSyntax()
+		convertImportToRequire := !r.options.OutputFormat.KeepESMImportExportSyntax()
 		isImport := !convertImportToRequire && (kind == ast.ImportStmt || kind == ast.ImportDynamic)
 		isRequire := kind == ast.ImportRequire || kind == ast.ImportRequireResolve ||
 			(convertImportToRequire && (kind == ast.ImportStmt || kind == ast.ImportDynamic))
@@ -574,28 +574,14 @@ func (r resolverQuery) isExternal(matchers config.ExternalMatchers, path string,
 	return false
 }
 
-func (res *Resolver) ResolveAbs(absPath string) *ResolveResult {
-	r := resolverQuery{Resolver: res}
-	if r.log.Level <= logger.LevelDebug {
-		r.debugLogs = &debugLogs{what: fmt.Sprintf("Getting metadata for absolute path %s", absPath)}
-	}
-
-	r.mutex.Lock()
-	defer r.mutex.Unlock()
-
-	// Just decorate the absolute path with information from parent directories
-	result := &ResolveResult{PathPair: PathPair{Primary: logger.Path{Text: absPath, Namespace: "file"}}}
-	r.finalizeResolve(result)
-	r.flushDebugLogs(flushDueToSuccess)
-	return result
-}
-
 // This tries to run "Resolve" on a package path as a relative path. If
 // successful, the user just forgot a leading "./" in front of the path.
-func (res *Resolver) ProbeResolvePackageAsRelative(sourceDir string, importPath string, kind ast.ImportKind) *ResolveResult {
+func (res *Resolver) ProbeResolvePackageAsRelative(sourceDir string, importPath string, kind ast.ImportKind) (*ResolveResult, DebugMeta) {
+	var debugMeta DebugMeta
 	r := resolverQuery{
-		Resolver: res,
-		kind:     kind,
+		Resolver:  res,
+		debugMeta: &debugMeta,
+		kind:      kind,
 	}
 	absPath := r.fs.Join(sourceDir, importPath)
 
@@ -607,10 +593,10 @@ func (res *Resolver) ProbeResolvePackageAsRelative(sourceDir string, importPath 
 		result := &ResolveResult{PathPair: pair, DifferentCase: diffCase}
 		r.finalizeResolve(result)
 		r.flushDebugLogs(flushDueToSuccess)
-		return result
+		return result, debugMeta
 	}
 
-	return nil
+	return nil, debugMeta
 }
 
 type debugLogs struct {
@@ -2326,14 +2312,14 @@ func (r resolverQuery) finalizeImportsExportsResult(
 	switch status {
 	case pjStatusInvalidModuleSpecifier:
 		r.debugMeta.notes = []logger.MsgData{tracker.MsgData(debug.token,
-			fmt.Sprintf("The module specifier %q is invalid:", resolvedPath))}
+			fmt.Sprintf("The module specifier %q is invalid%s:", resolvedPath, debug.invalidBecause))}
 
 	case pjStatusInvalidPackageConfiguration:
 		r.debugMeta.notes = []logger.MsgData{tracker.MsgData(debug.token,
 			"The package configuration has an invalid value here:")}
 
 	case pjStatusInvalidPackageTarget:
-		why := fmt.Sprintf("The package target %q is invalid:", resolvedPath)
+		why := fmt.Sprintf("The package target %q is invalid%s:", resolvedPath, debug.invalidBecause)
 		if resolvedPath == "" {
 			// "PACKAGE_TARGET_RESOLVE" is specified to throw an "Invalid
 			// Package Target" error for what is actually an invalid package

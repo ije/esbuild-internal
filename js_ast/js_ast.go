@@ -170,13 +170,13 @@ const (
 	BinOpLogicalAndAssign
 )
 
-type opTableEntry struct {
+type OpTableEntry struct {
 	Text      string
 	Level     L
 	IsKeyword bool
 }
 
-var OpTable = []opTableEntry{
+var OpTable = []OpTableEntry{
 	// Prefix
 	{"+", LPrefix, false},
 	{"-", LPrefix, false},
@@ -703,9 +703,28 @@ type EMangledProp struct {
 }
 
 type EJSXElement struct {
-	TagOrNil        Expr
-	Properties      []Property
-	Children        []Expr
+	TagOrNil   Expr
+	Properties []Property
+
+	// Note: This array may contain nil entries. Be careful about nil entries
+	// when iterating over this array.
+	//
+	// Each nil entry corresponds to the "JSXChildExpression_opt" part of the
+	// grammar (https://facebook.github.io/jsx/#prod-JSXChild):
+	//
+	//   JSXChild :
+	//       JSXText
+	//       JSXElement
+	//       JSXFragment
+	//       { JSXChildExpression_opt }
+	//
+	// This is the "{}" part in "<a>{}</a>". We allow this because some people
+	// put comments there and then expect to be able to process them from
+	// esbuild's output. These absent AST nodes are completely omitted when
+	// JSX is transformed to JS. They are only present when JSX preservation is
+	// enabled.
+	NullableChildren []Expr
+
 	CloseLoc        logger.Loc
 	IsTagSingleLine bool
 }
@@ -972,10 +991,10 @@ type SForIn struct {
 }
 
 type SForOf struct {
-	Init    Stmt // May be a SConst, SLet, SVar, or SExpr
-	Value   Expr
-	Body    Stmt
-	IsAwait bool
+	Init  Stmt // May be a SConst, SLet, SVar, or SExpr
+	Value Expr
+	Body  Stmt
+	Await logger.Range
 }
 
 type SDoWhile struct {
@@ -1864,8 +1883,9 @@ type AST struct {
 
 	// This is a list of ES6 features. They are ranges instead of booleans so
 	// that they can be used in log messages. Check to see if "Len > 0".
-	ExportKeyword        logger.Range // Does not include TypeScript-specific syntax
-	TopLevelAwaitKeyword logger.Range
+	ExportKeyword            logger.Range // Does not include TypeScript-specific syntax
+	TopLevelAwaitKeyword     logger.Range
+	LiveTopLevelAwaitKeyword logger.Range // Excludes top-level await in dead branches
 
 	ExportsRef Ref
 	ModuleRef  Ref
