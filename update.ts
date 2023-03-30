@@ -1,8 +1,10 @@
-import { Untar } from "https://deno.land/std@0.170.0/archive/tar.ts";
-import { readAll } from "https://deno.land/std@0.170.0/streams/conversion.ts";
-import { readerFromStreamReader } from "https://deno.land/std@0.170.0/streams/reader_from_stream_reader.ts";
-import { ensureDir } from "https://deno.land/std@0.170.0/fs/ensure_dir.ts";
-import { join } from "https://deno.land/std@0.170.0/path/mod.ts";
+#!/usr/bin/env -S deno run --allow-read --allow-write --allow-net
+
+import { Untar } from "https://deno.land/std@0.180.0/archive/untar.ts";
+import { readAll } from "https://deno.land/std@0.180.0/streams/read_all.ts";
+import { readerFromStreamReader } from "https://deno.land/std@0.180.0/streams/reader_from_stream_reader.ts";
+import { ensureDir } from "https://deno.land/std@0.180.0/fs/ensure_dir.ts";
+import { join } from "https://deno.land/std@0.180.0/path/mod.ts";
 
 const version = Deno.args[0];
 if (!/^\d+\.\d+\.\d+$/.test(version)) {

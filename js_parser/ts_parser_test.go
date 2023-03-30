@@ -391,6 +391,10 @@ func TestTSTypes(t *testing.T) {
 	expectPrintedTS(t, "foo = function <const T>() {}", "foo = function() {\n};\n")
 	expectPrintedTS(t, "foo = function bar<const T>() {}", "foo = function bar() {\n};\n")
 	expectPrintedTS(t, "class Foo { bar<const T>() {} }", "class Foo {\n  bar() {\n  }\n}\n")
+	expectPrintedTS(t, "interface Foo { bar<const T>(): T }", "")
+	expectPrintedTS(t, "interface Foo { new bar<const T>(): T }", "")
+	expectPrintedTS(t, "let x: { bar<const T>(): T }", "let x;\n")
+	expectPrintedTS(t, "let x: { new bar<const T>(): T }", "let x;\n")
 	expectPrintedTS(t, "foo = { bar<const T>() {} }", "foo = { bar() {\n} };\n")
 	expectPrintedTS(t, "x = <const>(y)", "x = y;\n")
 	expectPrintedTS(t, "<const T>() => {}", "() => {\n};\n")
@@ -1773,6 +1777,12 @@ func TestTSDecorator(t *testing.T) {
 		"<stdin>: ERROR: Cannot use \"yield\" outside a generator function\n")
 	expectParseErrorTS(t, "function foo() { @dec(yield x) class Foo {} }", "<stdin>: ERROR: Cannot use \"yield\" outside a generator function\n")
 	expectParseErrorTS(t, "function foo() { class Foo { @dec(yield x) foo() {} } }", "<stdin>: ERROR: Cannot use \"yield\" outside a generator function\n")
+
+	// Check inline function expressions
+	expectPrintedTS(t, "@((x, y) => x + y) class Foo {}", "let Foo = class {\n};\nFoo = __decorateClass([\n  (x, y) => x + y\n], Foo);\n")
+	expectPrintedTS(t, "@((x, y) => x + y) export class Foo {}", "export let Foo = class {\n};\nFoo = __decorateClass([\n  (x, y) => x + y\n], Foo);\n")
+	expectPrintedTS(t, "@(function(x, y) { return x + y }) class Foo {}", "let Foo = class {\n};\nFoo = __decorateClass([\n  function(x, y) {\n    return x + y;\n  }\n], Foo);\n")
+	expectPrintedTS(t, "@(function(x, y) { return x + y }) export class Foo {}", "export let Foo = class {\n};\nFoo = __decorateClass([\n  function(x, y) {\n    return x + y;\n  }\n], Foo);\n")
 }
 
 func TestTSTry(t *testing.T) {

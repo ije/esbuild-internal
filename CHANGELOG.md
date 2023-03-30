@@ -1,5 +1,231 @@
 # Changelog
 
+## 0.17.14
+
+* Allow the TypeScript 5.0 `const` modifier in object type declarations ([#3021](https://github.com/evanw/esbuild/issues/3021))
+
+    The new TypeScript 5.0 `const` modifier was added to esbuild in version 0.17.5, and works with classes, functions, and arrow expressions. However, support for it wasn't added to object type declarations (e.g. interfaces) due to an oversight. This release adds support for these cases, so the following TypeScript 5.0 code can now be built with esbuild:
+
+    ```ts
+    interface Foo { <const T>(): T }
+    type Bar = { new <const T>(): T }
+    ```
+
+* Implement preliminary lowering for CSS nesting ([#1945](https://github.com/evanw/esbuild/issues/1945))
+
+    Chrome has [implemented the new CSS nesting specification](https://developer.chrome.com/articles/css-nesting/) in version 112, which is currently in beta but will become stable very soon. So CSS nesting is now a part of the web platform!
+
+    This release of esbuild can now transform nested CSS syntax into non-nested CSS syntax for older browsers. The transformation relies on the `:is()` pseudo-class in many cases, so the transformation is only guaranteed to work when targeting browsers that support `:is()` (e.g. Chrome 88+). You'll need to set esbuild's [`target`](https://esbuild.github.io/api/#target) to the browsers you intend to support to tell esbuild to do this transformation. You will get a warning if you use CSS nesting syntax with a `target` which includes older browsers that don't support `:is()`.
+
+    The lowering transformation looks like this:
+
+    ```css
+    /* Original input */
+    a.btn {
+      color: #333;
+      &:hover { color: #444 }
+      &:active { color: #555 }
+    }
+
+    /* New output (with --target=chrome88) */
+    a.btn {
+      color: #333;
+    }
+    a.btn:hover {
+      color: #444;
+    }
+    a.btn:active {
+      color: #555;
+    }
+    ```
+
+    More complex cases may generate the `:is()` pseudo-class:
+
+    ```css
+    /* Original input */
+    div, p {
+      .warning, .error {
+        padding: 20px;
+      }
+    }
+
+    /* New output (with --target=chrome88) */
+    :is(div, p) :is(.warning, .error) {
+      padding: 20px;
+    }
+    ```
+
+    In addition, esbuild now has a special warning message for nested style rules that start with an identifier. This isn't allowed in CSS because the syntax would be ambiguous with the existing declaration syntax. The new warning message looks like this:
+
+    ```
+    ▲ [WARNING] A nested style rule cannot start with "p" because it looks like the start of a declaration [css-syntax-error]
+
+        <stdin>:1:7:
+          1 │ main { p { margin: auto } }
+            │        ^
+            ╵        :is(p)
+
+      To start a nested style rule with an identifier, you need to wrap the identifier in ":is(...)" to
+      prevent the rule from being parsed as a declaration.
+    ```
+
+    Keep in mind that the transformation in this release is a preliminary implementation. CSS has many features that interact in complex ways, and there may be some edge cases that don't work correctly yet.
+
+* Minification now removes unnecessary `&` CSS nesting selectors
+
+    This release introduces the following CSS minification optimizations:
+
+    ```css
+    /* Original input */
+    a {
+      font-weight: bold;
+      & {
+        color: blue;
+      }
+      & :hover {
+        text-decoration: underline;
+      }
+    }
+
+    /* Old output (with --minify) */
+    a{font-weight:700;&{color:#00f}& :hover{text-decoration:underline}}
+
+    /* New output (with --minify) */
+    a{font-weight:700;:hover{text-decoration:underline}color:#00f}
+    ```
+
+* Minification now removes duplicates from CSS selector lists
+
+    This release introduces the following CSS minification optimization:
+
+    ```css
+    /* Original input */
+    div, div { color: red }
+
+    /* Old output (with --minify) */
+    div,div{color:red}
+
+    /* New output (with --minify) */
+    div{color:red}
+    ```
+
+## 0.17.13
+
+* Work around an issue with `NODE_PATH` and Go's WebAssembly internals ([#3001](https://github.com/evanw/esbuild/issues/3001))
+
+    Go's WebAssembly implementation returns `EINVAL` instead of `ENOTDIR` when using the `readdir` syscall on a file. This messes up esbuild's implementation of node's module resolution algorithm since encountering `ENOTDIR` causes esbuild to continue its search (since it's a normal condition) while other encountering other errors causes esbuild to fail with an I/O error (since it's an unexpected condition). You can encounter this issue in practice if you use node's legacy `NODE_PATH` feature to tell esbuild to resolve node modules in a custom directory that was not installed by npm. This release works around this problem by converting `EINVAL` into `ENOTDIR` for the `readdir` syscall.
+
+* Fix a minification bug with CSS `@layer` rules that have parsing errors ([#3016](https://github.com/evanw/esbuild/issues/3016))
+
+    CSS at-rules [require either a `{}` block or a semicolon at the end](https://www.w3.org/TR/css-syntax-3/#consume-at-rule). Omitting both of these causes esbuild to treat the rule as an unknown at-rule. Previous releases of esbuild had a bug that incorrectly removed unknown at-rules without any children during minification if the at-rule token matched an at-rule that esbuild can handle. Specifically [cssnano](https://cssnano.co/) can generate `@layer` rules with parsing errors, and empty `@layer` rules cannot be removed because they have side effects (`@layer` didn't exist when esbuild's CSS support was added, so esbuild wasn't written to handle this). This release changes esbuild to no longer discard `@layer` rules with parsing errors when minifying (the rule `@layer c` has a parsing error):
+
+    ```css
+    /* Original input */
+    @layer a {
+      @layer b {
+        @layer c
+      }
+    }
+
+    /* Old output (with --minify) */
+    @layer a.b;
+
+    /* New output (with --minify) */
+    @layer a.b.c;
+    ```
+
+* Unterminated strings in CSS are no longer an error
+
+    The CSS specification provides [rules for handling parsing errors](https://www.w3.org/TR/CSS22/syndata.html#parsing-errors). One of those rules is that user agents must close strings upon reaching the end of a line (i.e., before an unescaped line feed, carriage return or form feed character), but then drop the construct (declaration or rule) in which the string was found. For example:
+
+    ```css
+    p {
+      color: green;
+      font-family: 'Courier New Times
+      color: red;
+      color: green;
+    }
+    ```
+
+    ...would be treated the same as:
+
+    ```css
+    p { color: green; color: green; }
+    ```
+
+    ...because the second declaration (from `font-family` to the semicolon after `color: red`) is invalid and is dropped.
+
+    Previously using this CSS with esbuild failed to build due to a syntax error, even though the code can be interpreted by a browser. With this release, the code now produces a warning instead of an error, and esbuild prints the invalid CSS such that it stays invalid in the output:
+
+    ```css
+    /* esbuild's new non-minified output: */
+    p {
+      color: green;
+      font-family: 'Courier New Times
+      color: red;
+      color: green;
+    }
+    ```
+
+    ```css
+    /* esbuild's new minified output: */
+    p{font-family:'Courier New Times
+    color: red;color:green}
+    ```
+
+## 0.17.12
+
+* Fix a crash when parsing inline TypeScript decorators ([#2991](https://github.com/evanw/esbuild/issues/2991))
+
+    Previously esbuild's TypeScript parser crashed when parsing TypeScript decorators if the definition of the decorator was inlined into the decorator itself:
+
+    ```ts
+    @(function sealed(constructor: Function) {
+      Object.seal(constructor);
+      Object.seal(constructor.prototype);
+    })
+    class Foo {}
+    ```
+
+    This crash was not noticed earlier because this edge case did not have test coverage. The crash is fixed in this release.
+
+## 0.17.11
+
+* Fix the `alias` feature to always prefer the longest match ([#2963](https://github.com/evanw/esbuild/issues/2963))
+
+    It's possible to configure conflicting aliases such as `--alias:a=b` and `--alias:a/c=d`, which is ambiguous for the import path `a/c/x` (since it could map to either `b/c/x` or `d/x`). Previously esbuild would pick the first matching `alias`, which would non-deterministically pick between one of the possible matches. This release fixes esbuild to always deterministically pick the longest possible match.
+
+* Minify calls to some global primitive constructors ([#2962](https://github.com/evanw/esbuild/issues/2962))
+
+    With this release, esbuild's minifier now replaces calls to `Boolean`/`Number`/`String`/`BigInt` with equivalent shorter code when relevant:
+
+    ```js
+    // Original code
+    console.log(
+      Boolean(a ? (b | c) !== 0 : (c & d) !== 0),
+      Number(e ? '1' : '2'),
+      String(e ? '1' : '2'),
+      BigInt(e ? 1n : 2n),
+    )
+
+    // Old output (with --minify)
+    console.log(Boolean(a?(b|c)!==0:(c&d)!==0),Number(e?"1":"2"),String(e?"1":"2"),BigInt(e?1n:2n));
+
+    // New output (with --minify)
+    console.log(!!(a?b|c:c&d),+(e?"1":"2"),e?"1":"2",e?1n:2n);
+    ```
+
+* Adjust some feature compatibility tables for node ([#2940](https://github.com/evanw/esbuild/issues/2940))
+
+    This release makes the following adjustments to esbuild's internal feature compatibility tables for node, which tell esbuild which versions of node are known to support all aspects of that feature:
+
+    * `class-private-brand-checks`: node v16.9+ => node v16.4+ (a decrease)
+    * `hashbang`: node v12.0+ => node v12.5+ (an increase)
+    * `optional-chain`: node v16.9+ => node v16.1+ (a decrease)
+    * `template-literal`: node v4+ => node v10+ (an increase)
+
+    Each of these adjustments was identified by comparing against data from the `node-compat-table` package and was manually verified using old node executables downloaded from https://nodejs.org/download/release/.
+
 ## 0.17.10
 
 * Update esbuild's handling of CSS nesting to match the latest specification changes ([#1945](https://github.com/evanw/esbuild/issues/1945))

@@ -599,7 +599,7 @@ func (p *parser) skipTypeScriptObjectType() {
 		}
 
 		// Type parameters come right after the optional mark
-		p.skipTypeScriptTypeParameters(0)
+		p.skipTypeScriptTypeParameters(allowConstModifier)
 
 		switch p.lexer.Token {
 		case js_lexer.TColon:
@@ -1245,7 +1245,6 @@ func (p *parser) parseTypeScriptDecorators(tsDecoratorScope *js_ast.Scope) []js_
 		p.currentScope = tsDecoratorScope
 
 		for p.lexer.Token == js_lexer.TAt {
-			loc := p.lexer.Loc()
 			p.lexer.Next()
 
 			// Parse a new/call expression with "exprFlagTSDecorator" so we ignore
@@ -1257,7 +1256,6 @@ func (p *parser) parseTypeScriptDecorators(tsDecoratorScope *js_ast.Scope) []js_
 			//
 			// This matches the behavior of the TypeScript compiler.
 			value := p.parseExprWithFlags(js_ast.LNew, exprFlagTSDecorator)
-			value.Loc = loc
 			tsDecorators = append(tsDecorators, value)
 		}
 
