@@ -158,6 +158,12 @@ func TestTSTypes(t *testing.T) {
 	expectPrintedTS(t, "type Foo<T> = {readonly [P in keyof T]: T[P]}", "")
 	expectPrintedTS(t, "type Foo<T> = {-readonly [P in keyof T]: T[P]}", "")
 	expectPrintedTS(t, "type Foo<T> = {+readonly [P in keyof T]: T[P]}", "")
+	expectPrintedTS(t, "type Foo<T> = {[infer in T]?: Foo}", "")
+	expectPrintedTS(t, "type Foo<T> = {[keyof in T]?: Foo}", "")
+	expectPrintedTS(t, "type Foo<T> = {[asserts in T]?: Foo}", "")
+	expectPrintedTS(t, "type Foo<T> = {[abstract in T]?: Foo}", "")
+	expectPrintedTS(t, "type Foo<T> = {[readonly in T]?: Foo}", "")
+	expectPrintedTS(t, "type Foo<T> = {[satisfies in T]?: Foo}", "")
 	expectPrintedTS(t, "let x: number! = y", "let x = y;\n")
 	expectPrintedTS(t, "let x: number \n !y", "let x;\n!y;\n")
 	expectPrintedTS(t, "const x: unique = y", "const x = y;\n")
@@ -1656,7 +1662,7 @@ func TestTSDeclare(t *testing.T) {
 	expectParseErrorTS(t, "export as namespace ns.foo", "<stdin>: ERROR: Expected \";\" but found \".\"\n")
 }
 
-func TestTSDecorator(t *testing.T) {
+func TestTSExperimentalDecorator(t *testing.T) {
 	// Tests of "declare class"
 	expectPrintedTS(t, "@dec(() => 0) declare class Foo {} {let foo}", "{\n  let foo;\n}\n")
 	expectPrintedTS(t, "@dec(() => 0) declare abstract class Foo {} {let foo}", "{\n  let foo;\n}\n")
@@ -1667,30 +1673,30 @@ func TestTSDecorator(t *testing.T) {
 	expectPrintedTS(t, "declare class Foo { foo(@dec(() => 0) x) } {let foo}", "{\n  let foo;\n}\n")
 
 	// Decorators must only work on class statements
-	notes := "<stdin>: NOTE: The preceding TypeScript decorator is here:\n" +
-		"NOTE: Decorators can only be used with class declarations in TypeScript.\n"
-	expectParseErrorTS(t, "@dec enum foo {}", "<stdin>: ERROR: Expected \"class\" after TypeScript decorator but found \"enum\"\n"+notes)
-	expectParseErrorTS(t, "@dec namespace foo {}", "<stdin>: ERROR: Expected \"class\" after TypeScript decorator but found \"namespace\"\n"+notes)
-	expectParseErrorTS(t, "@dec function foo() {}", "<stdin>: ERROR: Expected \"class\" after TypeScript decorator but found \"function\"\n"+notes)
+	notes := "<stdin>: NOTE: The preceding decorator is here:\n" +
+		"NOTE: Decorators can only be used with class declarations.\n"
+	expectParseErrorTS(t, "@dec enum foo {}", "<stdin>: ERROR: Expected \"class\" after decorator but found \"enum\"\n"+notes)
+	expectParseErrorTS(t, "@dec namespace foo {}", "<stdin>: ERROR: Expected \"class\" after decorator but found \"namespace\"\n"+notes)
+	expectParseErrorTS(t, "@dec function foo() {}", "<stdin>: ERROR: Expected \"class\" after decorator but found \"function\"\n"+notes)
 	expectParseErrorTS(t, "@dec abstract", "<stdin>: ERROR: Expected \"class\" but found end of file\n")
-	expectParseErrorTS(t, "@dec declare: x", "<stdin>: ERROR: Expected \"class\" after TypeScript decorator but found \":\"\n"+notes)
-	expectParseErrorTS(t, "@dec declare enum foo {}", "<stdin>: ERROR: Expected \"class\" after TypeScript decorator but found \"enum\"\n"+notes)
-	expectParseErrorTS(t, "@dec declare namespace foo {}", "<stdin>: ERROR: Expected \"class\" after TypeScript decorator but found \"namespace\"\n"+notes)
-	expectParseErrorTS(t, "@dec declare function foo()", "<stdin>: ERROR: Expected \"class\" after TypeScript decorator but found \"function\"\n"+notes)
-	expectParseErrorTS(t, "@dec export {}", "<stdin>: ERROR: Expected \"class\" after TypeScript decorator but found \"{\"\n"+notes)
-	expectParseErrorTS(t, "@dec export enum foo {}", "<stdin>: ERROR: Expected \"class\" after TypeScript decorator but found \"enum\"\n"+notes)
-	expectParseErrorTS(t, "@dec export namespace foo {}", "<stdin>: ERROR: Expected \"class\" after TypeScript decorator but found \"namespace\"\n"+notes)
-	expectParseErrorTS(t, "@dec export function foo() {}", "<stdin>: ERROR: Expected \"class\" after TypeScript decorator but found \"function\"\n"+notes)
+	expectParseErrorTS(t, "@dec declare: x", "<stdin>: ERROR: Expected \"class\" after decorator but found \":\"\n"+notes)
+	expectParseErrorTS(t, "@dec declare enum foo {}", "<stdin>: ERROR: Expected \"class\" after decorator but found \"enum\"\n"+notes)
+	expectParseErrorTS(t, "@dec declare namespace foo {}", "<stdin>: ERROR: Expected \"class\" after decorator but found \"namespace\"\n"+notes)
+	expectParseErrorTS(t, "@dec declare function foo()", "<stdin>: ERROR: Expected \"class\" after decorator but found \"function\"\n"+notes)
+	expectParseErrorTS(t, "@dec export {}", "<stdin>: ERROR: Expected \"class\" after decorator but found \"{\"\n"+notes)
+	expectParseErrorTS(t, "@dec export enum foo {}", "<stdin>: ERROR: Expected \"class\" after decorator but found \"enum\"\n"+notes)
+	expectParseErrorTS(t, "@dec export namespace foo {}", "<stdin>: ERROR: Expected \"class\" after decorator but found \"namespace\"\n"+notes)
+	expectParseErrorTS(t, "@dec export function foo() {}", "<stdin>: ERROR: Expected \"class\" after decorator but found \"function\"\n"+notes)
 	expectParseErrorTS(t, "@dec export default abstract", "<stdin>: ERROR: Expected \"class\" but found end of file\n")
-	expectParseErrorTS(t, "@dec export declare enum foo {}", "<stdin>: ERROR: Expected \"class\" after TypeScript decorator but found \"enum\"\n"+notes)
-	expectParseErrorTS(t, "@dec export declare namespace foo {}", "<stdin>: ERROR: Expected \"class\" after TypeScript decorator but found \"namespace\"\n"+notes)
-	expectParseErrorTS(t, "@dec export declare function foo()", "<stdin>: ERROR: Expected \"class\" after TypeScript decorator but found \"function\"\n"+notes)
+	expectParseErrorTS(t, "@dec export declare enum foo {}", "<stdin>: ERROR: Expected \"class\" after decorator but found \"enum\"\n"+notes)
+	expectParseErrorTS(t, "@dec export declare namespace foo {}", "<stdin>: ERROR: Expected \"class\" after decorator but found \"namespace\"\n"+notes)
+	expectParseErrorTS(t, "@dec export declare function foo()", "<stdin>: ERROR: Expected \"class\" after decorator but found \"function\"\n"+notes)
 
 	// Decorators must be forbidden outside class statements
 	note := "<stdin>: NOTE: This is a class expression, not a class declaration:\n"
-	expectParseErrorTS(t, "(class { @dec foo })", "<stdin>: ERROR: Decorators can only be used with class declarations in TypeScript\n"+note)
-	expectParseErrorTS(t, "(class { @dec foo() {} })", "<stdin>: ERROR: Decorators can only be used with class declarations in TypeScript\n"+note)
-	expectParseErrorTS(t, "(class { foo(@dec x) {} })", "<stdin>: ERROR: Decorators can only be used with class declarations in TypeScript\n"+note)
+	expectParseErrorTS(t, "(class { @dec foo })", "<stdin>: ERROR: Experimental decorators can only be used with class declarations in TypeScript\n"+note)
+	expectParseErrorTS(t, "(class { @dec foo() {} })", "<stdin>: ERROR: Experimental decorators can only be used with class declarations in TypeScript\n"+note)
+	expectParseErrorTS(t, "(class { foo(@dec x) {} })", "<stdin>: ERROR: Experimental decorators can only be used with class declarations in TypeScript\n"+note)
 	expectParseErrorTS(t, "({ @dec foo })", "<stdin>: ERROR: Expected identifier but found \"@\"\n")
 	expectParseErrorTS(t, "({ @dec foo() {} })", "<stdin>: ERROR: Expected identifier but found \"@\"\n")
 	expectParseErrorTS(t, "({ foo(@dec x) {} })", "<stdin>: ERROR: Expected identifier but found \"@\"\n")
@@ -1710,8 +1716,8 @@ func TestTSDecorator(t *testing.T) {
 	expectParseErrorTS(t, "class Foo { @dec static async* #foo() {} }", "<stdin>: ERROR: Expected identifier but found \"#foo\"\n")
 
 	// Decorators aren't allowed on class constructors
-	expectParseErrorTS(t, "class Foo { @dec constructor() {} }", "<stdin>: ERROR: TypeScript does not allow decorators on class constructors\n")
-	expectParseErrorTS(t, "class Foo { @dec public constructor() {} }", "<stdin>: ERROR: TypeScript does not allow decorators on class constructors\n")
+	expectParseErrorTS(t, "class Foo { @dec constructor() {} }", "<stdin>: ERROR: Decorators are not allowed on class constructors\n")
+	expectParseErrorTS(t, "class Foo { @dec public constructor() {} }", "<stdin>: ERROR: Decorators are not allowed on class constructors\n")
 
 	// Check use of "await"
 	friendlyAwaitErrorWithNote := "<stdin>: ERROR: \"await\" can only be used inside an \"async\" function\n" +

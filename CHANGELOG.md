@@ -1,5 +1,156 @@
 # Changelog
 
+## 0.17.18
+
+* Fix non-default JSON import error with `export {} from` ([#3070](https://github.com/evanw/esbuild/issues/3070))
+
+    This release fixes a bug where esbuild incorrectly identified statements of the form `export { default as x } from "y" assert { type: "json" }` as a non-default import. The bug did not affect code of the form `import { default as x } from ...` (only code that used the `export` keyword).
+
+* Fix a crash with an invalid subpath import ([#3067](https://github.com/evanw/esbuild/issues/3067))
+
+    Previously esbuild could crash when attempting to generate a friendly error message for an invalid [subpath import](https://nodejs.org/api/packages.html#subpath-imports) (i.e. an import starting with `#`). This happened because esbuild originally only supported the `exports` field and the code for that error message was not updated when esbuild later added support for the `imports` field. This crash has been fixed.
+
+## 0.17.17
+
+* Fix CSS nesting transform for top-level `&` ([#3052](https://github.com/evanw/esbuild/issues/3052))
+
+    Previously esbuild could crash with a stack overflow when lowering CSS nesting rules with a top-level `&`, such as in the code below. This happened because esbuild's CSS nesting transform didn't handle top-level `&`, causing esbuild to inline the top-level selector into itself. This release handles top-level `&` by replacing it with [the `:scope` pseudo-class](https://drafts.csswg.org/selectors-4/#the-scope-pseudo):
+
+    ```css
+    /* Original code */
+    &,
+    a {
+      .b {
+        color: red;
+      }
+    }
+
+    /* New output (with --target=chrome90) */
+    :is(:scope, a) .b {
+      color: red;
+    }
+    ```
+
+* Support `exports` in `package.json` for `extends` in `tsconfig.json` ([#3058](https://github.com/evanw/esbuild/issues/3058))
+
+    TypeScript 5.0 added the ability to use `extends` in `tsconfig.json` to reference a path in a package whose `package.json` file contains an `exports` map that points to the correct location. This doesn't automatically work in esbuild because `tsconfig.json` affects esbuild's path resolution, so esbuild's normal path resolution logic doesn't apply.
+
+    This release adds support for doing this by adding some additional code that attempts to resolve the `extends` path using the `exports` field. The behavior should be similar enough to esbuild's main path resolution logic to work as expected.
+
+    Note that esbuild always treats this `extends` import as a `require()` import since that's what TypeScript appears to do. Specifically the `require` condition will be active and the `import` condition will be inactive.
+
+* Fix watch mode with `NODE_PATH` ([#3062](https://github.com/evanw/esbuild/issues/3062))
+
+    Node has a rarely-used feature where you can extend the set of directories that node searches for packages using the `NODE_PATH` environment variable. While esbuild supports this too, previously a bug prevented esbuild's watch mode from picking up changes to imported files that were contained directly in a `NODE_PATH` directory. You're supposed to use `NODE_PATH` for packages, but some people abuse this feature by putting files in that directory instead (e.g. `node_modules/some-file.js` instead of `node_modules/some-pkg/some-file.js`). The watch mode bug happens when you do this because esbuild first tries to read `some-file.js` as a directory and then as a file. Watch mode was incorrectly waiting for `some-file.js` to become a valid directory. This release fixes this edge case bug by changing watch mode to watch `some-file.js` as a file when this happens.
+
+## 0.17.16
+
+* Fix CSS nesting transform for triple-nested rules that start with a combinator ([#3046](https://github.com/evanw/esbuild/issues/3046))
+
+    This release fixes a bug with esbuild where triple-nested CSS rules that start with a combinator were not transformed correctly for older browsers. Here's an example of such a case before and after this bug fix:
+
+    ```css
+    /* Original input */
+    .a {
+      color: red;
+      > .b {
+        color: green;
+        > .c {
+          color: blue;
+        }
+      }
+    }
+
+    /* Old output (with --target=chrome90) */
+    .a {
+      color: red;
+    }
+    .a > .b {
+      color: green;
+    }
+    .a .b > .c {
+      color: blue;
+    }
+
+    /* New output (with --target=chrome90) */
+    .a {
+      color: red;
+    }
+    .a > .b {
+      color: green;
+    }
+    .a > .b > .c {
+      color: blue;
+    }
+    ```
+
+* Support `--inject` with a file loaded using the `copy` loader ([#3041](https://github.com/evanw/esbuild/issues/3041))
+
+    This release now allows you to use `--inject` with a file that is loaded using the `copy` loader. The `copy` loader copies the imported file to the output directory verbatim and rewrites the path in the `import` statement to point to the copied output file. When used with `--inject`, this means the injected file will be copied to the output directory as-is and a bare `import` statement for that file will be inserted in any non-copy output files that esbuild generates.
+
+    Note that since esbuild doesn't parse the contents of copied files, esbuild will not expose any of the export names as usable imports when you do this (in the way that esbuild's `--inject` feature is typically used). However, any side-effects that the injected file has will still occur.
+
+## 0.17.15
+
+* Allow keywords as type parameter names in mapped types ([#3033](https://github.com/evanw/esbuild/issues/3033))
+
+    TypeScript allows type keywords to be used as parameter names in mapped types. Previously esbuild incorrectly treated this as an error. Code that does this is now supported:
+
+    ```ts
+    type Foo = 'a' | 'b' | 'c'
+    type A = { [keyof in Foo]: number }
+    type B = { [infer in Foo]: number }
+    type C = { [readonly in Foo]: number }
+    ```
+
+* Add annotations for re-exported modules in node ([#2486](https://github.com/evanw/esbuild/issues/2486), [#3029](https://github.com/evanw/esbuild/issues/3029))
+
+    Node lets you import named imports from a CommonJS module using ESM import syntax. However, the allowed names aren't derived from the properties of the CommonJS module. Instead they are derived from an arbitrary syntax-only analysis of the CommonJS module's JavaScript AST.
+
+    To accommodate node doing this, esbuild's ESM-to-CommonJS conversion adds a special non-executable "annotation" for node that describes the exports that node should expose in this scenario. It takes the form `0 && (module.exports = { ... })` and comes at the end of the file (`0 && expr` means `expr` is never evaluated).
+
+    Previously esbuild didn't do this for modules re-exported using the `export * from` syntax. Annotations for these re-exports will now be added starting with this release:
+
+    ```js
+    // Original input
+    export { foo } from './foo'
+    export * from './bar'
+
+    // Old output (with --format=cjs --platform=node)
+    ...
+    0 && (module.exports = {
+      foo
+    });
+
+    // New output (with --format=cjs --platform=node)
+    ...
+    0 && (module.exports = {
+      foo,
+      ...require("./bar")
+    });
+    ```
+
+    Note that you need to specify both `--format=cjs` and `--platform=node` to get these node-specific annotations.
+
+* Avoid printing an unnecessary space in between a number and a `.` ([#3026](https://github.com/evanw/esbuild/pull/3026))
+
+    JavaScript typically requires a space in between a number token and a `.` token to avoid the `.` being interpreted as a decimal point instead of a member expression. However, this space is not required if the number token itself contains a decimal point, an exponent, or uses a base other than 10. This release of esbuild now avoids printing the unnecessary space in these cases:
+
+    ```js
+    // Original input
+    foo(1000 .x, 0 .x, 0.1 .x, 0.0001 .x, 0xFFFF_0000_FFFF_0000 .x)
+
+    // Old output (with --minify)
+    foo(1e3 .x,0 .x,.1 .x,1e-4 .x,0xffff0000ffff0000 .x);
+
+    // New output (with --minify)
+    foo(1e3.x,0 .x,.1.x,1e-4.x,0xffff0000ffff0000.x);
+    ```
+
+* Fix server-sent events with live reload when writing to the file system root ([#3027](https://github.com/evanw/esbuild/issues/3027))
+
+    This release fixes a bug where esbuild previously failed to emit server-sent events for live reload when `outdir` was the file system root, such as `/`. This happened because `/` is the only path on Unix that cannot have a trailing slash trimmed from it, which was fixed by improved path handling.
+
 ## 0.17.14
 
 * Allow the TypeScript 5.0 `const` modifier in object type declarations ([#3021](https://github.com/evanw/esbuild/issues/3021))

@@ -452,28 +452,45 @@ func (c *linkerContext) mangleProps(mangleCache map[string]interface{}) {
 // can cause initialization bugs. So let's forbid these cycles for now to guard
 // against code splitting bugs that could cause us to generate buggy chunks.
 func (c *linkerContext) enforceNoCyclicChunkImports() {
-	var validate func(int, []int)
-	validate = func(chunkIndex int, path []int) {
-		for _, otherChunkIndex := range path {
-			if chunkIndex == otherChunkIndex {
-				c.log.AddError(nil, logger.Range{}, "Internal error: generated chunks contain a circular import")
-				return
-			}
+	var validate func(int, map[int]int) bool
+
+	// DFS memoization with 3-colors, more space efficient
+	// 0: white (unvisited), 1: gray (visiting), 2: black (visited)
+	colors := make(map[int]int)
+	validate = func(chunkIndex int, colors map[int]int) bool {
+		if colors[chunkIndex] == 1 {
+			c.log.AddError(nil, logger.Range{}, "Internal error: generated chunks contain a circular import")
+			return true
 		}
-		path = append(path, chunkIndex)
+
+		if colors[chunkIndex] == 2 {
+			return false
+		}
+
+		colors[chunkIndex] = 1
+
 		for _, chunkImport := range c.chunks[chunkIndex].crossChunkImports {
 			// Ignore cycles caused by dynamic "import()" expressions. These are fine
 			// because they don't necessarily cause initialization order issues and
 			// they don't indicate a bug in our chunk generation algorithm. They arise
 			// normally in real code (e.g. two files that import each other).
 			if chunkImport.importKind != ast.ImportDynamic {
-				validate(int(chunkImport.chunkIndex), path)
+
+				// Recursively validate otherChunkIndex
+				if validate(int(chunkImport.chunkIndex), colors) {
+					return true
+				}
 			}
 		}
+
+		colors[chunkIndex] = 2
+		return false
 	}
-	path := make([]int, 0, len(c.chunks))
+
 	for i := range c.chunks {
-		validate(i, path)
+		if validate(i, colors) {
+			break
+		}
 	}
 }
 
@@ -4208,7 +4225,7 @@ func (c *linkerContext) generateEntryPointTailJS(
 		// of this parser, which the node project uses to detect named exports in
 		// CommonJS files: https://github.com/guybedford/cjs-module-lexer. Think of
 		// this code as an annotation for that parser.
-		if c.options.Platform == config.PlatformNode && len(repr.Meta.SortedAndFilteredExportAliases) > 0 {
+		if c.options.Platform == config.PlatformNode {
 			// Add a comment since otherwise people will surely wonder what this is.
 			// This annotation means you can do this and have it work:
 			//
@@ -4228,11 +4245,6 @@ func (c *linkerContext) generateEntryPointTailJS(
 			// instead of "__export" but support for that would need to be added to
 			// "cjs-module-lexer" and then we would need to be ok with not supporting
 			// older versions of node that don't have that newly-added support.
-			if !c.options.MinifyWhitespace {
-				stmts = append(stmts,
-					js_ast.Stmt{Data: &js_ast.SComment{Text: `// Annotate the CommonJS export names for ESM import in node:`}},
-				)
-			}
 
 			// "{a, b, if: null}"
 			var moduleExports []js_ast.Property
@@ -4259,20 +4271,38 @@ func (c *linkerContext) generateEntryPointTailJS(
 				})
 			}
 
-			// "0 && (module.exports = {a, b, if: null});"
-			expr := js_ast.Expr{Data: &js_ast.EBinary{
-				Op:   js_ast.BinOpLogicalAnd,
-				Left: js_ast.Expr{Data: &js_ast.ENumber{Value: 0}},
-				Right: js_ast.Assign(
-					js_ast.Expr{Data: &js_ast.EDot{
-						Target: js_ast.Expr{Data: &js_ast.EIdentifier{Ref: c.unboundModuleRef}},
-						Name:   "exports",
-					}},
-					js_ast.Expr{Data: &js_ast.EObject{Properties: moduleExports}},
-				),
-			}}
+			// Add annotations for re-exports: "{...require('./foo')}"
+			for _, importRecordIndex := range repr.AST.ExportStarImportRecords {
+				if record := &repr.AST.ImportRecords[importRecordIndex]; !record.SourceIndex.IsValid() {
+					moduleExports = append(moduleExports, js_ast.Property{
+						Kind:       js_ast.PropertySpread,
+						ValueOrNil: js_ast.Expr{Data: &js_ast.ERequireString{ImportRecordIndex: importRecordIndex}},
+					})
+				}
+			}
 
-			stmts = append(stmts, js_ast.Stmt{Data: &js_ast.SExpr{Value: expr}})
+			if len(moduleExports) > 0 {
+				// "0 && (module.exports = {a, b, if: null});"
+				expr := js_ast.Expr{Data: &js_ast.EBinary{
+					Op:   js_ast.BinOpLogicalAnd,
+					Left: js_ast.Expr{Data: &js_ast.ENumber{Value: 0}},
+					Right: js_ast.Assign(
+						js_ast.Expr{Data: &js_ast.EDot{
+							Target: js_ast.Expr{Data: &js_ast.EIdentifier{Ref: c.unboundModuleRef}},
+							Name:   "exports",
+						}},
+						js_ast.Expr{Data: &js_ast.EObject{Properties: moduleExports}},
+					),
+				}}
+
+				if !c.options.MinifyWhitespace {
+					stmts = append(stmts,
+						js_ast.Stmt{Data: &js_ast.SComment{Text: `// Annotate the CommonJS export names for ESM import in node:`}},
+					)
+				}
+
+				stmts = append(stmts, js_ast.Stmt{Data: &js_ast.SExpr{Value: expr}})
+			}
 		}
 
 	case config.FormatESModule:
