@@ -384,10 +384,10 @@ func TestTSLowerPrivateFieldAndMethodAvoidNameCollision2015(t *testing.T) {
 	lower_suite.expectBundled(t, bundled{
 		files: map[string]string{
 			"/entry.ts": `
-				class WeakMap {
+				export class WeakMap {
 					#x
 				}
-				class WeakSet {
+				export class WeakSet {
 					#y() {}
 				}
 			`,
@@ -405,7 +405,7 @@ func TestLowerPrivateGetterSetter2015(t *testing.T) {
 	lower_suite.expectBundled(t, bundled{
 		files: map[string]string{
 			"/entry.js": `
-				class Foo {
+				export class Foo {
 					get #foo() { return this.foo }
 					set #bar(val) { this.bar = val }
 					get #prop() { return this.prop }
@@ -456,7 +456,7 @@ func TestLowerPrivateGetterSetter2019(t *testing.T) {
 	lower_suite.expectBundled(t, bundled{
 		files: map[string]string{
 			"/entry.js": `
-				class Foo {
+				export class Foo {
 					get #foo() { return this.foo }
 					set #bar(val) { this.bar = val }
 					get #prop() { return this.prop }
@@ -507,7 +507,7 @@ func TestLowerPrivateGetterSetter2020(t *testing.T) {
 	lower_suite.expectBundled(t, bundled{
 		files: map[string]string{
 			"/entry.js": `
-				class Foo {
+				export class Foo {
 					get #foo() { return this.foo }
 					set #bar(val) { this.bar = val }
 					get #prop() { return this.prop }
@@ -608,7 +608,7 @@ func TestLowerPrivateMethod2019(t *testing.T) {
 	lower_suite.expectBundled(t, bundled{
 		files: map[string]string{
 			"/entry.js": `
-				class Foo {
+				export class Foo {
 					#field
 					#method() {}
 					baseline() {
@@ -650,7 +650,7 @@ func TestLowerPrivateMethod2020(t *testing.T) {
 	lower_suite.expectBundled(t, bundled{
 		files: map[string]string{
 			"/entry.js": `
-				class Foo {
+				export class Foo {
 					#field
 					#method() {}
 					baseline() {
@@ -757,7 +757,7 @@ func TestLowerPrivateMethodWithModifiers2020(t *testing.T) {
 	lower_suite.expectBundled(t, bundled{
 		files: map[string]string{
 			"/entry.js": `
-				class Foo {
+				export class Foo {
 					*#g() {}
 					async #a() {}
 					async *#ag() {}
@@ -1634,6 +1634,11 @@ func TestTSLowerClassField2020NoBundle(t *testing.T) {
 					static s_bar
 				}
 			`,
+			"/tsconfig.json": `{
+				"compilerOptions": {
+					"useDefineForClassFields": false
+				}
+			}`,
 		},
 		entryPaths: []string{"/entry.ts"},
 		options: config.Options{
@@ -1658,6 +1663,11 @@ func TestTSLowerClassPrivateFieldNextNoBundle(t *testing.T) {
 					static s_bar
 				}
 			`,
+			"/tsconfig.json": `{
+				"compilerOptions": {
+					"useDefineForClassFields": false
+				}
+			}`,
 		},
 		entryPaths: []string{"/entry.ts"},
 		options: config.Options{

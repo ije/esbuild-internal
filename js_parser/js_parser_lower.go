@@ -32,14 +32,7 @@ func (p *parser) prettyPrintTargetEnvironment(feature compat.JSFeature) (where s
 		}
 		overrides = fmt.Sprintf(" + %d override%s", count, s)
 	}
-	if tsTarget := p.options.tsTarget; tsTarget != nil &&
-		p.options.targetFromAPI == config.TargetWasUnconfigured &&
-		tsTarget.UnsupportedJSFeatures.Has(feature) {
-		tracker := logger.MakeLineColumnTracker(&tsTarget.Source)
-		where = fmt.Sprintf("%s (%q%s)", where, tsTarget.Target, overrides)
-		notes = []logger.MsgData{tracker.MsgData(tsTarget.Range, fmt.Sprintf(
-			"The target environment was set to %q here:", tsTarget.Target))}
-	} else if p.options.originalTargetEnv != "" {
+	if p.options.originalTargetEnv != "" {
 		where = fmt.Sprintf("%s (%s%s)", where, p.options.originalTargetEnv, overrides)
 	}
 	return
@@ -1969,24 +1962,22 @@ func (p *parser) captureKeyForObjectRest(originalKey js_ast.Expr) (finalKey js_a
 }
 
 type classLoweringInfo struct {
-	useDefineForClassFields bool
-	avoidTDZ                bool
-	lowerAllInstanceFields  bool
-	lowerAllStaticFields    bool
-	shimSuperCtorCalls      bool
+	avoidTDZ               bool
+	lowerAllInstanceFields bool
+	lowerAllStaticFields   bool
+	shimSuperCtorCalls     bool
 }
 
 func (p *parser) computeClassLoweringInfo(class *js_ast.Class) (result classLoweringInfo) {
-	// TypeScript has legacy behavior that uses assignment semantics instead of
-	// define semantics for class fields by default. This happened before class
-	// fields were added to JavaScript, but then TC39 decided to go with define
-	// semantics for class fields instead, leaving TypeScript to deal with the
-	// incorrect assignment semantics. This behaves differently if the base class
-	// has a setter with the same name.
-	result.useDefineForClassFields = p.options.useDefineForClassFields != config.False
-
 	// Safari workaround: Automatically avoid TDZ issues when bundling
 	result.avoidTDZ = p.options.mode == config.ModeBundle && p.currentScope.Parent == nil
+
+	// Name keeping for classes is implemented with a static block. So we need to
+	// lower all static fields if static blocks are unsupported so that the name
+	// keeping comes first before other static initializers.
+	if p.options.keepNames && (result.avoidTDZ || p.options.unsupportedJSFeatures.Has(compat.ClassStaticBlocks)) {
+		result.lowerAllStaticFields = true
+	}
 
 	// Conservatively lower fields of a given type (instance or static) when any
 	// member of that type needs to be lowered. This must be done to preserve
@@ -2021,6 +2012,40 @@ func (p *parser) computeClassLoweringInfo(class *js_ast.Class) (result classLowe
 	//   _foo = new WeakMap();
 	//
 	for _, prop := range class.Properties {
+		// Be conservative and always lower static fields when we're doing TDZ-
+		// avoidance if the class's shadowing symbol is referenced at all (i.e.
+		// the class name within the class body, which can be referenced by name
+		// or by "this" in a static initializer). We can't transform this:
+		//
+		//   class Foo {
+		//     static foo = new Foo();
+		//     static #bar = new Foo();
+		//     static { new Foo(); }
+		//   }
+		//
+		// into this:
+		//
+		//   var Foo = class {
+		//     static foo = new Foo();
+		//     static #bar = new Foo();
+		//     static { new Foo(); }
+		//   };
+		//
+		// since "new Foo" will crash. We need to lower this static field to avoid
+		// crashing due to an uninitialized binding.
+		if result.avoidTDZ {
+			// Note that due to esbuild's single-pass design where private fields
+			// are lowered as they are resolved, we must decide whether to lower
+			// these private fields before we enter the class body. We can't wait
+			// until we've scanned the class body and know if the shadowing symbol
+			// is used or not before we decide, because if "#bar" does need to be
+			// lowered, references to "#bar" inside the class body weren't lowered.
+			// So we just unconditionally do this instead.
+			if prop.Kind == js_ast.PropertyClassStaticBlock || prop.Flags.Has(js_ast.PropertyIsStatic) {
+				result.lowerAllStaticFields = true
+			}
+		}
+
 		if prop.Kind == js_ast.PropertyClassStaticBlock {
 			if p.options.unsupportedJSFeatures.Has(compat.ClassStaticBlocks) && len(prop.ClassStaticBlock.Block.Stmts) > 0 {
 				result.lowerAllStaticFields = true
@@ -2031,34 +2056,6 @@ func (p *parser) computeClassLoweringInfo(class *js_ast.Class) (result classLowe
 		if private, ok := prop.Key.Data.(*js_ast.EPrivateIdentifier); ok {
 			if prop.Flags.Has(js_ast.PropertyIsStatic) {
 				if p.privateSymbolNeedsToBeLowered(private) {
-					result.lowerAllStaticFields = true
-				}
-
-				// Be conservative and always lower static fields when we're doing TDZ-
-				// avoidance if the class's shadowing symbol is referenced at all (i.e.
-				// the class name within the class body, which can be referenced by name
-				// or by "this" in a static initializer). We can't transform this:
-				//
-				//   class Foo {
-				//     static #foo = new Foo();
-				//   }
-				//
-				// into this:
-				//
-				//   var Foo = class {
-				//     static #foo = new Foo();
-				//   };
-				//
-				// since "new Foo" will crash. We need to lower this static field to avoid
-				// crashing due to an uninitialized binding.
-				if result.avoidTDZ {
-					// Note that due to esbuild's single-pass design where private fields
-					// are lowered as they are resolved, we must decide whether to lower
-					// these private fields before we enter the class body. We can't wait
-					// until we've scanned the class body and know if the shadowing symbol
-					// is used or not before we decide, because if "#foo" does need to be
-					// lowered, references to "#foo" inside the class body weren't lowered.
-					// So we just unconditionally do this instead.
 					result.lowerAllStaticFields = true
 				}
 			} else {
@@ -2147,26 +2144,7 @@ func (p *parser) computeClassLoweringInfo(class *js_ast.Class) (result classLowe
 			// setting for this is enabled. I don't think this matters for private
 			// fields because there's no way for this to call a setter in the base
 			// class, so this isn't done for private fields.
-			if p.options.ts.Parse && !result.useDefineForClassFields {
-				result.lowerAllStaticFields = true
-			}
-
-			// Be conservative and always lower static fields when we're doing TDZ-
-			// avoidance. We can't transform this:
-			//
-			//   class Foo {
-			//     static foo = new Foo();
-			//   }
-			//
-			// into this:
-			//
-			//   var Foo = class {
-			//     static foo = new Foo();
-			//   };
-			//
-			// since "new Foo" will crash. We need to lower this static field to avoid
-			// crashing due to an uninitialized binding.
-			if result.avoidTDZ {
+			if p.options.ts.Parse && !class.UseDefineForClassFields {
 				result.lowerAllStaticFields = true
 			}
 		} else {
@@ -2179,7 +2157,7 @@ func (p *parser) computeClassLoweringInfo(class *js_ast.Class) (result classLowe
 			// setting for this is enabled. I don't think this matters for private
 			// fields because there's no way for this to call a setter in the base
 			// class, so this isn't done for private fields.
-			if p.options.ts.Parse && !result.useDefineForClassFields {
+			if p.options.ts.Parse && !class.UseDefineForClassFields {
 				result.lowerAllInstanceFields = true
 			}
 		}
@@ -2193,16 +2171,6 @@ func (p *parser) computeClassLoweringInfo(class *js_ast.Class) (result classLowe
 	}
 
 	return
-}
-
-func propertyPreventsKeepNames(prop *js_ast.Property) bool {
-	// A static property called "name" shadows the automatically-generated name
-	if prop.Flags.Has(js_ast.PropertyIsStatic) {
-		if str, ok := prop.Key.Data.(*js_ast.EString); ok && helpers.UTF16EqualsString(str.Value, "name") {
-			return true
-		}
-	}
-	return false
 }
 
 // Lower class fields for environments that don't support them. This either
@@ -2221,14 +2189,12 @@ func (p *parser) lowerClass(stmt js_ast.Stmt, expr js_ast.Expr, result visitClas
 	var class *js_ast.Class
 	var classLoc logger.Loc
 	var defaultName js_ast.LocRef
-	var nameToKeep string
 	if stmt.Data == nil {
 		e, _ := expr.Data.(*js_ast.EClass)
 		class = &e.Class
 		kind = classKindExpr
 		if class.Name != nil {
 			symbol := &p.symbols[class.Name.Ref.InnerIndex]
-			nameToKeep = symbol.OriginalName
 
 			// The shadowing name inside the class expression should be the same as
 			// the class expression name itself
@@ -2249,18 +2215,12 @@ func (p *parser) lowerClass(stmt js_ast.Stmt, expr js_ast.Expr, result visitClas
 		} else {
 			kind = classKindStmt
 		}
-		nameToKeep = p.symbols[class.Name.Ref.InnerIndex].OriginalName
 	} else {
 		s, _ := stmt.Data.(*js_ast.SExportDefault)
 		s2, _ := s.Value.Data.(*js_ast.SClass)
 		class = &s2.Class
 		defaultName = s.DefaultName
 		kind = classKindExportDefaultStmt
-		if class.Name != nil {
-			nameToKeep = p.symbols[class.Name.Ref.InnerIndex].OriginalName
-		} else {
-			nameToKeep = "default"
-		}
 	}
 	if stmt.Data == nil {
 		classLoc = expr.Loc
@@ -2346,13 +2306,37 @@ func (p *parser) lowerClass(stmt js_ast.Stmt, expr js_ast.Expr, result visitClas
 
 	for _, prop := range class.Properties {
 		if prop.Kind == js_ast.PropertyClassStaticBlock {
-			if p.options.unsupportedJSFeatures.Has(compat.ClassStaticBlocks) {
-				if block := *prop.ClassStaticBlock; len(block.Block.Stmts) > 0 {
+			if classLoweringInfo.lowerAllStaticFields {
+				block := *prop.ClassStaticBlock
+				isAllExprs := []js_ast.Expr{}
+
+				// Are all statements in the block expression statements?
+			loop:
+				for _, stmt := range block.Block.Stmts {
+					switch s := stmt.Data.(type) {
+					case *js_ast.SEmpty:
+						// Omit stray semicolons completely
+					case *js_ast.SExpr:
+						isAllExprs = append(isAllExprs, s.Value)
+					default:
+						isAllExprs = nil
+						break loop
+					}
+				}
+
+				if isAllExprs != nil {
+					// I think it should be safe to inline the static block IIFE here
+					// since all uses of "this" should have already been replaced by now.
+					staticMembers = append(staticMembers, isAllExprs...)
+				} else {
+					// But if there is a non-expression statement, fall back to using an
+					// IIFE since we may be in an expression context and can't use a block.
 					staticMembers = append(staticMembers, js_ast.Expr{Loc: prop.Loc, Data: &js_ast.ECall{
 						Target: js_ast.Expr{Loc: prop.Loc, Data: &js_ast.EArrow{Body: js_ast.FnBody{
 							Loc:   block.Loc,
 							Block: block.Block,
 						}}},
+						CanBeUnwrappedIfUnused: js_ast.StmtsCanBeRemovedIfUnused(block.Block.Stmts, 0, p.isUnbound),
 					}})
 				}
 				continue
@@ -2362,10 +2346,6 @@ func (p *parser) lowerClass(stmt js_ast.Stmt, expr js_ast.Expr, result visitClas
 			class.Properties[end] = prop
 			end++
 			continue
-		}
-
-		if p.options.keepNames && propertyPreventsKeepNames(&prop) {
-			nameToKeep = ""
 		}
 
 		// Merge parameter decorators with method decorators
@@ -2403,7 +2383,7 @@ func (p *parser) lowerClass(stmt js_ast.Stmt, expr js_ast.Expr, result visitClas
 		private, _ := prop.Key.Data.(*js_ast.EPrivateIdentifier)
 		mustLowerPrivate := private != nil && p.privateSymbolNeedsToBeLowered(private)
 		shouldOmitFieldInitializer := p.options.ts.Parse && !prop.Flags.Has(js_ast.PropertyIsMethod) && prop.InitializerOrNil.Data == nil &&
-			!classLoweringInfo.useDefineForClassFields && !mustLowerPrivate
+			!class.UseDefineForClassFields && !mustLowerPrivate
 
 		// Class fields must be lowered if the environment doesn't support them
 		mustLowerField := false
@@ -2556,7 +2536,7 @@ func (p *parser) lowerClass(stmt js_ast.Stmt, expr js_ast.Expr, result visitClas
 						init,
 					})
 					p.recordUsage(ref)
-				} else if private == nil && classLoweringInfo.useDefineForClassFields {
+				} else if private == nil && class.UseDefineForClassFields {
 					var args []js_ast.Expr
 					if _, ok := init.Data.(*js_ast.EUndefined); ok {
 						args = []js_ast.Expr{target, prop.Key}
@@ -2566,7 +2546,6 @@ func (p *parser) lowerClass(stmt js_ast.Stmt, expr js_ast.Expr, result visitClas
 					memberExpr = js_ast.Expr{Loc: loc, Data: &js_ast.ECall{
 						Target: p.importFromRuntime(loc, "__publicField"),
 						Args:   args,
-						Kind:   js_ast.InternalPublicFieldCall,
 					}}
 				} else {
 					if key, ok := prop.Key.Data.(*js_ast.EString); ok && !prop.Flags.Has(js_ast.PropertyIsComputed) && !prop.Flags.Has(js_ast.PropertyPreferQuotedKey) {
@@ -2765,11 +2744,6 @@ func (p *parser) lowerClass(stmt js_ast.Stmt, expr js_ast.Expr, result visitClas
 			nameToJoin = nameFunc()
 		}
 
-		// Optionally preserve the name
-		if p.options.keepNames && nameToKeep != "" {
-			expr = p.keepExprSymbolName(expr, nameToKeep)
-		}
-
 		// Then join "expr" with any other expressions that apply
 		if computedPropertyCache.Data != nil {
 			expr = js_ast.JoinWithComma(expr, computedPropertyCache)
@@ -2806,13 +2780,6 @@ func (p *parser) lowerClass(stmt js_ast.Stmt, expr js_ast.Expr, result visitClas
 			len(instanceDecorators) > 0 ||
 			len(staticDecorators) > 0 ||
 			len(class.Decorators) > 0)
-
-	// Optionally preserve the name
-	var keepNameStmt js_ast.Stmt
-	if p.options.keepNames && nameToKeep != "" {
-		name := nameFunc()
-		keepNameStmt = p.keepStmtSymbolName(name.Loc, name.Data.(*js_ast.EIdentifier).Ref, nameToKeep)
-	}
 
 	// Pack the class back into a statement, with potentially some extra
 	// statements afterwards
@@ -2913,9 +2880,6 @@ func (p *parser) lowerClass(stmt js_ast.Stmt, expr js_ast.Expr, result visitClas
 		if class.Name != nil && result.shadowRef != js_ast.InvalidRef {
 			p.mergeSymbols(result.shadowRef, class.Name.Ref)
 		}
-	}
-	if keepNameStmt.Data != nil {
-		stmts = append(stmts, keepNameStmt)
 	}
 
 	// The official TypeScript compiler adds generated code after the class body

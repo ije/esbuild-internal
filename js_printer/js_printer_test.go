@@ -571,14 +571,14 @@ func TestCommentsAndParentheses(t *testing.T) {
 
 func TestPureComment(t *testing.T) {
 	expectPrinted(t,
-		"(function() {})",
-		"(function() {\n});\n")
+		"(function() { foo() })",
+		"(function() {\n  foo();\n});\n")
 	expectPrinted(t,
-		"(function() {})()",
-		"(function() {\n})();\n")
+		"(function() { foo() })()",
+		"(function() {\n  foo();\n})();\n")
 	expectPrinted(t,
-		"/*@__PURE__*/(function() {})()",
-		"/* @__PURE__ */ (function() {\n})();\n")
+		"/*@__PURE__*/(function() { foo() })()",
+		"/* @__PURE__ */ (function() {\n  foo();\n})();\n")
 
 	expectPrinted(t,
 		"new (function() {})",
@@ -591,14 +591,14 @@ func TestPureComment(t *testing.T) {
 		"/* @__PURE__ */ new function() {\n}();\n")
 
 	expectPrinted(t,
-		"export default (function() {})",
-		"export default (function() {\n});\n")
+		"export default (function() { foo() })",
+		"export default (function() {\n  foo();\n});\n")
 	expectPrinted(t,
-		"export default (function() {})()",
-		"export default (function() {\n})();\n")
+		"export default (function() { foo() })()",
+		"export default (function() {\n  foo();\n})();\n")
 	expectPrinted(t,
-		"export default /*@__PURE__*/(function() {})()",
-		"export default /* @__PURE__ */ (function() {\n})();\n")
+		"export default /*@__PURE__*/(function() { foo() })()",
+		"export default /* @__PURE__ */ (function() {\n  foo();\n})();\n")
 }
 
 func TestGenerator(t *testing.T) {
@@ -847,7 +847,7 @@ func TestMinify(t *testing.T) {
 	expectPrinted(t, "x = '\\n'", "x = \"\\n\";\n")
 	expectPrintedMangle(t, "x = '\\n'", "x = `\n`;\n")
 	expectPrintedMangle(t, "x = {'\\n': 0}", "x = { \"\\n\": 0 };\n")
-	expectPrintedMangle(t, "(class{'\\n' = 0})", "(class {\n  \"\\n\" = 0;\n});\n")
+	expectPrintedMangle(t, "x = class{'\\n' = 0}", "x = class {\n  \"\\n\" = 0;\n};\n")
 	expectPrintedMangle(t, "class Foo{'\\n' = 0}", "class Foo {\n  \"\\n\" = 0;\n}\n")
 
 	// Special identifiers must not be minified

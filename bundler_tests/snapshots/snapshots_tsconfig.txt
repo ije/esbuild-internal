@@ -83,46 +83,100 @@ var foo = 123;
 console.log(foo);
 
 ================================================================================
+TestTsConfigExtendsArray
+---------- /Users/user/project/out/main.js ----------
+console.log(/* @__PURE__ */ h(frag, null, /* @__PURE__ */ h("div", null)));
+
+================================================================================
+TestTsConfigExtendsArrayNested
+---------- /Users/user/project/out/main.js ----------
+import { foo } from "foo";
+export class Foo {
+  constructor() {
+    this.render = () => /* @__PURE__ */ b(bBase, null, /* @__PURE__ */ b("div", null));
+  }
+}
+
+================================================================================
 TestTsConfigExtendsDotDotWithSlash
 ---------- /Users/user/project/out/main.js ----------
-// Users/user/project/src/main.ts
-console.log(123n);
+// Users/user/project/src/main.tsx
+console.log(/* @__PURE__ */ React.createElement("div", null));
+
+================================================================================
+TestTsConfigExtendsDotDotWithoutSlash
+---------- /Users/user/project/out/main.js ----------
+// Users/user/project/src/main.tsx
+console.log(/* @__PURE__ */ success("div", null));
 
 ================================================================================
 TestTsConfigExtendsDotWithSlash
 ---------- /Users/user/project/out/main.js ----------
+// Users/user/project/src/main.tsx
+console.log(/* @__PURE__ */ React.createElement("div", null));
+
+================================================================================
+TestTsConfigExtendsDotWithoutSlash
+---------- /Users/user/project/out/main.js ----------
+// Users/user/project/src/main.tsx
+console.log(/* @__PURE__ */ success("div", null));
+
+================================================================================
+TestTsConfigExtendsWithExports
+---------- /Users/user/project/out/main.js ----------
+// Users/user/project/src/main.tsx
+console.log(/* @__PURE__ */ success("div", null));
+
+================================================================================
+TestTsConfigExtendsWithExportsRequire
+---------- /Users/user/project/out/main.js ----------
+// Users/user/project/src/main.tsx
+console.log(/* @__PURE__ */ success("div", null));
+
+================================================================================
+TestTsConfigExtendsWithExportsStar
+---------- /Users/user/project/out/main.js ----------
+// Users/user/project/src/main.tsx
+console.log(/* @__PURE__ */ success("div", null));
+
+================================================================================
+TestTsConfigExtendsWithExportsStarTrailing
+---------- /Users/user/project/out/main.js ----------
+// Users/user/project/src/main.tsx
+console.log(/* @__PURE__ */ success("div", null));
+
+================================================================================
+TestTsConfigIgnoreInsideNodeModules
+---------- /Users/user/project/out/main.js ----------
+// Users/user/project/node_modules/pkg/index.js
+var foo = "foo";
+var bar = "bar";
+
+// Users/user/project/node_modules/js-pkg/index.js
+var foo2 = foo;
+
+// Users/user/project/node_modules/ts-pkg/index.ts
+var bar2 = bar;
+
+// Users/user/project/shim.ts
+var foo3 = "shimFoo";
+var bar3 = "shimBar";
+
 // Users/user/project/src/main.ts
-console.log(123n);
+if (foo2 !== "foo")
+  throw "fail: foo";
+if (bar2 !== "bar")
+  throw "fail: bar";
+if (foo3 !== "shimFoo")
+  throw "fail: shimFoo";
+if (bar3 !== "shimBar")
+  throw "fail: shimBar";
 
 ================================================================================
 TestTsConfigJSX
 ---------- /Users/user/project/out.js ----------
 // Users/user/project/entry.tsx
 console.log(/* @__PURE__ */ R.c(R.F, null, /* @__PURE__ */ R.c("div", null), /* @__PURE__ */ R.c("div", null)));
-
-================================================================================
-TestTsConfigModuleSuffixesInsert
----------- /Users/user/project/out.js ----------
-// Users/user/project/src/foo.a.ts
-console.log("foo.a");
-
-// Users/user/project/src/bar.a.ts
-console.log("bar.a");
-
-// Users/user/project/src/baz.a.ts
-console.log("baz.a");
-
-================================================================================
-TestTsConfigModuleSuffixesNoInsert
----------- /Users/user/project/out.js ----------
-// Users/user/project/src/foo.b.ts
-console.log("foo.b");
-
-// Users/user/project/src/bar.ts
-console.log("bar");
-
-// Users/user/project/src/baz.b.ts
-console.log("baz.b");
 
 ================================================================================
 TestTsConfigNestedJSX
@@ -223,6 +277,18 @@ var foo = 123;
 
 // Users/user/project/src/entry.ts
 console.log(foo);
+
+================================================================================
+TestTsConfigPathsInNodeModulesIssue2386
+---------- /Users/user/project/out.js ----------
+// Users/user/project/node_modules/wow/dist/first.js
+var first_default = "dist";
+
+// Users/user/project/node_modules/wow/dist/next.js
+var next_default = first_default;
+
+// Users/user/project/main.js
+console.log(first_default, next_default);
 
 ================================================================================
 TestTsConfigPathsNoBaseURL
@@ -327,6 +393,22 @@ function fib(input) {
 console.log(fib(10));
 
 ================================================================================
+TestTsConfigPreserveJSX
+---------- /Users/user/project/out.js ----------
+// Users/user/project/entry.tsx
+console.log(/* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", null), /* @__PURE__ */ React.createElement("div", null)));
+
+================================================================================
+TestTsConfigPreserveJSXAutomatic
+---------- /Users/user/project/out.js ----------
+// Users/user/project/entry.tsx
+import { Fragment, jsx, jsxs } from "react/jsx-runtime";
+console.log(/* @__PURE__ */ jsxs(Fragment, { children: [
+  /* @__PURE__ */ jsx("div", {}),
+  /* @__PURE__ */ jsx("div", {})
+] }));
+
+================================================================================
 TestTsConfigReactJSX
 ---------- /Users/user/project/out.js ----------
 // Users/user/project/entry.tsx
@@ -381,6 +463,20 @@ console.log(/* @__PURE__ */ jsxDEV(Fragment, { children: [
 }, this));
 
 ================================================================================
+TestTsConfigVerbatimModuleSyntaxFalse
+---------- /Users/user/project/out/main.js ----------
+export { Car } from "./car";
+
+================================================================================
+TestTsConfigVerbatimModuleSyntaxTrue
+---------- /Users/user/project/out/main.js ----------
+export { Car } from "./car";
+import {} from "./car";
+export {} from "./car";
+import { b } from "bcd";
+import {} from "xyz";
+
+================================================================================
 TestTsConfigWithStatementAlwaysStrictFalse
 ---------- /Users/user/project/out.js ----------
 (() => {
@@ -406,6 +502,14 @@ TestTsConfigWithStatementStrictTrueAlwaysStrictFalse
   with (x)
     y;
 })();
+
+================================================================================
+TestTsconfigIgnoredTargetSilent
+---------- /Users/user/project/out.js ----------
+
+================================================================================
+TestTsconfigIgnoredTargetWarning
+---------- /Users/user/project/out.js ----------
 
 ================================================================================
 TestTsconfigImportsNotUsedAsValuesPreserve
@@ -574,39 +678,6 @@ TestTsconfigRemoveUnusedImports
 ---------- /Users/user/project/out.js ----------
 // Users/user/project/src/entry.ts
 console.log(1);
-
-================================================================================
-TestTsconfigTarget
----------- /Users/user/project/out.js ----------
-// Users/user/project/src/es2018/index.ts
-var x = { ...y };
-try {
-  y;
-} catch (e) {
-}
-x == null ? void 0 : x.y();
-
-// Users/user/project/src/es2019/index.ts
-var x2 = { ...y };
-try {
-  y;
-} catch {
-}
-x2 == null ? void 0 : x2.y();
-
-// Users/user/project/src/es2020/index.ts
-var x3 = { ...y };
-try {
-  y;
-} catch {
-}
-x3?.y();
-
-================================================================================
-TestTsconfigTargetIgnored
----------- /Users/user/project/out.js ----------
-// Users/user/project/src/entry.ts
-x = 123n;
 
 ================================================================================
 TestTsconfigUnrecognizedTargetWarning

@@ -197,6 +197,7 @@ var ns;
 
 ---------- /out/directive-before.js ----------
 function nested() {
+  "directive";
   x = [1, 1];
 }
 
@@ -276,9 +277,9 @@ console.log([
   3 /* a */ === 6 /* b */,
   3 /* a */ !== 6 /* b */
 ], [
-  6 /* b */ << 1,
+  12,
   3,
-  6 /* b */ >>> 1
+  3
 ], [
   2,
   7,
@@ -314,9 +315,9 @@ console.log([
   3 === 6,
   3 !== 6
 ], [
-  6 << 1,
+  12,
   3,
-  6 >>> 1
+  3
 ], [
   2,
   7,
@@ -339,31 +340,45 @@ TestDCEClassStaticBlocks
 ---------- /out.js ----------
 // entry.ts
 var A_keep = class {
-  static {
+};
+foo;
+var _B_keep = class {
+};
+var B_keep = _B_keep;
+_B_keep.foo;
+var C_keep = class {
+};
+(() => {
+  try {
+    foo;
+  } catch {
+  }
+})();
+var D_keep = class {
+};
+(() => {
+  try {
+  } finally {
     foo;
   }
-};
-var B_keep = class {
-  static {
-    this.foo;
-  }
-};
-var C_keep = class {
-  static {
-    try {
-      foo;
-    } catch {
-    }
-  }
-};
-var D_keep = class {
-  static {
-    try {
-    } finally {
-      foo;
-    }
-  }
-};
+})();
+
+================================================================================
+TestDCEOfIIFE
+---------- /out/remove-these.js ----------
+keepThisButRemoveTheIIFE;
+
+---------- /out/keep-these.js ----------
+undef = /* @__PURE__ */ (() => {
+})();
+keepMe();
+((x = keepMe()) => {
+})();
+var someVar;
+(([y]) => {
+})(someVar);
+(({ z }) => {
+})(someVar);
 
 ================================================================================
 TestDCETemplateLiteral
@@ -1085,6 +1100,593 @@ check(
 );
 
 ================================================================================
+TestNoSideEffectsComment
+---------- /out/expr-fn.js ----------
+//! These should all have "no side effects"
+x([
+  /* @__NO_SIDE_EFFECTS__ */ function() {
+  },
+  /* @__NO_SIDE_EFFECTS__ */ function y() {
+  },
+  /* @__NO_SIDE_EFFECTS__ */ function* () {
+  },
+  /* @__NO_SIDE_EFFECTS__ */ function* y2() {
+  },
+  /* @__NO_SIDE_EFFECTS__ */ async function() {
+  },
+  /* @__NO_SIDE_EFFECTS__ */ async function y3() {
+  },
+  /* @__NO_SIDE_EFFECTS__ */ async function* () {
+  },
+  /* @__NO_SIDE_EFFECTS__ */ async function* y4() {
+  }
+]);
+
+---------- /out/expr-arrow.js ----------
+//! These should all have "no side effects"
+x([
+  /* @__NO_SIDE_EFFECTS__ */ (y) => y,
+  /* @__NO_SIDE_EFFECTS__ */ () => {
+  },
+  /* @__NO_SIDE_EFFECTS__ */ (y) => y,
+  /* @__NO_SIDE_EFFECTS__ */ async (y) => y,
+  /* @__NO_SIDE_EFFECTS__ */ async () => {
+  },
+  /* @__NO_SIDE_EFFECTS__ */ async (y) => y
+]);
+
+---------- /out/stmt-fn.js ----------
+//! These should all have "no side effects"
+// @__NO_SIDE_EFFECTS__
+function a() {
+}
+// @__NO_SIDE_EFFECTS__
+function* b() {
+}
+// @__NO_SIDE_EFFECTS__
+async function c() {
+}
+// @__NO_SIDE_EFFECTS__
+async function* d() {
+}
+
+---------- /out/stmt-export-fn.js ----------
+//! These should all have "no side effects"
+// @__NO_SIDE_EFFECTS__
+export function a() {
+}
+// @__NO_SIDE_EFFECTS__
+export function* b() {
+}
+// @__NO_SIDE_EFFECTS__
+export async function c() {
+}
+// @__NO_SIDE_EFFECTS__
+export async function* d() {
+}
+
+---------- /out/stmt-local.js ----------
+//! Only "c0" and "c2" should have "no side effects" (Rollup only respects "const" and only for the first one)
+var v0 = function() {
+}, v1 = function() {
+};
+let l0 = function() {
+}, l1 = function() {
+};
+const c0 = /* @__NO_SIDE_EFFECTS__ */ function() {
+}, c1 = function() {
+};
+var v2 = () => {
+}, v3 = () => {
+};
+let l2 = () => {
+}, l3 = () => {
+};
+const c2 = /* @__NO_SIDE_EFFECTS__ */ () => {
+}, c3 = () => {
+};
+
+---------- /out/stmt-export-local.js ----------
+//! Only "c0" and "c2" should have "no side effects" (Rollup only respects "const" and only for the first one)
+export var v0 = function() {
+}, v1 = function() {
+};
+export let l0 = function() {
+}, l1 = function() {
+};
+export const c0 = /* @__NO_SIDE_EFFECTS__ */ function() {
+}, c1 = function() {
+};
+export var v2 = () => {
+}, v3 = () => {
+};
+export let l2 = () => {
+}, l3 = () => {
+};
+export const c2 = /* @__NO_SIDE_EFFECTS__ */ () => {
+}, c3 = () => {
+};
+
+---------- /out/ns-export-fn.js ----------
+var ns;
+((ns2) => {
+  //! These should all have "no side effects"
+  // @__NO_SIDE_EFFECTS__
+  function a() {
+  }
+  ns2.a = a;
+  // @__NO_SIDE_EFFECTS__
+  function* b() {
+  }
+  ns2.b = b;
+  // @__NO_SIDE_EFFECTS__
+  async function c() {
+  }
+  ns2.c = c;
+  // @__NO_SIDE_EFFECTS__
+  async function* d() {
+  }
+  ns2.d = d;
+})(ns || (ns = {}));
+
+---------- /out/ns-export-local.js ----------
+var ns;
+((ns2) => {
+  //! Only "c0" and "c2" should have "no side effects" (Rollup only respects "const" and only for the first one)
+  ns2.v0 = function() {
+  };
+  ns2.v1 = function() {
+  };
+  ns2.l0 = function() {
+  };
+  ns2.l1 = function() {
+  };
+  ns2.c0 = /* @__NO_SIDE_EFFECTS__ */ function() {
+  };
+  ns2.c1 = function() {
+  };
+  ns2.v2 = () => {
+  };
+  ns2.v3 = () => {
+  };
+  ns2.l2 = () => {
+  };
+  ns2.l3 = () => {
+  };
+  ns2.c2 = /* @__NO_SIDE_EFFECTS__ */ () => {
+  };
+  ns2.c3 = () => {
+  };
+})(ns || (ns = {}));
+
+---------- /out/stmt-export-default-before-fn-anon.js ----------
+/*! This should have "no side effects" */
+// @__NO_SIDE_EFFECTS__
+export default function() {
+}
+
+---------- /out/stmt-export-default-before-fn-name.js ----------
+/*! This should have "no side effects" */
+// @__NO_SIDE_EFFECTS__
+export default function f() {
+}
+
+---------- /out/stmt-export-default-before-gen-fn-anon.js ----------
+/*! This should have "no side effects" */
+// @__NO_SIDE_EFFECTS__
+export default function* () {
+}
+
+---------- /out/stmt-export-default-before-gen-fn-name.js ----------
+/*! This should have "no side effects" */
+// @__NO_SIDE_EFFECTS__
+export default function* f() {
+}
+
+---------- /out/stmt-export-default-before-async-fn-anon.js ----------
+/*! This should have "no side effects" */
+// @__NO_SIDE_EFFECTS__
+export default async function() {
+}
+
+---------- /out/stmt-export-default-before-async-fn-name.js ----------
+/*! This should have "no side effects" */
+// @__NO_SIDE_EFFECTS__
+export default async function f() {
+}
+
+---------- /out/stmt-export-default-before-async-gen-fn-anon.js ----------
+/*! This should have "no side effects" */
+// @__NO_SIDE_EFFECTS__
+export default async function* () {
+}
+
+---------- /out/stmt-export-default-before-async-gen-fn-name.js ----------
+/*! This should have "no side effects" */
+// @__NO_SIDE_EFFECTS__
+export default async function* f() {
+}
+
+---------- /out/stmt-export-default-after-fn-anon.js ----------
+/*! This should have "no side effects" */
+// @__NO_SIDE_EFFECTS__
+export default function() {
+}
+
+---------- /out/stmt-export-default-after-fn-name.js ----------
+/*! This should have "no side effects" */
+// @__NO_SIDE_EFFECTS__
+export default function f() {
+}
+
+---------- /out/stmt-export-default-after-gen-fn-anon.js ----------
+/*! This should have "no side effects" */
+// @__NO_SIDE_EFFECTS__
+export default function* () {
+}
+
+---------- /out/stmt-export-default-after-gen-fn-name.js ----------
+/*! This should have "no side effects" */
+// @__NO_SIDE_EFFECTS__
+export default function* f() {
+}
+
+---------- /out/stmt-export-default-after-async-fn-anon.js ----------
+/*! This should have "no side effects" */
+// @__NO_SIDE_EFFECTS__
+export default async function() {
+}
+
+---------- /out/stmt-export-default-after-async-fn-name.js ----------
+/*! This should have "no side effects" */
+// @__NO_SIDE_EFFECTS__
+export default async function f() {
+}
+
+---------- /out/stmt-export-default-after-async-gen-fn-anon.js ----------
+/*! This should have "no side effects" */
+// @__NO_SIDE_EFFECTS__
+export default async function* () {
+}
+
+---------- /out/stmt-export-default-after-async-gen-fn-name.js ----------
+/*! This should have "no side effects" */
+// @__NO_SIDE_EFFECTS__
+export default async function* f() {
+}
+
+================================================================================
+TestNoSideEffectsCommentIgnoreAnnotations
+---------- /out/expr-fn.js ----------
+x([
+  function() {
+  },
+  function y() {
+  },
+  function* () {
+  },
+  function* y2() {
+  },
+  async function() {
+  },
+  async function y3() {
+  },
+  async function* () {
+  },
+  async function* y4() {
+  }
+]);
+
+---------- /out/expr-arrow.js ----------
+x([
+  (y) => y,
+  () => {
+  },
+  (y) => y,
+  async (y) => y,
+  async () => {
+  },
+  async (y) => y
+]);
+
+---------- /out/stmt-fn.js ----------
+function a() {
+}
+function* b() {
+}
+async function c() {
+}
+async function* d() {
+}
+
+---------- /out/stmt-export-fn.js ----------
+export function a() {
+}
+export function* b() {
+}
+export async function c() {
+}
+export async function* d() {
+}
+
+---------- /out/stmt-local.js ----------
+var v0 = function() {
+}, v1 = function() {
+};
+let l0 = function() {
+}, l1 = function() {
+};
+const c0 = function() {
+}, c1 = function() {
+};
+var v2 = () => {
+}, v3 = () => {
+};
+let l2 = () => {
+}, l3 = () => {
+};
+const c2 = () => {
+}, c3 = () => {
+};
+
+---------- /out/stmt-export-local.js ----------
+export var v0 = function() {
+}, v1 = function() {
+};
+export let l0 = function() {
+}, l1 = function() {
+};
+export const c0 = function() {
+}, c1 = function() {
+};
+export var v2 = () => {
+}, v3 = () => {
+};
+export let l2 = () => {
+}, l3 = () => {
+};
+export const c2 = () => {
+}, c3 = () => {
+};
+
+---------- /out/ns-export-fn.js ----------
+var ns;
+((ns2) => {
+  function a() {
+  }
+  ns2.a = a;
+  function* b() {
+  }
+  ns2.b = b;
+  async function c() {
+  }
+  ns2.c = c;
+  async function* d() {
+  }
+  ns2.d = d;
+})(ns || (ns = {}));
+
+---------- /out/ns-export-local.js ----------
+var ns;
+((ns2) => {
+  ns2.v0 = function() {
+  };
+  ns2.v1 = function() {
+  };
+  ns2.l0 = function() {
+  };
+  ns2.l1 = function() {
+  };
+  ns2.c0 = function() {
+  };
+  ns2.c1 = function() {
+  };
+  ns2.v2 = () => {
+  };
+  ns2.v3 = () => {
+  };
+  ns2.l2 = () => {
+  };
+  ns2.l3 = () => {
+  };
+  ns2.c2 = () => {
+  };
+  ns2.c3 = () => {
+  };
+})(ns || (ns = {}));
+
+---------- /out/stmt-export-default-before-fn-anon.js ----------
+export default function() {
+}
+
+---------- /out/stmt-export-default-before-fn-name.js ----------
+export default function f() {
+}
+
+---------- /out/stmt-export-default-before-gen-fn-anon.js ----------
+export default function* () {
+}
+
+---------- /out/stmt-export-default-before-gen-fn-name.js ----------
+export default function* f() {
+}
+
+---------- /out/stmt-export-default-before-async-fn-anon.js ----------
+export default async function() {
+}
+
+---------- /out/stmt-export-default-before-async-fn-name.js ----------
+export default async function f() {
+}
+
+---------- /out/stmt-export-default-before-async-gen-fn-anon.js ----------
+export default async function* () {
+}
+
+---------- /out/stmt-export-default-before-async-gen-fn-name.js ----------
+export default async function* f() {
+}
+
+---------- /out/stmt-export-default-after-fn-anon.js ----------
+export default function() {
+}
+
+---------- /out/stmt-export-default-after-fn-name.js ----------
+export default function f() {
+}
+
+---------- /out/stmt-export-default-after-gen-fn-anon.js ----------
+export default function* () {
+}
+
+---------- /out/stmt-export-default-after-gen-fn-name.js ----------
+export default function* f() {
+}
+
+---------- /out/stmt-export-default-after-async-fn-anon.js ----------
+export default async function() {
+}
+
+---------- /out/stmt-export-default-after-async-fn-name.js ----------
+export default async function f() {
+}
+
+---------- /out/stmt-export-default-after-async-gen-fn-anon.js ----------
+export default async function* () {
+}
+
+---------- /out/stmt-export-default-after-async-gen-fn-name.js ----------
+export default async function* f() {
+}
+
+================================================================================
+TestNoSideEffectsCommentMinifyWhitespace
+---------- /out/expr-fn.js ----------
+x([function(){},function y(){},function*(){},function*y2(){},async function(){},async function y3(){},async function*(){},async function*y4(){}]);
+
+---------- /out/expr-arrow.js ----------
+x([y=>y,()=>{},y=>y,async y=>y,async()=>{},async y=>y]);
+
+---------- /out/stmt-fn.js ----------
+function a(){}function*b(){}async function c(){}async function*d(){}
+
+---------- /out/stmt-export-fn.js ----------
+export function a(){}export function*b(){}export async function c(){}export async function*d(){}
+
+---------- /out/stmt-local.js ----------
+var v0=function(){},v1=function(){};let l0=function(){},l1=function(){};const c0=function(){},c1=function(){};var v2=()=>{},v3=()=>{};let l2=()=>{},l3=()=>{};const c2=()=>{},c3=()=>{};
+
+---------- /out/stmt-export-local.js ----------
+export var v0=function(){},v1=function(){};export let l0=function(){},l1=function(){};export const c0=function(){},c1=function(){};export var v2=()=>{},v3=()=>{};export let l2=()=>{},l3=()=>{};export const c2=()=>{},c3=()=>{};
+
+---------- /out/ns-export-fn.js ----------
+var ns;(ns2=>{function a(){}ns2.a=a;function*b(){}ns2.b=b;async function c(){}ns2.c=c;async function*d(){}ns2.d=d})(ns||(ns={}));
+
+---------- /out/ns-export-local.js ----------
+var ns;(ns2=>{ns2.v0=function(){};ns2.v1=function(){};ns2.l0=function(){};ns2.l1=function(){};ns2.c0=function(){};ns2.c1=function(){};ns2.v2=()=>{};ns2.v3=()=>{};ns2.l2=()=>{};ns2.l3=()=>{};ns2.c2=()=>{};ns2.c3=()=>{}})(ns||(ns={}));
+
+---------- /out/stmt-export-default-before-fn-anon.js ----------
+export default function(){}
+
+---------- /out/stmt-export-default-before-fn-name.js ----------
+export default function f(){}
+
+---------- /out/stmt-export-default-before-gen-fn-anon.js ----------
+export default function*(){}
+
+---------- /out/stmt-export-default-before-gen-fn-name.js ----------
+export default function*f(){}
+
+---------- /out/stmt-export-default-before-async-fn-anon.js ----------
+export default async function(){}
+
+---------- /out/stmt-export-default-before-async-fn-name.js ----------
+export default async function f(){}
+
+---------- /out/stmt-export-default-before-async-gen-fn-anon.js ----------
+export default async function*(){}
+
+---------- /out/stmt-export-default-before-async-gen-fn-name.js ----------
+export default async function*f(){}
+
+---------- /out/stmt-export-default-after-fn-anon.js ----------
+export default function(){}
+
+---------- /out/stmt-export-default-after-fn-name.js ----------
+export default function f(){}
+
+---------- /out/stmt-export-default-after-gen-fn-anon.js ----------
+export default function*(){}
+
+---------- /out/stmt-export-default-after-gen-fn-name.js ----------
+export default function*f(){}
+
+---------- /out/stmt-export-default-after-async-fn-anon.js ----------
+export default async function(){}
+
+---------- /out/stmt-export-default-after-async-fn-name.js ----------
+export default async function f(){}
+
+---------- /out/stmt-export-default-after-async-gen-fn-anon.js ----------
+export default async function*(){}
+
+---------- /out/stmt-export-default-after-async-gen-fn-name.js ----------
+export default async function*f(){}
+
+================================================================================
+TestNoSideEffectsCommentTypeScriptDeclare
+---------- /out/entry.js ----------
+var ns;
+((ns2) => {
+})(ns || (ns = {}));
+
+================================================================================
+TestNoSideEffectsCommentUnusedCalls
+---------- /out/stmt-fn.js ----------
+// @__NO_SIDE_EFFECTS__
+function f(y) {
+  sideEffect(y);
+}
+// @__NO_SIDE_EFFECTS__
+function* g(y) {
+  sideEffect(y);
+}
+onlyKeepThisIdentifier;
+onlyKeepThisIdentifier;
+x(/* @__PURE__ */ f("keepThisCall"));
+x(/* @__PURE__ */ g("keepThisCall"));
+
+---------- /out/stmt-local.js ----------
+const f = /* @__NO_SIDE_EFFECTS__ */ function(y) {
+  sideEffect(y);
+}, g = /* @__NO_SIDE_EFFECTS__ */ function* (y) {
+  sideEffect(y);
+};
+onlyKeepThisIdentifier;
+onlyKeepThisIdentifier;
+x(/* @__PURE__ */ f("keepThisCall"));
+x(/* @__PURE__ */ g("keepThisCall"));
+
+---------- /out/expr-fn.js ----------
+const f = /* @__NO_SIDE_EFFECTS__ */ function(y) {
+  sideEffect(y);
+}, g = /* @__NO_SIDE_EFFECTS__ */ function* (y) {
+  sideEffect(y);
+};
+onlyKeepThisIdentifier;
+onlyKeepThisIdentifier;
+x(/* @__PURE__ */ f("keepThisCall"));
+x(/* @__PURE__ */ g("keepThisCall"));
+
+---------- /out/stmt-export-default-fn.js ----------
+// @__NO_SIDE_EFFECTS__
+export default function f(y) {
+  sideEffect(y);
+}
+onlyKeepThisIdentifier;
+x(/* @__PURE__ */ f("keepThisCall"));
+
+================================================================================
 TestPackageJsonSideEffectsArrayGlob
 ---------- /out.js ----------
 // Users/user/project/node_modules/demo-pkg/keep/this/file.js
@@ -1504,6 +2106,62 @@ console.log("hello");
 
 // Users/user/project/src/entry.js
 console.log("unused import");
+
+================================================================================
+TestPreserveDirectivesMinifyBundle
+---------- /out.js ----------
+"use 1";
+"use 2";
+"use 3";
+(() => {
+  // nested.js
+  //! A
+  //! B
+  //! C
+  nested();
+  //! D
+  //! E
+  //! F
+
+  // entry.js
+  //! 1
+  //! 2
+  //! 3
+  entry();
+  //! 4
+  //! 5
+  //! 6
+})();
+
+================================================================================
+TestPreserveDirectivesMinifyIIFE
+---------- /out.js ----------
+"use 1";
+"use 2";
+"use 3";
+(() => {
+  //! 1
+  //! 2
+  //! 3
+  entry();
+  //! 4
+  //! 5
+  //! 6
+})();
+
+================================================================================
+TestPreserveDirectivesMinifyPassThrough
+---------- /out.js ----------
+"use 1";
+"use 2";
+"use 3";
+//! 1
+//! 2
+//! 3
+entry();
+//! 4
+//! 5
+//! 6
 
 ================================================================================
 TestPureCallsWithSpread
