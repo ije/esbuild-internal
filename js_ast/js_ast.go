@@ -248,12 +248,18 @@ type LocRef struct {
 	Ref Ref
 }
 
+type Decorator struct {
+	Value Expr
+	AtLoc logger.Loc
+}
+
 type PropertyKind uint8
 
 const (
 	PropertyNormal PropertyKind = iota
 	PropertyGet
 	PropertySet
+	PropertyAutoAccessor
 	PropertySpread
 	PropertyDeclare
 	PropertyClassStaticBlock
@@ -297,7 +303,7 @@ type Property struct {
 	//
 	InitializerOrNil Expr
 
-	Decorators []Expr
+	Decorators []Decorator
 
 	Loc             logger.Loc
 	CloseBracketLoc logger.Loc
@@ -319,7 +325,7 @@ type PropertyBinding struct {
 type Arg struct {
 	Binding      Binding
 	DefaultOrNil Expr
-	Decorators   []Expr
+	Decorators   []Decorator
 
 	// "constructor(public x: boolean) {}"
 	IsTypeScriptCtorField bool
@@ -350,7 +356,7 @@ type FnBody struct {
 }
 
 type Class struct {
-	Decorators    []Expr
+	Decorators    []Decorator
 	Name          *LocRef
 	ExtendsOrNil  Expr
 	Properties    []Property
@@ -984,7 +990,7 @@ type SExpr struct {
 	// to keep the original value of the "name" property). When this happens we
 	// can't tell that the class is side-effect free anymore because all of these
 	// methods mutate the class. We use this annotation for that instead.
-	IsFromClassThatCanBeRemovedIfUnused bool
+	IsFromClassOrFnThatCanBeRemovedIfUnused bool
 }
 
 type EnumValue struct {
@@ -1138,7 +1144,13 @@ const (
 	LocalVar LocalKind = iota
 	LocalLet
 	LocalConst
+	LocalUsing
+	LocalAwaitUsing
 )
+
+func (kind LocalKind) IsUsing() bool {
+	return kind >= LocalUsing
+}
 
 type SLocal struct {
 	Decls    []Decl
@@ -1229,6 +1241,9 @@ const (
 
 	// Classes can merge with TypeScript namespaces.
 	SymbolClass
+
+	// Class names are not allowed to be referenced by computed property keys
+	SymbolClassInComputedPropertyKey
 
 	// A class-private identifier (i.e. "#foo").
 	SymbolPrivateField
@@ -1527,7 +1542,7 @@ type Symbol struct {
 // You should call "MergeSymbols" instead of calling this directly
 func (newSymbol *Symbol) MergeContentsWith(oldSymbol *Symbol) {
 	newSymbol.UseCountEstimate += oldSymbol.UseCountEstimate
-	if oldSymbol.Flags.Has(MustNotBeRenamed) {
+	if oldSymbol.Flags.Has(MustNotBeRenamed) && !newSymbol.Flags.Has(MustNotBeRenamed) {
 		newSymbol.OriginalName = oldSymbol.OriginalName
 		newSymbol.Flags |= MustNotBeRenamed
 	}

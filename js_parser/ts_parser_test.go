@@ -28,6 +28,16 @@ func expectParseErrorExperimentalDecoratorTS(t *testing.T, contents string, expe
 	})
 }
 
+func expectParseErrorWithUnsupportedFeaturesTS(t *testing.T, unsupportedJSFeatures compat.JSFeature, contents string, expected string) {
+	t.Helper()
+	expectParseErrorCommon(t, contents, expected, config.Options{
+		TS: config.TSOptions{
+			Parse: true,
+		},
+		UnsupportedJSFeatures: unsupportedJSFeatures,
+	})
+}
+
 func expectParseErrorTargetTS(t *testing.T, esVersion int, contents string, expected string) {
 	t.Helper()
 	expectParseErrorCommon(t, contents, expected, config.Options{
@@ -58,6 +68,21 @@ func expectPrintedAssignSemanticsTS(t *testing.T, contents string, expected stri
 				UseDefineForClassFields: config.False,
 			},
 		},
+	})
+}
+
+func expectPrintedAssignSemanticsTargetTS(t *testing.T, esVersion int, contents string, expected string) {
+	t.Helper()
+	expectPrintedCommon(t, contents, expected, config.Options{
+		TS: config.TSOptions{
+			Parse: true,
+			Config: config.TSConfig{
+				UseDefineForClassFields: config.False,
+			},
+		},
+		UnsupportedJSFeatures: compat.UnsupportedJSFeatures(map[compat.Engine][]int{
+			compat.ES: {esVersion},
+		}),
 	})
 }
 
@@ -678,6 +703,8 @@ func TestTSClass(t *testing.T) {
 
 	expectPrintedAssignSemanticsTS(t, "class Foo { foo: number }", "class Foo {\n}\n")
 	expectPrintedAssignSemanticsTS(t, "class Foo { foo: number = 0 }", "class Foo {\n  constructor() {\n    this.foo = 0;\n  }\n}\n")
+	expectPrintedAssignSemanticsTS(t, "class Foo { ['foo']: number }", "class Foo {\n}\n")
+	expectPrintedAssignSemanticsTS(t, "class Foo { ['foo']: number = 0 }", "class Foo {\n  constructor() {\n    this[\"foo\"] = 0;\n  }\n}\n")
 	expectPrintedAssignSemanticsTS(t, "class Foo { foo(): void {} }", "class Foo {\n  foo() {\n  }\n}\n")
 	expectPrintedAssignSemanticsTS(t, "class Foo { foo(): void; foo(): void {} }", "class Foo {\n  foo() {\n  }\n}\n")
 	expectParseErrorTS(t, "class Foo { foo(): void foo(): void {} }", "<stdin>: ERROR: Expected \";\" but found \"foo\"\n")
@@ -698,7 +725,7 @@ func TestTSClass(t *testing.T) {
 
 	expectPrintedAssignSemanticsTS(t, "class Foo { 'foo' = 0 }", "class Foo {\n  constructor() {\n    this[\"foo\"] = 0;\n  }\n}\n")
 	expectPrintedAssignSemanticsTS(t, "class Foo { ['foo'] = 0 }", "class Foo {\n  constructor() {\n    this[\"foo\"] = 0;\n  }\n}\n")
-	expectPrintedAssignSemanticsTS(t, "class Foo { [foo] = 0 }", "var _a;\nclass Foo {\n  constructor() {\n    this[_a] = 0;\n  }\n}\n_a = foo;\n")
+	expectPrintedAssignSemanticsTS(t, "class Foo { [foo] = 0 }", "var _a;\nclass Foo {\n  constructor() {\n    this[_a] = 0;\n  }\n  static {\n    _a = foo;\n  }\n}\n")
 	expectPrintedMangleAssignSemanticsTS(t, "class Foo { 'foo' = 0 }", "class Foo {\n  constructor() {\n    this.foo = 0;\n  }\n}\n")
 	expectPrintedMangleAssignSemanticsTS(t, "class Foo { ['foo'] = 0 }", "class Foo {\n  constructor() {\n    this.foo = 0;\n  }\n}\n")
 
@@ -767,6 +794,52 @@ func TestTSClass(t *testing.T) {
 	expectParseErrorTS(t, "class Foo { [foo]<T> }", "<stdin>: ERROR: Expected \"(\" but found \"}\"\n")
 	expectParseErrorTS(t, "class Foo { [foo]?<T> }", "<stdin>: ERROR: Expected \"(\" but found \"}\"\n")
 	expectParseErrorTS(t, "class Foo { [foo]!<T>() {} }", "<stdin>: ERROR: Expected \";\" but found \"<\"\n")
+}
+
+func TestTSAutoAccessors(t *testing.T) {
+	expectPrintedTS(t, "class Foo { accessor }", "class Foo {\n  accessor;\n}\n")
+	expectPrintedTS(t, "class Foo { accessor x }", "class Foo {\n  accessor x;\n}\n")
+	expectPrintedTS(t, "class Foo { accessor x? }", "class Foo {\n  accessor x;\n}\n")
+	expectPrintedTS(t, "class Foo { accessor x! }", "class Foo {\n  accessor x;\n}\n")
+	expectPrintedTS(t, "class Foo { accessor x = y }", "class Foo {\n  accessor x = y;\n}\n")
+	expectPrintedTS(t, "class Foo { accessor x? = y }", "class Foo {\n  accessor x = y;\n}\n")
+	expectPrintedTS(t, "class Foo { accessor x! = y }", "class Foo {\n  accessor x = y;\n}\n")
+	expectPrintedTS(t, "class Foo { accessor x: any }", "class Foo {\n  accessor x;\n}\n")
+	expectPrintedTS(t, "class Foo { accessor x?: any }", "class Foo {\n  accessor x;\n}\n")
+	expectPrintedTS(t, "class Foo { accessor x!: any }", "class Foo {\n  accessor x;\n}\n")
+	expectPrintedTS(t, "class Foo { accessor x: any = y }", "class Foo {\n  accessor x = y;\n}\n")
+	expectPrintedTS(t, "class Foo { accessor x?: any = y }", "class Foo {\n  accessor x = y;\n}\n")
+	expectPrintedTS(t, "class Foo { accessor x!: any = y }", "class Foo {\n  accessor x = y;\n}\n")
+	expectPrintedTS(t, "class Foo { accessor [x] }", "class Foo {\n  accessor [x];\n}\n")
+	expectPrintedTS(t, "class Foo { accessor [x]? }", "class Foo {\n  accessor [x];\n}\n")
+	expectPrintedTS(t, "class Foo { accessor [x]! }", "class Foo {\n  accessor [x];\n}\n")
+	expectPrintedTS(t, "class Foo { accessor [x] = y }", "class Foo {\n  accessor [x] = y;\n}\n")
+	expectPrintedTS(t, "class Foo { accessor [x]? = y }", "class Foo {\n  accessor [x] = y;\n}\n")
+	expectPrintedTS(t, "class Foo { accessor [x]! = y }", "class Foo {\n  accessor [x] = y;\n}\n")
+	expectPrintedTS(t, "class Foo { accessor [x]: any }", "class Foo {\n  accessor [x];\n}\n")
+	expectPrintedTS(t, "class Foo { accessor [x]?: any }", "class Foo {\n  accessor [x];\n}\n")
+	expectPrintedTS(t, "class Foo { accessor [x]!: any }", "class Foo {\n  accessor [x];\n}\n")
+	expectPrintedTS(t, "class Foo { accessor [x]: any = y }", "class Foo {\n  accessor [x] = y;\n}\n")
+	expectPrintedTS(t, "class Foo { accessor [x]?: any = y }", "class Foo {\n  accessor [x] = y;\n}\n")
+	expectPrintedTS(t, "class Foo { accessor [x]!: any = y }", "class Foo {\n  accessor [x] = y;\n}\n")
+
+	expectParseErrorTS(t, "class Foo { accessor x<T> }", "<stdin>: ERROR: Expected \";\" but found \"<\"\n")
+	expectParseErrorTS(t, "class Foo { accessor x<T>() {} }", "<stdin>: ERROR: Expected \";\" but found \"<\"\n")
+
+	expectPrintedTS(t, "declare class Foo { accessor x }", "")
+	expectPrintedTS(t, "declare class Foo { accessor #x }", "")
+	expectPrintedTS(t, "declare class Foo { static accessor x }", "")
+	expectPrintedTS(t, "declare class Foo { static accessor #x }", "")
+
+	// TypeScript doesn't allow these combinations, but we shouldn't crash
+	expectPrintedTS(t, "class Foo { declare accessor x }", "class Foo {\n}\n")
+	expectPrintedTS(t, "class Foo { readonly accessor x }", "class Foo {\n  accessor x;\n}\n")
+	expectPrintedTS(t, "interface Foo { accessor x }", "")
+	expectPrintedTS(t, "interface Foo { static accessor x }", "")
+	expectPrintedTS(t, "let x: { accessor x }", "let x;\n")
+	expectPrintedTS(t, "let x: { static accessor x }", "let x;\n")
+	expectParseErrorTS(t, "class Foo { accessor declare x }", "<stdin>: ERROR: Expected \";\" but found \"x\"\n")
+	expectParseErrorTS(t, "class Foo { accessor readonly x }", "<stdin>: ERROR: Expected \";\" but found \"x\"\n")
 }
 
 func TestTSPrivateIdentifiers(t *testing.T) {
@@ -1762,10 +1835,6 @@ func TestTSDeclare(t *testing.T) {
 }
 
 func TestTSExperimentalDecorator(t *testing.T) {
-	expectParseErrorTS(t, "@dec class Foo {}", "<stdin>: ERROR: Experimental decorators are not currently enabled\n"+
-		"NOTE: To use experimental decorators in TypeScript with esbuild, you need to enable them by adding \"experimentalDecorators\": true in your \"tsconfig.json\" file. "+
-		"TypeScript's experimental decorators are currently the only kind of decorators that esbuild supports.\n")
-
 	// Tests of "declare class"
 	expectPrintedExperimentalDecoratorTS(t, "@dec(() => 0) declare class Foo {} {let foo}", "{\n  let foo;\n}\n")
 	expectPrintedExperimentalDecoratorTS(t, "@dec(() => 0) declare abstract class Foo {} {let foo}", "{\n  let foo;\n}\n")
@@ -1896,6 +1965,73 @@ func TestTSExperimentalDecorator(t *testing.T) {
 		"let Foo = class {\n};\nFoo = __decorateClass([\n  function(x, y) {\n    return x + y;\n  }\n], Foo);\n")
 	expectPrintedExperimentalDecoratorTS(t, "@(function(x, y) { return x + y }) export class Foo {}",
 		"export let Foo = class {\n};\nFoo = __decorateClass([\n  function(x, y) {\n    return x + y;\n  }\n], Foo);\n")
+
+	// Don't allow decorators on static blocks
+	expectPrintedTS(t, "class Foo { static }", "class Foo {\n  static;\n}\n")
+	expectPrintedExperimentalDecoratorTS(t, "class Foo { @dec static }", "class Foo {\n  static;\n}\n__decorateClass([\n  dec\n], Foo.prototype, \"static\", 2);\n")
+	expectParseErrorExperimentalDecoratorTS(t, "class Foo { @dec static {} }", "<stdin>: ERROR: Expected \";\" but found \"{\"\n")
+
+	// TypeScript experimental decorators allow more expressions than JavaScript decorators
+	expectPrintedExperimentalDecoratorTS(t, "@x() class Foo {}", "let Foo = class {\n};\nFoo = __decorateClass([\n  x()\n], Foo);\n")
+	expectPrintedExperimentalDecoratorTS(t, "@x.y() class Foo {}", "let Foo = class {\n};\nFoo = __decorateClass([\n  x.y()\n], Foo);\n")
+	expectPrintedExperimentalDecoratorTS(t, "@(() => {}) class Foo {}", "let Foo = class {\n};\nFoo = __decorateClass([\n  () => {\n  }\n], Foo);\n")
+	expectPrintedExperimentalDecoratorTS(t, "@123 class Foo {}", "let Foo = class {\n};\nFoo = __decorateClass([\n  123\n], Foo);\n")
+	expectPrintedExperimentalDecoratorTS(t, "@x?.() class Foo {}", "let Foo = class {\n};\nFoo = __decorateClass([\n  x?.()\n], Foo);\n")
+	expectPrintedExperimentalDecoratorTS(t, "@x?.y() class Foo {}", "let Foo = class {\n};\nFoo = __decorateClass([\n  x?.y()\n], Foo);\n")
+	expectPrintedExperimentalDecoratorTS(t, "@x?.[y]() class Foo {}", "let Foo = class {\n};\nFoo = __decorateClass([\n  x?.[y]()\n], Foo);\n")
+	expectPrintedExperimentalDecoratorTS(t, "@new Function() class Foo {}", "let Foo = class {\n};\nFoo = __decorateClass([\n  new Function()\n], Foo);\n")
+	expectParseErrorExperimentalDecoratorTS(t, "@x[y] class Foo {}",
+		"<stdin>: ERROR: Expected \"class\" after decorator but found \"[\"\n<stdin>: NOTE: The preceding decorator is here:\n"+
+			"NOTE: Decorators can only be used with class declarations.\n<stdin>: ERROR: Expected \";\" but found \"class\"\n")
+	expectParseErrorExperimentalDecoratorTS(t, "@() => {} class Foo {}", "<stdin>: ERROR: Unexpected \")\"\n")
+}
+
+func TestTSDecorators(t *testing.T) {
+	expectPrintedTS(t, "@x @y class Foo {}", "@x\n@y\nclass Foo {\n}\n")
+	expectPrintedTS(t, "@x @y export class Foo {}", "@x\n@y\nexport class Foo {\n}\n")
+	expectPrintedTS(t, "@x @y export default class Foo {}", "@x\n@y\nexport default class Foo {\n}\n")
+	expectPrintedTS(t, "_ = @x @y class {}", "_ = @x @y class {\n};\n")
+
+	expectPrintedTS(t, "class Foo { @x y: any }", "class Foo {\n  @x\n  y;\n}\n")
+	expectPrintedTS(t, "class Foo { @x y(): any {} }", "class Foo {\n  @x\n  y() {\n  }\n}\n")
+	expectPrintedTS(t, "class Foo { @x static y: any }", "class Foo {\n  @x\n  static y;\n}\n")
+	expectPrintedTS(t, "class Foo { @x static y(): any {} }", "class Foo {\n  @x\n  static y() {\n  }\n}\n")
+	expectPrintedTS(t, "class Foo { @x accessor y: any }", "class Foo {\n  @x\n  accessor y;\n}\n")
+
+	expectPrintedTS(t, "class Foo { @x #y: any }", "class Foo {\n  @x\n  #y;\n}\n")
+	expectPrintedTS(t, "class Foo { @x #y(): any {} }", "class Foo {\n  @x\n  #y() {\n  }\n}\n")
+	expectPrintedTS(t, "class Foo { @x static #y: any }", "class Foo {\n  @x\n  static #y;\n}\n")
+	expectPrintedTS(t, "class Foo { @x static #y(): any {} }", "class Foo {\n  @x\n  static #y() {\n  }\n}\n")
+	expectPrintedTS(t, "class Foo { @x accessor #y: any }", "class Foo {\n  @x\n  accessor #y;\n}\n")
+
+	expectParseErrorTS(t, "class Foo { x(@y z) {} }", "<stdin>: ERROR: Parameter decorators only work when experimental decorators are enabled\n"+
+		"NOTE: You can enable experimental decorators by adding \"experimentalDecorators\": true to your \"tsconfig.json\" file.\n")
+	expectParseErrorTS(t, "class Foo { @x static {} }", "<stdin>: ERROR: Expected \";\" but found \"{\"\n")
+
+	expectPrintedTS(t, "@\na\n(\n)\n@\n(\nb\n)\nclass\nFoo\n{\n}\n", "@a()\n@b\nclass Foo {\n}\n")
+	expectPrintedTS(t, "@(a, b) class Foo {}\n", "@(a, b)\nclass Foo {\n}\n")
+	expectPrintedTS(t, "@x() class Foo {}", "@x()\nclass Foo {\n}\n")
+	expectPrintedTS(t, "@x.y() class Foo {}", "@x.y()\nclass Foo {\n}\n")
+	expectPrintedTS(t, "@(() => {}) class Foo {}", "@(() => {\n})\nclass Foo {\n}\n")
+	expectPrintedTS(t, "class Foo { #x = @y.#x.y.#x class {} }", "class Foo {\n  #x = @y.#x.y.#x class {\n  };\n}\n")
+	expectParseErrorTS(t, "@123 class Foo {}", "<stdin>: ERROR: Expected identifier but found \"123\"\n")
+	expectParseErrorTS(t, "@x[y] class Foo {}",
+		"<stdin>: ERROR: Expected \"class\" after decorator but found \"[\"\n<stdin>: NOTE: The preceding decorator is here:\n"+
+			"NOTE: Decorators can only be used with class declarations.\n<stdin>: ERROR: Expected \";\" but found \"class\"\n")
+	expectParseErrorTS(t, "@x?.() class Foo {}", "<stdin>: ERROR: Expected \".\" but found \"?.\"\n")
+	expectParseErrorTS(t, "@x?.y() class Foo {}", "<stdin>: ERROR: Expected \".\" but found \"?.\"\n")
+	expectParseErrorTS(t, "@x?.[y]() class Foo {}", "<stdin>: ERROR: Expected \".\" but found \"?.\"\n")
+	expectParseErrorTS(t, "@new Function() class Foo {}", "<stdin>: ERROR: Expected identifier but found \"new\"\n")
+	expectParseErrorTS(t, "@() => {} class Foo {}", "<stdin>: ERROR: Unexpected \")\"\n")
+
+	errorText := "<stdin>: ERROR: Transforming JavaScript decorators to the configured target environment is not supported yet\n"
+	expectParseErrorWithUnsupportedFeaturesTS(t, compat.Decorators, "@dec class Foo {}", errorText)
+	expectParseErrorWithUnsupportedFeaturesTS(t, compat.Decorators, "class Foo { @dec x }", errorText)
+	expectParseErrorWithUnsupportedFeaturesTS(t, compat.Decorators, "class Foo { @dec x() {} }", errorText)
+	expectParseErrorWithUnsupportedFeaturesTS(t, compat.Decorators, "class Foo { @dec accessor x }", errorText)
+	expectParseErrorWithUnsupportedFeaturesTS(t, compat.Decorators, "class Foo { @dec static x }", errorText)
+	expectParseErrorWithUnsupportedFeaturesTS(t, compat.Decorators, "class Foo { @dec static x() {} }", errorText)
+	expectParseErrorWithUnsupportedFeaturesTS(t, compat.Decorators, "class Foo { @dec static accessor x }", errorText)
 }
 
 func TestTSTry(t *testing.T) {
@@ -2674,6 +2810,48 @@ class Foo {
   constructor() {
     this[_a] = 1;
   }
+  static {
+    h();
+  }
+  [a()]() {
+  }
+  [(b(), _a = c(), d())]() {
+  }
+  static {
+    this[_b] = 1;
+  }
+  static [(e(), _b = f(), g())]() {
+  }
+}
+`)
+	expectPrintedAssignSemanticsTS(t, `class Foo {
+	static [x()] = 1;
+}
+`, `var _a;
+class Foo {
+  static {
+    _a = x();
+  }
+  static {
+    this[_a] = 1;
+  }
+}
+`)
+	expectPrintedAssignSemanticsTargetTS(t, 2021, `class Foo {
+	[a()]() {}
+	[b()];
+	[c()] = 1;
+	[d()]() {}
+	static [e()];
+	static [f()] = 1;
+	static [g()]() {}
+	[h()];
+}
+`, `var _a, _b;
+class Foo {
+  constructor() {
+    this[_a] = 1;
+  }
   [a()]() {
   }
   [(b(), _a = c(), d())]() {
@@ -2722,4 +2900,12 @@ func TestTSES5(t *testing.T) {
 	expectPrintedTargetTS(t, 2015, "0 ? ({}): 0 => 0 : 0", "0 ? ({}) => 0 : 0;\n")
 	expectParseErrorTargetTS(t, 5, "0 ? ([]): 0 => 0 : 0", "<stdin>: ERROR: Transforming destructuring to the configured target environment is not supported yet\n")
 	expectParseErrorTargetTS(t, 5, "0 ? ({}): 0 => 0 : 0", "<stdin>: ERROR: Transforming destructuring to the configured target environment is not supported yet\n")
+}
+
+func TestTSUsing(t *testing.T) {
+	expectPrintedTS(t, "using x = y", "using x = y;\n")
+	expectPrintedTS(t, "using x: any = y", "using x = y;\n")
+	expectPrintedTS(t, "using x: any = y, z: any = _", "using x = y, z = _;\n")
+	expectParseErrorTS(t, "export using x: any = y", "<stdin>: ERROR: Unexpected \"using\"\n")
+	expectParseErrorTS(t, "namespace ns { export using x: any = y }", "<stdin>: ERROR: Unexpected \"using\"\n")
 }

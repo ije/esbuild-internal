@@ -2118,6 +2118,52 @@ func TestDCEClassStaticBlocks(t *testing.T) {
 	})
 }
 
+func TestDCEClassStaticBlocksMinifySyntax(t *testing.T) {
+	dce_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.ts": `
+				class A_REMOVE {
+					static {}
+				}
+				class B_REMOVE {
+					static { 123 }
+				}
+				class C_REMOVE {
+					static { /* @__PURE__*/ foo() }
+				}
+				class D_REMOVE {
+					static { try {} catch {} }
+				}
+				class E_REMOVE {
+					static { try { /* @__PURE__*/ foo() } catch {} }
+				}
+				class F_REMOVE {
+					static { try { 123 } catch { 123 } finally { 123 } }
+				}
+
+				class A_keep {
+					static { foo }
+				}
+				class B_keep {
+					static { this.foo }
+				}
+				class C_keep {
+					static { try { foo } catch {} }
+				}
+				class D_keep {
+					static { try {} finally { foo } }
+				}
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+			MinifySyntax:  true,
+		},
+	})
+}
+
 func TestDCEVarExports(t *testing.T) {
 	dce_suite.expectBundled(t, bundled{
 		files: map[string]string{
@@ -2192,7 +2238,7 @@ func TestTreeShakingLoweredClassStaticField(t *testing.T) {
 		options: config.Options{
 			Mode:                  config.ModeBundle,
 			AbsOutputDir:          "/out",
-			UnsupportedJSFeatures: compat.ClassField,
+			UnsupportedJSFeatures: compat.ClassStaticField,
 		},
 	})
 }
@@ -2226,7 +2272,7 @@ func TestTreeShakingLoweredClassStaticFieldMinified(t *testing.T) {
 		options: config.Options{
 			Mode:                  config.ModeBundle,
 			AbsOutputDir:          "/out",
-			UnsupportedJSFeatures: compat.ClassField,
+			UnsupportedJSFeatures: compat.ClassStaticField,
 			MinifySyntax:          true,
 		},
 	})
@@ -2259,7 +2305,7 @@ func TestTreeShakingLoweredClassStaticFieldAssignment(t *testing.T) {
 		options: config.Options{
 			Mode:                  config.ModeBundle,
 			AbsOutputDir:          "/out",
-			UnsupportedJSFeatures: compat.ClassField,
+			UnsupportedJSFeatures: compat.ClassStaticField,
 			TS: config.TSOptions{Config: config.TSConfig{
 				UseDefineForClassFields: config.False,
 			}},
@@ -2803,6 +2849,13 @@ func TestConstValueInliningNoBundle(t *testing.T) {
 					)
 				}
 			`,
+			"/issue-3125.js": `
+				function foo() {
+					const f = () => x
+					const x = 0
+					return f()
+				}
+			`,
 		},
 		entryPaths: []string{
 			"/top-level.js",
@@ -2820,6 +2873,7 @@ func TestConstValueInliningNoBundle(t *testing.T) {
 			"/disabled-tdz.js",
 			"/backwards-reference-top-level.js",
 			"/backwards-reference-nested-function.js",
+			"/issue-3125.js",
 		},
 		options: config.Options{
 			Mode:         config.ModePassThrough,
@@ -4266,6 +4320,130 @@ func TestDCEOfIIFE(t *testing.T) {
 			AbsOutputDir: "/out",
 			MinifySyntax: true,
 			TreeShaking:  true,
+		},
+	})
+}
+
+func TestDCEOfDecorators(t *testing.T) {
+	dce_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/keep-these.js": `
+				import { fn } from './decorator'
+				@fn class Class {}
+				class Field { @fn field }
+				class Method { @fn method() {} }
+				class Accessor { @fn accessor accessor }
+				class StaticField { @fn static field }
+				class StaticMethod { @fn static method() {} }
+				class StaticAccessor { @fn static accessor accessor }
+			`,
+			"/decorator.js": `
+				export const fn = () => {
+					console.log('side effect')
+				}
+			`,
+		},
+		entryPaths: []string{"/keep-these.js"},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
+		},
+	})
+}
+
+func TestDCEOfExperimentalDecorators(t *testing.T) {
+	dce_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/keep-these.ts": `
+				import { fn } from './decorator'
+				@fn class Class {}
+				class Field { @fn field }
+				class Method { @fn method() {} }
+				class Accessor { @fn accessor accessor }
+				class Parameter { foo(@fn bar) {} }
+				class StaticField { @fn static field }
+				class StaticMethod { @fn static method() {} }
+				class StaticAccessor { @fn static accessor accessor }
+				class StaticParameter { static foo(@fn bar) {} }
+			`,
+			"/decorator.ts": `
+				export const fn = () => {
+					console.log('side effect')
+				}
+			`,
+			"/tsconfig.json": `{
+				"compilerOptions": {
+					"experimentalDecorators": true
+				}
+			}`,
+		},
+		entryPaths: []string{"/keep-these.ts"},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
+		},
+	})
+}
+
+func TestDCEOfUsingDeclarations(t *testing.T) {
+	dce_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				// Note: Only remove "using" if it's null or undefined and not awaited
+
+				using null_remove = null
+				using null_keep = null
+				await using await_null_keep = null
+
+				// This has a side effect: throwing an error
+				using throw_keep = {}
+
+				using dispose_keep = { [Symbol.dispose]() { console.log('side effect') } }
+				await using await_asyncDispose_keep = { [Symbol.asyncDispose]() { console.log('side effect') } }
+
+				using undef_remove = undefined
+				using undef_keep = undefined
+				await using await_undef_keep = undefined
+
+				// Assume these have no side effects
+				const Symbol_dispose_remove = Symbol.dispose
+				const Symbol_asyncDispose_remove = Symbol.asyncDispose
+
+				console.log(
+					null_keep,
+					undef_keep,
+				)
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			TreeShaking:  true,
+			AbsOutputDir: "/out",
+		},
+	})
+}
+
+func TestDCEOfExprAfterKeepNamesIssue3195(t *testing.T) {
+	dce_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				(() => {
+					function f() {}
+					firstImportantSideEffect(f());
+				})();
+				(() => {
+					function g() {}
+					debugger;
+					secondImportantSideEffect(g());
+				})();
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			MinifySyntax:  true,
+			KeepNames:     true,
+			AbsOutputFile: "/out.js",
 		},
 	})
 }

@@ -3,6 +3,7 @@ package css_printer
 import (
 	"testing"
 
+	"github.com/ije/esbuild-internal/config"
 	"github.com/ije/esbuild-internal/css_parser"
 	"github.com/ije/esbuild-internal/logger"
 	"github.com/ije/esbuild-internal/test"
@@ -13,9 +14,9 @@ func expectPrintedCommon(t *testing.T, name string, contents string, expected st
 	t.Run(name, func(t *testing.T) {
 		t.Helper()
 		log := logger.NewDeferLog(logger.DeferLogNoVerboseOrDebug, nil)
-		tree := css_parser.Parse(log, test.SourceForTest(contents), css_parser.Options{
+		tree := css_parser.Parse(log, test.SourceForTest(contents), css_parser.OptionsFromConfig(&config.Options{
 			MinifyWhitespace: options.MinifyWhitespace,
-		})
+		}))
 		msgs := log.Done()
 		text := ""
 		for _, msg := range msgs {

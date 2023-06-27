@@ -1859,30 +1859,41 @@ func StmtsCanBeRemovedIfUnused(stmts []Stmt, flags StmtsCanBeRemovedIfUnusedFlag
 			}
 
 		case *SExpr:
-			if s.IsFromClassThatCanBeRemovedIfUnused {
-				// This statement was automatically generated when lowering a class
-				// that we were able to analyze as having no side effects before
-				// lowering. So we consider it to be removable. The assumption here
-				// is that we are seeing at least all of the statements from the
-				// class lowering operation all at once (although we may possibly be
-				// seeing even more statements than that). Since we're making a binary
-				// all-or-nothing decision about the side effects of these statements,
-				// we can safely consider these to be side-effect free because we
-				// aren't in danger of partially dropping some of the class setup code.
-				return true
-			}
-
 			if !ExprCanBeRemovedIfUnused(s.Value, isUnbound) {
-				return false
+				if s.IsFromClassOrFnThatCanBeRemovedIfUnused {
+					// This statement was automatically generated when lowering a class
+					// or function that we were able to analyze as having no side effects
+					// before lowering. So we consider it to be removable. The assumption
+					// here is that we are seeing at least all of the statements from the
+					// class lowering operation all at once (although we may possibly be
+					// seeing even more statements than that). Since we're making a binary
+					// all-or-nothing decision about the side effects of these statements,
+					// we can safely consider these to be side-effect free because we
+					// aren't in danger of partially dropping some of the class setup code.
+				} else {
+					return false
+				}
 			}
 
 		case *SLocal:
+			// "await" is a side effect because it affects code timing
+			if s.Kind == LocalAwaitUsing {
+				return false
+			}
+
 			for _, decl := range s.Decls {
 				if _, ok := decl.Binding.Data.(*BIdentifier); !ok {
 					return false
 				}
-				if decl.ValueOrNil.Data != nil && !ExprCanBeRemovedIfUnused(decl.ValueOrNil, isUnbound) {
-					return false
+				if decl.ValueOrNil.Data != nil {
+					if !ExprCanBeRemovedIfUnused(decl.ValueOrNil, isUnbound) {
+						return false
+					} else if s.Kind.IsUsing() {
+						// "using" declarations are only side-effect free if they are initialized to null or undefined
+						if t := KnownPrimitiveType(decl.ValueOrNil.Data); t != PrimitiveNull && t != PrimitiveUndefined {
+							return false
+						}
+					}
 				}
 			}
 
@@ -1929,6 +1940,10 @@ func StmtsCanBeRemovedIfUnused(stmts []Stmt, flags StmtsCanBeRemovedIfUnusedFlag
 }
 
 func ClassCanBeRemovedIfUnused(class Class, isUnbound func(Ref) bool) bool {
+	if len(class.Decorators) > 0 {
+		return false
+	}
+
 	// Note: This check is incorrect. Extending a non-constructible object can
 	// throw an error, which is a side effect:
 	//
@@ -1951,8 +1966,22 @@ func ClassCanBeRemovedIfUnused(class Class, isUnbound func(Ref) bool) bool {
 			continue
 		}
 
+		if len(property.Decorators) > 0 {
+			return false
+		}
+
 		if property.Flags.Has(PropertyIsComputed) && !IsPrimitiveLiteral(property.Key.Data) {
 			return false
+		}
+
+		if property.Flags.Has(PropertyIsMethod) {
+			if fn, ok := property.ValueOrNil.Data.(*EFunction); ok {
+				for _, arg := range fn.Fn.Args {
+					if len(arg.Decorators) > 0 {
+						return false
+					}
+				}
+			}
 		}
 
 		if property.Flags.Has(PropertyIsStatic) {
@@ -2547,4 +2576,32 @@ func MangleIfExpr(loc logger.Loc, e *EIf, unsupportedFeatures compat.JSFeature, 
 	}
 
 	return Expr{Loc: loc, Data: e}
+}
+
+func ForEachIdentifierBindingInDecls(decls []Decl, callback func(loc logger.Loc, b *BIdentifier)) {
+	for _, decl := range decls {
+		ForEachIdentifierBinding(decl.Binding, callback)
+	}
+}
+
+func ForEachIdentifierBinding(binding Binding, callback func(loc logger.Loc, b *BIdentifier)) {
+	switch b := binding.Data.(type) {
+	case *BMissing:
+
+	case *BIdentifier:
+		callback(binding.Loc, b)
+
+	case *BArray:
+		for _, item := range b.Items {
+			ForEachIdentifierBinding(item.Binding, callback)
+		}
+
+	case *BObject:
+		for _, property := range b.Properties {
+			ForEachIdentifierBinding(property.Value, callback)
+		}
+
+	default:
+		panic("Internal error")
+	}
 }

@@ -9,6 +9,7 @@ import (
 
 	"github.com/ije/esbuild-internal/ast"
 	"github.com/ije/esbuild-internal/compat"
+	"github.com/ije/esbuild-internal/css_ast"
 	"github.com/ije/esbuild-internal/js_ast"
 	"github.com/ije/esbuild-internal/logger"
 )
@@ -231,7 +232,7 @@ func (loader Loader) IsTypeScript() bool {
 
 func (loader Loader) CanHaveSourceMap() bool {
 	switch loader {
-	case LoaderJS, LoaderJSX, LoaderTS, LoaderTSNoAmbiguousLessThan, LoaderTSX, LoaderCSS, LoaderJSON:
+	case LoaderJS, LoaderJSX, LoaderTS, LoaderTSNoAmbiguousLessThan, LoaderTSX, LoaderCSS, LoaderJSON, LoaderText:
 		return true
 	default:
 		return false
@@ -418,7 +419,9 @@ type Options struct {
 	SourceRoot string
 	Stdin      *StdinInfo
 	JSX        JSXOptions
+	LineLimit  int
 
+	CSSPrefixData          map[css_ast.D]compat.CSSPrefix
 	UnsupportedJSFeatures  compat.JSFeature
 	UnsupportedCSSFeatures compat.CSSFeature
 

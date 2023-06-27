@@ -250,6 +250,12 @@ function foo() {
   );
 }
 
+---------- /out/issue-3125.js ----------
+function foo() {
+  const f = () => x, x = 0;
+  return f();
+}
+
 ================================================================================
 TestCrossModuleConstantFolding
 ---------- /out/enum-entry.js ----------
@@ -340,27 +346,178 @@ TestDCEClassStaticBlocks
 ---------- /out.js ----------
 // entry.ts
 var A_keep = class {
+  static {
+    foo;
+  }
 };
-foo;
-var _B_keep = class {
+var B_keep = class {
+  static {
+    this.foo;
+  }
 };
-var B_keep = _B_keep;
-_B_keep.foo;
 var C_keep = class {
-};
-(() => {
-  try {
-    foo;
-  } catch {
+  static {
+    try {
+      foo;
+    } catch {
+    }
   }
-})();
+};
 var D_keep = class {
+  static {
+    try {
+    } finally {
+      foo;
+    }
+  }
 };
-(() => {
-  try {
-  } finally {
+
+================================================================================
+TestDCEClassStaticBlocksMinifySyntax
+---------- /out.js ----------
+// entry.ts
+var A_keep = class {
+  static {
     foo;
   }
+}, B_keep = class {
+  static {
+    this.foo;
+  }
+}, C_keep = class {
+  static {
+    try {
+      foo;
+    } catch {
+    }
+  }
+}, D_keep = class {
+  static {
+    try {
+    } finally {
+      foo;
+    }
+  }
+};
+
+================================================================================
+TestDCEOfDecorators
+---------- /out/keep-these.js ----------
+// decorator.js
+var fn = () => {
+  console.log("side effect");
+};
+
+// keep-these.js
+var Class = @(fn) class {
+};
+var Field = class {
+  @(fn)
+  field;
+};
+var Method = class {
+  @(fn)
+  method() {
+  }
+};
+var Accessor = class {
+  @(fn)
+  accessor accessor;
+};
+var StaticField = class {
+  @(fn)
+  static field;
+};
+var StaticMethod = class {
+  @(fn)
+  static method() {
+  }
+};
+var StaticAccessor = class {
+  @(fn)
+  static accessor accessor;
+};
+
+================================================================================
+TestDCEOfExperimentalDecorators
+---------- /out/keep-these.js ----------
+// decorator.ts
+var fn = () => {
+  console.log("side effect");
+};
+
+// keep-these.ts
+var Class = class {
+};
+Class = __decorateClass([
+  fn
+], Class);
+var Field = class {
+  field;
+};
+__decorateClass([
+  fn
+], Field.prototype, "field", 2);
+var Method = class {
+  method() {
+  }
+};
+__decorateClass([
+  fn
+], Method.prototype, "method", 1);
+var Accessor = class {
+  accessor accessor;
+};
+__decorateClass([
+  fn
+], Accessor.prototype, "accessor", 1);
+var Parameter = class {
+  foo(bar) {
+  }
+};
+__decorateClass([
+  __decorateParam(0, fn)
+], Parameter.prototype, "foo", 1);
+var StaticField = class {
+  static field;
+};
+__decorateClass([
+  fn
+], StaticField, "field", 2);
+var StaticMethod = class {
+  static method() {
+  }
+};
+__decorateClass([
+  fn
+], StaticMethod, "method", 1);
+var StaticAccessor = class {
+  static accessor accessor;
+};
+__decorateClass([
+  fn
+], StaticAccessor, "accessor", 1);
+var StaticParameter = class {
+  static foo(bar) {
+  }
+};
+__decorateClass([
+  __decorateParam(0, fn)
+], StaticParameter, "foo", 1);
+
+================================================================================
+TestDCEOfExprAfterKeepNamesIssue3195
+---------- /out.js ----------
+(() => {
+  function f() {
+  }
+  __name(f, "f"), firstImportantSideEffect(void 0);
+})(), (() => {
+  function g() {
+  }
+  __name(g, "g");
+  debugger;
+  secondImportantSideEffect(void 0);
 })();
 
 ================================================================================
@@ -379,6 +536,26 @@ var someVar;
 })(someVar);
 (({ z }) => {
 })(someVar);
+
+================================================================================
+TestDCEOfUsingDeclarations
+---------- /out/entry.js ----------
+// entry.js
+using null_keep = null;
+await using await_null_keep = null;
+using throw_keep = {};
+using dispose_keep = { [Symbol.dispose]() {
+  console.log("side effect");
+} };
+await using await_asyncDispose_keep = { [Symbol.asyncDispose]() {
+  console.log("side effect");
+} };
+using undef_keep = void 0;
+await using await_undef_keep = void 0;
+console.log(
+  null_keep,
+  undef_keep
+);
 
 ================================================================================
 TestDCETemplateLiteral

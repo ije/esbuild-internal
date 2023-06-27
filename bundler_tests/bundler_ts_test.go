@@ -1,6 +1,7 @@
 package bundler_tests
 
 import (
+	"regexp"
 	"testing"
 
 	"github.com/ije/esbuild-internal/compat"
@@ -880,8 +881,36 @@ func TestTSExperimentalDecoratorsNoConfig(t *testing.T) {
 	ts_suite.expectBundled(t, bundled{
 		files: map[string]string{
 			"/entry.ts": `
-				@decorator
-				class Foo {}
+				declare let x: any, y: any
+				@x.y()
+				@(new y.x)
+				export default class Foo {
+					@x @y mUndef: any
+					@x @y mDef = 1
+					@x @y method() { return new Foo }
+					@x @y declare mDecl: any
+					@x @y accessor aUndef: any
+					@x @y accessor aDef = 1
+
+					@x @y static sUndef: any
+					@x @y static sDef = new Foo
+					@x @y static sMethod() { return new Foo }
+					@x @y static declare sDecl: any
+					@x @y static accessor asUndef: any
+					@x @y static accessor asDef = 1
+
+					@x @y #mUndef: any
+					@x @y #mDef = 1
+					@x @y #method() { return new Foo }
+					@x @y accessor #aUndef: any
+					@x @y accessor #aDef = 1
+
+					@x @y static #sUndef: any
+					@x @y static #sDef = 1
+					@x @y static #sMethod() { return new Foo }
+					@x @y static accessor #asUndef: any
+					@x @y static accessor #asDef = 1
+				}
 			`,
 			"/tsconfig.json": `{
 				"compilerOptions": {
@@ -894,9 +923,6 @@ func TestTSExperimentalDecoratorsNoConfig(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/out.js",
 		},
-		expectedScanLog: "entry.ts: ERROR: Experimental decorators are not currently enabled\n" +
-			"NOTE: To use experimental decorators in TypeScript with esbuild, you need to enable them by adding \"experimentalDecorators\": true in your \"tsconfig.json\" file. " +
-			"TypeScript's experimental decorators are currently the only kind of decorators that esbuild supports.\n",
 	})
 }
 
@@ -2099,6 +2125,48 @@ func TestTSEnumCrossModuleInliningReExport(t *testing.T) {
 	})
 }
 
+func TestTSEnumCrossModuleInliningMinifyIndexIntoDot(t *testing.T) {
+	ts_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.ts": `
+				const enum Foo {
+					foo1 = 'abc',
+					foo2 = 'a b c',
+				}
+				import { Bar } from './lib'
+				inlined = [
+					obj[Foo.foo1],
+					obj[Bar.bar1],
+					obj?.[Foo.foo1],
+					obj?.[Bar.bar1],
+					obj?.prop[Foo.foo1],
+					obj?.prop[Bar.bar1],
+				]
+				notInlined = [
+					obj[Foo.foo2],
+					obj[Bar.bar2],
+					obj?.[Foo.foo2],
+					obj?.[Bar.bar2],
+					obj?.prop[Foo.foo2],
+					obj?.prop[Bar.bar2],
+				]
+			`,
+			"/lib.ts": `
+				export const enum Bar {
+					bar1 = 'xyz',
+					bar2 = 'x y z',
+				}
+			`,
+		},
+		entryPaths: []string{"/entry.ts"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+			MinifySyntax:  true,
+		},
+	})
+}
+
 func TestTSEnumCrossModuleTreeShaking(t *testing.T) {
 	ts_suite.expectBundled(t, bundled{
 		files: map[string]string{
@@ -2467,6 +2535,178 @@ func TestTSPreferJSOverTSInsideNodeModules(t *testing.T) {
 		options: config.Options{
 			Mode:         config.ModeBundle,
 			AbsOutputDir: "/out",
+		},
+	})
+}
+
+func TestTSExperimentalDecoratorsManglePropsDefineSemantics(t *testing.T) {
+	ts_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.ts": `
+				class Foo {
+					@dec(1) prop1 = null
+					@dec(2) prop2_ = null
+					@dec(3) ['prop3'] = null
+					@dec(4) ['prop4_'] = null
+					@dec(5) [/* @__KEY__ */ 'prop5'] = null
+					@dec(6) [/* @__KEY__ */ 'prop6_'] = null
+				}
+			`,
+			"/tsconfig.json": `{
+        "compilerOptions": {
+          "experimentalDecorators": true,
+          "useDefineForClassFields": true,
+        },
+			}`,
+		},
+		entryPaths: []string{"/entry.ts"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+			MangleProps:   regexp.MustCompile("_$"),
+		},
+	})
+}
+
+func TestTSExperimentalDecoratorsManglePropsAssignSemantics(t *testing.T) {
+	ts_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.ts": `
+				class Foo {
+					@dec(1) prop1 = null
+					@dec(2) prop2_ = null
+					@dec(3) ['prop3'] = null
+					@dec(4) ['prop4_'] = null
+					@dec(5) [/* @__KEY__ */ 'prop5'] = null
+					@dec(6) [/* @__KEY__ */ 'prop6_'] = null
+				}
+			`,
+			"/tsconfig.json": `{
+        "compilerOptions": {
+          "experimentalDecorators": true,
+          "useDefineForClassFields": false,
+        },
+			}`,
+		},
+		entryPaths: []string{"/entry.ts"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+			MangleProps:   regexp.MustCompile("_$"),
+		},
+	})
+}
+
+func TestTSExperimentalDecoratorsManglePropsMethods(t *testing.T) {
+	ts_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.ts": `
+				class Foo {
+					@dec(1) prop1() {}
+					@dec(2) prop2_() {}
+					@dec(3) ['prop3']() {}
+					@dec(4) ['prop4_']() {}
+					@dec(5) [/* @__KEY__ */ 'prop5']() {}
+					@dec(6) [/* @__KEY__ */ 'prop6_']() {}
+				}
+			`,
+			"/tsconfig.json": `{
+        "compilerOptions": {
+          "experimentalDecorators": true,
+        },
+			}`,
+		},
+		entryPaths: []string{"/entry.ts"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+			MangleProps:   regexp.MustCompile("_$"),
+		},
+	})
+}
+
+func TestTSExperimentalDecoratorsManglePropsStaticDefineSemantics(t *testing.T) {
+	ts_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.ts": `
+				class Foo {
+					@dec(1) static prop1 = null
+					@dec(2) static prop2_ = null
+					@dec(3) static ['prop3'] = null
+					@dec(4) static ['prop4_'] = null
+					@dec(5) static [/* @__KEY__ */ 'prop5'] = null
+					@dec(6) static [/* @__KEY__ */ 'prop6_'] = null
+				}
+			`,
+			"/tsconfig.json": `{
+        "compilerOptions": {
+          "experimentalDecorators": true,
+          "useDefineForClassFields": true,
+        },
+			}`,
+		},
+		entryPaths: []string{"/entry.ts"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+			MangleProps:   regexp.MustCompile("_$"),
+		},
+	})
+}
+
+func TestTSExperimentalDecoratorsManglePropsStaticAssignSemantics(t *testing.T) {
+	ts_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.ts": `
+				class Foo {
+					@dec(1) static prop1 = null
+					@dec(2) static prop2_ = null
+					@dec(3) static ['prop3'] = null
+					@dec(4) static ['prop4_'] = null
+					@dec(5) static [/* @__KEY__ */ 'prop5'] = null
+					@dec(6) static [/* @__KEY__ */ 'prop6_'] = null
+				}
+			`,
+			"/tsconfig.json": `{
+        "compilerOptions": {
+          "experimentalDecorators": true,
+          "useDefineForClassFields": false,
+        },
+			}`,
+		},
+		entryPaths: []string{"/entry.ts"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+			MangleProps:   regexp.MustCompile("_$"),
+		},
+	})
+}
+
+func TestTSExperimentalDecoratorsManglePropsStaticMethods(t *testing.T) {
+	ts_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.ts": `
+				class Foo {
+					@dec(1) static prop1() {}
+					@dec(2) static prop2_() {}
+					@dec(3) static ['prop3']() {}
+					@dec(4) static ['prop4_']() {}
+					@dec(5) static [/* @__KEY__ */ 'prop5']() {}
+					@dec(6) static [/* @__KEY__ */ 'prop6_']() {}
+				}
+			`,
+			"/tsconfig.json": `{
+        "compilerOptions": {
+          "experimentalDecorators": true,
+        },
+			}`,
+		},
+		entryPaths: []string{"/entry.ts"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+			MangleProps:   regexp.MustCompile("_$"),
 		},
 	})
 }

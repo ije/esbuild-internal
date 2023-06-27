@@ -1318,12 +1318,16 @@ func TestSourceMap(t *testing.T) {
 		files: map[string]string{
 			"/Users/user/project/src/entry.js": `
 				import {bar} from './bar'
+				import data from './data.txt'
 				function foo() { bar() }
 				foo()
+				console.log(data)
 			`,
 			"/Users/user/project/src/bar.js": `
 				export function bar() { throw new Error('test') }
 			`,
+			// Someone wanted data from the text loader to show up in the source map: https://github.com/evanw/esbuild/issues/2041
+			"/Users/user/project/src/data.txt": `#2041`,
 		},
 		entryPaths: []string{"/Users/user/project/src/entry.js"},
 		options: config.Options{
@@ -5526,12 +5530,21 @@ NOTE: Use the relative path "./some/other/file" to reference the file "Users/use
 	})
 }
 
+// Assigning to a top-level "const" that will be transformed into a "var" must
+// be an error at compile-time because it won't be an error at run-time. Note
+// that the minifier is allowed to transform nested "const" into "let" (to
+// reduce code size further) when bundling is active, so nested "const" also
+// needs to be an error in this case.
 func TestForbidConstAssignWhenBundling(t *testing.T) {
 	default_suite.expectBundled(t, bundled{
 		files: map[string]string{
 			"/entry.js": `
 				const x = 1
 				x = 2
+				function foo() {
+					const y = 1
+					y = 2
+				}
 			`,
 		},
 		entryPaths: []string{"/entry.js"},
@@ -5541,6 +5554,37 @@ func TestForbidConstAssignWhenBundling(t *testing.T) {
 		},
 		expectedScanLog: `entry.js: ERROR: Cannot assign to "x" because it is a constant
 entry.js: NOTE: The symbol "x" was declared a constant here:
+entry.js: ERROR: Cannot assign to "y" because it is a constant
+entry.js: NOTE: The symbol "y" was declared a constant here:
+`,
+	})
+}
+
+// Assigning to a top-level "const" that will be transformed into a "var" must
+// be an error at compile-time because it won't be an error at run-time
+func TestForbidConstAssignWhenLoweringUsing(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				const x = 1
+				using x2 = 2
+				x = 3
+				function foo() {
+					const y = 1
+					using y2 = 2
+					y = 3
+				}
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			AbsOutputFile:         "/out.js",
+			UnsupportedJSFeatures: compat.Using,
+		},
+		expectedScanLog: `entry.js: ERROR: Cannot assign to "x" because it is a constant
+entry.js: NOTE: The symbol "x" was declared a constant here:
+entry.js: WARNING: This assignment will throw because "y" is a constant
+entry.js: NOTE: The symbol "y" was declared a constant here:
 `,
 	})
 }
@@ -8273,5 +8317,86 @@ func TestErrorMessageCrashStdinIssue2913(t *testing.T) {
 		expectedScanLog: `<stdin>: ERROR: Could not resolve "node_modules/fflate"
 NOTE: You can mark the path "node_modules/fflate" as external to exclude it from the bundle, which will remove this error.
 `,
+	})
+}
+
+func TestLineLimitNotMinified(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/script.jsx": `
+				export const SignUpForm = (props) => {
+					return <p class="signup">
+						<label>Username: <input class="username" type="text"/></label>
+						<label>Password: <input class="password" type="password"/></label>
+						<div class="primary disabled">
+							{props.buttonText}
+						</div>
+						<small>By signing up, you are agreeing to our <a href="/tos/">terms of service</a>.</small>
+					</p>
+				}
+			`,
+			"/style.css": `
+				body.light-mode.new-user-segment:not(.logged-in) .signup,
+				body.light-mode.new-user-segment:not(.logged-in) .login {
+					font: 10px/12px 'Font 1', 'Font 2', 'Font 3', 'Font 4', sans-serif;
+					user-select: none;
+					color: var(--fg, rgba(11, 22, 33, 0.5));
+					background: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgeG1sb` +
+				`nM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KICA8Y2lyY2xlIGN4PSIxMDAiIGN5PSIxMDAiIHI9IjEwM` +
+				`CIgZmlsbD0iI0ZGQ0YwMCIvPgogIDxwYXRoIGQ9Ik00Ny41IDUyLjVMOTUgMTAwbC00Ny41IDQ3LjVtNjAtOTVMM` +
+				`TU1IDEwMGwtNDcuNSA0Ny41IiBmaWxsPSJub25lIiBzdHJva2U9IiMxOTE5MTkiIHN0cm9rZS13aWR0aD0iMjQiL` +
+				`z4KPC9zdmc+Cg==);
+				}
+			`,
+		},
+		entryPaths: []string{
+			"/script.jsx",
+			"/style.css",
+		},
+		options: config.Options{
+			AbsOutputDir: "/out",
+			LineLimit:    32,
+		},
+	})
+}
+
+func TestLineLimitMinified(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/script.jsx": `
+				export const SignUpForm = (props) => {
+					return <p class="signup">
+						<label>Username: <input class="username" type="text"/></label>
+						<label>Password: <input class="password" type="password"/></label>
+						<div class="primary disabled">
+							{props.buttonText}
+						</div>
+						<small>By signing up, you are agreeing to our <a href="/tos/">terms of service</a>.</small>
+					</p>
+				}
+			`,
+			"/style.css": `
+				body.light-mode.new-user-segment:not(.logged-in) .signup,
+				body.light-mode.new-user-segment:not(.logged-in) .login {
+					font: 10px/12px 'Font 1', 'Font 2', 'Font 3', 'Font 4', sans-serif;
+					user-select: none;
+					color: var(--fg, rgba(11, 22, 33, 0.5));
+					background: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgeG1sb` +
+				`nM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KICA8Y2lyY2xlIGN4PSIxMDAiIGN5PSIxMDAiIHI9IjEwM` +
+				`CIgZmlsbD0iI0ZGQ0YwMCIvPgogIDxwYXRoIGQ9Ik00Ny41IDUyLjVMOTUgMTAwbC00Ny41IDQ3LjVtNjAtOTVMM` +
+				`TU1IDEwMGwtNDcuNSA0Ny41IiBmaWxsPSJub25lIiBzdHJva2U9IiMxOTE5MTkiIHN0cm9rZS13aWR0aD0iMjQiL` +
+				`z4KPC9zdmc+Cg==);
+				}
+			`,
+		},
+		entryPaths: []string{
+			"/script.jsx",
+			"/style.css",
+		},
+		options: config.Options{
+			AbsOutputDir:     "/out",
+			LineLimit:        32,
+			MinifyWhitespace: true,
+		},
 	})
 }

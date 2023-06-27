@@ -476,9 +476,9 @@ func TestLowerClassStaticThis(t *testing.T) {
 	expectPrintedTarget(t, 2015, "class Foo { [this.x] }",
 		"var _a;\nclass Foo {\n  constructor() {\n    __publicField(this, _a);\n  }\n}\n_a = this.x;\n")
 	expectPrintedTarget(t, 2015, "class Foo { static x = this }",
-		"const _Foo = class {\n};\nlet Foo = _Foo;\n__publicField(Foo, \"x\", _Foo);\n")
+		"const _Foo = class _Foo {\n};\n__publicField(_Foo, \"x\", _Foo);\nlet Foo = _Foo;\n")
 	expectPrintedTarget(t, 2015, "class Foo { static x = () => this }",
-		"const _Foo = class {\n};\nlet Foo = _Foo;\n__publicField(Foo, \"x\", () => _Foo);\n")
+		"const _Foo = class _Foo {\n};\n__publicField(_Foo, \"x\", () => _Foo);\nlet Foo = _Foo;\n")
 	expectPrintedTarget(t, 2015, "class Foo { static x = function() { return this } }",
 		"class Foo {\n}\n__publicField(Foo, \"x\", function() {\n  return this;\n});\n")
 	expectPrintedTarget(t, 2015, "class Foo { static [this.x] }",
@@ -486,9 +486,9 @@ func TestLowerClassStaticThis(t *testing.T) {
 	expectPrintedTarget(t, 2015, "class Foo { static x = class { y = this } }",
 		"class Foo {\n}\n__publicField(Foo, \"x\", class {\n  constructor() {\n    __publicField(this, \"y\", this);\n  }\n});\n")
 	expectPrintedTarget(t, 2015, "class Foo { static x = class { [this.y] } }",
-		"var _a, _b;\nconst _Foo = class {\n};\nlet Foo = _Foo;\n__publicField(Foo, \"x\", (_b = class {\n  constructor() {\n    __publicField(this, _a);\n  }\n}, _a = _Foo.y, _b));\n")
+		"var _a, _b;\nconst _Foo = class _Foo {\n};\n__publicField(_Foo, \"x\", (_b = class {\n  constructor() {\n    __publicField(this, _a);\n  }\n}, _a = _Foo.y, _b));\nlet Foo = _Foo;\n")
 	expectPrintedTarget(t, 2015, "class Foo { static x = class extends this {} }",
-		"const _Foo = class {\n};\nlet Foo = _Foo;\n__publicField(Foo, \"x\", class extends _Foo {\n});\n")
+		"const _Foo = class _Foo {\n};\n__publicField(_Foo, \"x\", class extends _Foo {\n});\nlet Foo = _Foo;\n")
 
 	expectPrintedTarget(t, 2015, "x = class Foo { x = this }",
 		"x = class Foo {\n  constructor() {\n    __publicField(this, \"x\", this);\n  }\n};\n")
@@ -527,6 +527,18 @@ func TestLowerClassStaticThis(t *testing.T) {
 		"var _a, _b, _c;\nx = (_c = class {\n}, __publicField(_c, \"x\", (_b = class {\n  constructor() {\n    __publicField(this, _a);\n  }\n}, _a = _c.y, _b)), _c);\n")
 	expectPrintedTarget(t, 2015, "x = class Foo { static x = class extends this {} }",
 		"var _a;\nx = (_a = class {\n}, __publicField(_a, \"x\", class extends _a {\n}), _a);\n")
+}
+
+func TestLowerClassStaticBlocks(t *testing.T) {
+	expectPrintedTarget(t, 2015, "class Foo { static {} }", "class Foo {\n}\n")
+	expectPrintedTarget(t, 2015, "class Foo { static {} x() {} }", "class Foo {\n  x() {\n  }\n}\n")
+	expectPrintedTarget(t, 2015, "class Foo { x() {} static {} }", "class Foo {\n  x() {\n  }\n}\n")
+	expectPrintedTarget(t, 2015, "class Foo { static { x } static {} static { y } }", "class Foo {\n}\nx;\ny;\n")
+
+	expectPrintedMangleTarget(t, 2015, "class Foo { static {} }", "class Foo {\n}\n")
+	expectPrintedMangleTarget(t, 2015, "class Foo { static {} x() {} }", "class Foo {\n  x() {\n  }\n}\n")
+	expectPrintedMangleTarget(t, 2015, "class Foo { x() {} static {} }", "class Foo {\n  x() {\n  }\n}\n")
+	expectPrintedMangleTarget(t, 2015, "class Foo { static { x } static {} static { y } }", "class Foo {\n}\nx, y;\n")
 }
 
 func TestLowerOptionalChain(t *testing.T) {
@@ -720,7 +732,7 @@ func TestAsyncGeneratorFns(t *testing.T) {
 	expectParseErrorWithUnsupportedFeatures(t, compat.AsyncAwait|compat.Generator, "(async function () {});", err)
 	expectParseErrorWithUnsupportedFeatures(t, compat.AsyncAwait|compat.Generator, "({ async foo() {} });", err)
 
-	err = "<stdin>: ERROR: Transforming async generator functions to the configured target environment is not supported yet\n"
+	err = ""
 	expectParseErrorWithUnsupportedFeatures(t, compat.AsyncGenerator, "async function* gen() {}", err)
 	expectParseErrorWithUnsupportedFeatures(t, compat.AsyncGenerator, "(async function* () {});", err)
 	expectParseErrorWithUnsupportedFeatures(t, compat.AsyncGenerator, "({ async *foo() {} });", err)
@@ -751,4 +763,24 @@ func TestForAwait(t *testing.T) {
 	expectParseErrorWithUnsupportedFeatures(t, compat.TopLevelAwait, "with (x) y; if (false) for await (x of y) ;",
 		"<stdin>: ERROR: With statements cannot be used in an ECMAScript module\n"+
 			"<stdin>: NOTE: This file is considered to be an ECMAScript module because of the top-level \"await\" keyword here:\n")
+}
+
+func TestLowerAutoAccessors(t *testing.T) {
+	expectPrintedWithUnsupportedFeatures(t, compat.Decorators, "class Foo { accessor x }",
+		"class Foo {\n  #x;\n  get x() {\n    return this.#x;\n  }\n  set x(_) {\n    this.#x = _;\n  }\n}\n")
+	expectPrintedWithUnsupportedFeatures(t, compat.Decorators, "class Foo { accessor [x] }",
+		"var _a;\nclass Foo {\n  #a;\n  get [_a = x]() {\n    return this.#a;\n  }\n  set [_a](_) {\n    this.#a = _;\n  }\n}\n")
+	expectPrintedWithUnsupportedFeatures(t, compat.Decorators, "class Foo { accessor x = null }",
+		"class Foo {\n  #x = null;\n  get x() {\n    return this.#x;\n  }\n  set x(_) {\n    this.#x = _;\n  }\n}\n")
+	expectPrintedWithUnsupportedFeatures(t, compat.Decorators, "class Foo { accessor [x] = null }",
+		"var _a;\nclass Foo {\n  #a = null;\n  get [_a = x]() {\n    return this.#a;\n  }\n  set [_a](_) {\n    this.#a = _;\n  }\n}\n")
+
+	expectPrintedWithUnsupportedFeatures(t, compat.Decorators, "class Foo { static accessor x }",
+		"class Foo {\n  static #x;\n  static get x() {\n    return this.#x;\n  }\n  static set x(_) {\n    this.#x = _;\n  }\n}\n")
+	expectPrintedWithUnsupportedFeatures(t, compat.Decorators, "class Foo { static accessor [x] }",
+		"var _a;\nclass Foo {\n  static #a;\n  static get [_a = x]() {\n    return this.#a;\n  }\n  static set [_a](_) {\n    this.#a = _;\n  }\n}\n")
+	expectPrintedWithUnsupportedFeatures(t, compat.Decorators, "class Foo { static accessor x = null }",
+		"class Foo {\n  static #x = null;\n  static get x() {\n    return this.#x;\n  }\n  static set x(_) {\n    this.#x = _;\n  }\n}\n")
+	expectPrintedWithUnsupportedFeatures(t, compat.Decorators, "class Foo { static accessor [x] = null }",
+		"var _a;\nclass Foo {\n  static #a = null;\n  static get [_a = x]() {\n    return this.#a;\n  }\n  static set [_a](_) {\n    this.#a = _;\n  }\n}\n")
 }

@@ -1,5 +1,522 @@
 # Changelog
 
+## 0.18.10
+
+* Fix a tree-shaking bug that removed side effects ([#3195](https://github.com/evanw/esbuild/issues/3195))
+
+    This fixes a regression in version 0.18.4 where combining `--minify-syntax` with `--keep-names` could cause expressions with side effects after a function declaration to be considered side-effect free for tree shaking purposes. The reason was because `--keep-names` generates an expression statement containing a call to a helper function after the function declaration with a special flag that makes the function call able to be tree shaken, and then `--minify-syntax` could potentially merge that expression statement with following expressions without clearing the flag. This release fixes the bug by clearing the flag when merging expression statements together.
+
+* Fix an incorrect warning about CSS nesting ([#3197](https://github.com/evanw/esbuild/issues/3197))
+
+    A warning is currently generated when transforming nested CSS to a browser that doesn't support `:is()` because transformed nested CSS may need to use that feature to represent nesting. This was previously always triggered when an at-rule was encountered in a declaration context. Typically the only case you would encounter this is when using CSS nesting within a selector rule. However, there is a case where that's not true: when using a margin at-rule such as `@top-left` within `@page`. This release avoids incorrectly generating a warning in this case by checking that the at-rule is within a selector rule before generating a warning.
+
+## 0.18.9
+
+* Fix `await using` declarations inside `async` generator functions
+
+    I forgot about the new `await using` declarations when implementing lowering for `async` generator functions in the previous release. This change fixes the transformation of `await using` declarations when they are inside lowered `async` generator functions:
+
+    ```js
+    // Original code
+    async function* foo() {
+      await using x = await y
+    }
+
+    // Old output (with --supported:async-generator=false)
+    function foo() {
+      return __asyncGenerator(this, null, function* () {
+        await using x = yield new __await(y);
+      });
+    }
+
+    // New output (with --supported:async-generator=false)
+    function foo() {
+      return __asyncGenerator(this, null, function* () {
+        var _stack = [];
+        try {
+          const x = __using(_stack, yield new __await(y), true);
+        } catch (_) {
+          var _error = _, _hasError = true;
+        } finally {
+          var _promise = __callDispose(_stack, _error, _hasError);
+          _promise && (yield new __await(_promise));
+        }
+      });
+    }
+    ```
+
+* Insert some prefixed CSS properties when appropriate ([#3122](https://github.com/evanw/esbuild/issues/3122))
+
+    With this release, esbuild will now insert prefixed CSS properties in certain cases when the `target` setting includes browsers that require a certain prefix. This is currently done for the following properties:
+
+    * `appearance: *;` => `-webkit-appearance: *; -moz-appearance: *;`
+    * `backdrop-filter: *;` => `-webkit-backdrop-filter: *;`
+    * `background-clip: text` => `-webkit-background-clip: text;`
+    * `box-decoration-break: *;` => `-webkit-box-decoration-break: *;`
+    * `clip-path: *;` => `-webkit-clip-path: *;`
+    * `font-kerning: *;` => `-webkit-font-kerning: *;`
+    * `hyphens: *;` => `-webkit-hyphens: *;`
+    * `initial-letter: *;` => `-webkit-initial-letter: *;`
+    * `mask-image: *;` => `-webkit-mask-image: *;`
+    * `mask-origin: *;` => `-webkit-mask-origin: *;`
+    * `mask-position: *;` => `-webkit-mask-position: *;`
+    * `mask-repeat: *;` => `-webkit-mask-repeat: *;`
+    * `mask-size: *;` => `-webkit-mask-size: *;`
+    * `position: sticky;` => `position: -webkit-sticky;`
+    * `print-color-adjust: *;` => `-webkit-print-color-adjust: *;`
+    * `tab-size: *;` => `-moz-tab-size: *; -o-tab-size: *;`
+    * `text-decoration-color: *;` => `-webkit-text-decoration-color: *; -moz-text-decoration-color: *;`
+    * `text-decoration-line: *;` => `-webkit-text-decoration-line: *; -moz-text-decoration-line: *;`
+    * `text-decoration-skip: *;` => `-webkit-text-decoration-skip: *;`
+    * `text-emphasis-color: *;` => `-webkit-text-emphasis-color: *;`
+    * `text-emphasis-position: *;` => `-webkit-text-emphasis-position: *;`
+    * `text-emphasis-style: *;` => `-webkit-text-emphasis-style: *;`
+    * `text-orientation: *;` => `-webkit-text-orientation: *;`
+    * `text-size-adjust: *;` => `-webkit-text-size-adjust: *; -ms-text-size-adjust: *;`
+    * `user-select: *;` => `-webkit-user-select: *; -moz-user-select: *; -ms-user-select: *;`
+
+    Here is an example:
+
+    ```css
+    /* Original code */
+    div {
+      mask-image: url(x.png);
+    }
+
+    /* Old output (with --target=chrome99) */
+    div {
+      mask-image: url(x.png);
+    }
+
+    /* New output (with --target=chrome99) */
+    div {
+      -webkit-mask-image: url(x.png);
+      mask-image: url(x.png);
+    }
+    ```
+
+    Browser compatibility data was sourced from the tables on https://caniuse.com. Support for more CSS properties can be added in the future as appropriate.
+
+* Fix an obscure identifier minification bug ([#2809](https://github.com/evanw/esbuild/issues/2809))
+
+    Function declarations in nested scopes behave differently depending on whether or not `"use strict"` is present. To avoid generating code that behaves differently depending on whether strict mode is enabled or not, esbuild transforms nested function declarations into variable declarations. However, there was a bug where the generated variable name was not being recorded as declared internally, which meant that it wasn't being renamed correctly by the minifier and could cause a name collision. This bug has been fixed:
+
+    ```js
+    // Original code
+    const n = ''
+    for (let i of [0,1]) {
+      function f () {}
+    }
+
+    // Old output (with --minify-identifiers --format=esm)
+    const f = "";
+    for (let o of [0, 1]) {
+      let n = function() {
+      };
+      var f = n;
+    }
+
+    // New output (with --minify-identifiers --format=esm)
+    const f = "";
+    for (let o of [0, 1]) {
+      let n = function() {
+      };
+      var t = n;
+    }
+    ```
+
+* Fix a bug in esbuild's compatibility table script ([#3179](https://github.com/evanw/esbuild/pull/3179))
+
+    Setting esbuild's `target` to a specific JavaScript engine tells esbuild to use the JavaScript syntax feature compatibility data from https://kangax.github.io/compat-table/es6/ for that engine to determine which syntax features to allow. However, esbuild's script that builds this internal compatibility table had a bug that incorrectly ignores tests for engines that still have outstanding implementation bugs which were never fixed. This change fixes this bug with the script.
+
+    The only case where this changed the information in esbuild's internal compatibility table is that the `hermes` target is marked as no longer supporting destructuring. This is because there is a failing destructuring-related test for Hermes on https://kangax.github.io/compat-table/es6/. If you want to use destructuring with Hermes anyway, you can pass `--supported:destructuring=true` to esbuild to override the `hermes` target and force esbuild to accept this syntax.
+
+    This fix was contributed by [@ArrayZoneYour](https://github.com/ArrayZoneYour).
+
+## 0.18.8
+
+* Implement transforming `async` generator functions ([#2780](https://github.com/evanw/esbuild/issues/2780))
+
+    With this release, esbuild will now transform `async` generator functions into normal generator functions when the configured target environment doesn't support them. These functions behave similar to normal generator functions except that they use the `Symbol.asyncIterator` interface instead of the `Symbol.iterator` interface and the iteration methods return promises. Here's an example (helper functions are omitted):
+
+    ```js
+    // Original code
+    async function* foo() {
+      yield Promise.resolve(1)
+      await new Promise(r => setTimeout(r, 100))
+      yield *[Promise.resolve(2)]
+    }
+    async function bar() {
+      for await (const x of foo()) {
+        console.log(x)
+      }
+    }
+    bar()
+
+    // New output (with --target=es6)
+    function foo() {
+      return __asyncGenerator(this, null, function* () {
+        yield Promise.resolve(1);
+        yield new __await(new Promise((r) => setTimeout(r, 100)));
+        yield* __yieldStar([Promise.resolve(2)]);
+      });
+    }
+    function bar() {
+      return __async(this, null, function* () {
+        try {
+          for (var iter = __forAwait(foo()), more, temp, error; more = !(temp = yield iter.next()).done; more = false) {
+            const x = temp.value;
+            console.log(x);
+          }
+        } catch (temp) {
+          error = [temp];
+        } finally {
+          try {
+            more && (temp = iter.return) && (yield temp.call(iter));
+          } finally {
+            if (error)
+              throw error[0];
+          }
+        }
+      });
+    }
+    bar();
+    ```
+
+    This is an older feature that was added to JavaScript in ES2018 but I didn't implement the transformation then because it's a rarely-used feature. Note that esbuild already added support for transforming `for await` loops (the other part of the [asynchronous iteration proposal](https://github.com/tc39/proposal-async-iteration)) a year ago, so support for asynchronous iteration should now be complete.
+
+    I have never used this feature myself and code that uses this feature is hard to come by, so this transformation has not yet been tested on real-world code. If you do write code that uses this feature, please let me know if esbuild's `async` generator transformation doesn't work with your code.
+
+## 0.18.7
+
+* Add support for `using` declarations in TypeScript 5.2+ ([#3191](https://github.com/evanw/esbuild/issues/3191))
+
+    TypeScript 5.2 (due to be released in August of 2023) will introduce `using` declarations, which will allow you to automatically dispose of the declared resources when leaving the current scope. You can read the [TypeScript PR for this feature](https://github.com/microsoft/TypeScript/pull/54505) for more information. This release of esbuild adds support for transforming this syntax to target environments without support for `using` declarations (which is currently all targets other than `esnext`). Here's an example (helper functions are omitted):
+
+    ```js
+    // Original code
+    class Foo {
+      [Symbol.dispose]() {
+        console.log('cleanup')
+      }
+    }
+    using foo = new Foo;
+    foo.bar();
+
+    // New output (with --target=es6)
+    var _stack = [];
+    try {
+      var Foo = class {
+        [Symbol.dispose]() {
+          console.log("cleanup");
+        }
+      };
+      var foo = __using(_stack, new Foo());
+      foo.bar();
+    } catch (_) {
+      var _error = _, _hasError = true;
+    } finally {
+      __callDispose(_stack, _error, _hasError);
+    }
+    ```
+
+    The injected helper functions ensure that the method named `Symbol.dispose` is called on `new Foo` when control exits the scope. Note that as with all new JavaScript APIs, you'll need to polyfill `Symbol.dispose` if it's not present before you use it. This is not something that esbuild does for you because esbuild only handles syntax, not APIs. Polyfilling it can be done with something like this:
+
+    ```js
+    Symbol.dispose ||= Symbol('Symbol.dispose')
+    ```
+
+    This feature also introduces `await using` declarations which are like `using` declarations but they call `await` on the disposal method (not on the initializer). Here's an example (helper functions are omitted):
+
+    ```js
+    // Original code
+    class Foo {
+      async [Symbol.asyncDispose]() {
+        await new Promise(done => {
+          setTimeout(done, 1000)
+        })
+        console.log('cleanup')
+      }
+    }
+    await using foo = new Foo;
+    foo.bar();
+
+    // New output (with --target=es2022)
+    var _stack = [];
+    try {
+      var Foo = class {
+        async [Symbol.asyncDispose]() {
+          await new Promise((done) => {
+            setTimeout(done, 1e3);
+          });
+          console.log("cleanup");
+        }
+      };
+      var foo = __using(_stack, new Foo(), true);
+      foo.bar();
+    } catch (_) {
+      var _error = _, _hasError = true;
+    } finally {
+      var _promise = __callDispose(_stack, _error, _hasError);
+      _promise && await _promise;
+    }
+    ```
+
+    The injected helper functions ensure that the method named `Symbol.asyncDispose` is called on `new Foo` when control exits the scope, and that the returned promise is awaited. Similarly to `Symbol.dispose`, you'll also need to polyfill `Symbol.asyncDispose` before you use it.
+
+* Add a `--line-limit=` flag to limit line length ([#3170](https://github.com/evanw/esbuild/issues/3170))
+
+    Long lines are common in minified code. However, many tools and text editors can't handle long lines. This release introduces the `--line-limit=` flag to tell esbuild to wrap lines longer than the provided number of bytes. For example, `--line-limit=80` tells esbuild to insert a newline soon after a given line reaches 80 bytes in length. This setting applies to both JavaScript and CSS, and works even when minification is disabled. Note that turning this setting on will make your files bigger, as the extra newlines take up additional space in the file (even after gzip compression).
+
+## 0.18.6
+
+* Fix tree-shaking of classes with decorators ([#3164](https://github.com/evanw/esbuild/issues/3164))
+
+    This release fixes a bug where esbuild incorrectly allowed tree-shaking on classes with decorators. Each decorator is a function call, so classes with decorators must never be tree-shaken. This bug was a regression that was unintentionally introduced in version 0.18.2 by the change that enabled tree-shaking of lowered private fields. Previously decorators were always lowered, and esbuild always considered the automatically-generated decorator code to be a side effect. But this is no longer the case now that esbuild analyzes side effects using the AST before lowering takes place. This bug was fixed by considering any decorator a side effect.
+
+* Fix a minification bug involving function expressions ([#3125](https://github.com/evanw/esbuild/issues/3125))
+
+    When minification is enabled, esbuild does limited inlining of `const` symbols at the top of a scope. This release fixes a bug where inlineable symbols were incorrectly removed assuming that they were inlined. They may not be inlined in cases where they were referenced by earlier constants in the body of a function expression. The declarations involved in these edge cases are now kept instead of being removed:
+
+    ```js
+    // Original code
+    {
+      const fn = () => foo
+      const foo = 123
+      console.log(fn)
+    }
+
+    // Old output (with --minify-syntax)
+    console.log((() => foo)());
+
+    // New output (with --minify-syntax)
+    {
+      const fn = () => foo, foo = 123;
+      console.log(fn);
+    }
+    ```
+
+## 0.18.5
+
+* Implement auto accessors ([#3009](https://github.com/evanw/esbuild/issues/3009))
+
+    This release implements the new auto-accessor syntax from the upcoming [JavaScript decorators proposal](https://github.com/tc39/proposal-decorators). The auto-accessor syntax looks like this:
+
+    ```js
+    class Foo {
+      accessor foo;
+      static accessor bar;
+    }
+    new Foo().foo = Foo.bar;
+    ```
+
+    This syntax is not yet a part of JavaScript but it was [added to TypeScript in version 4.9](https://devblogs.microsoft.com/typescript/announcing-typescript-4-9/#auto-accessors-in-classes). More information about this feature can be found in [microsoft/TypeScript#49705](https://github.com/microsoft/TypeScript/pull/49705). Auto-accessors will be transformed if the target is set to something other than `esnext`:
+
+    ```js
+    // Output (with --target=esnext)
+    class Foo {
+      accessor foo;
+      static accessor bar;
+    }
+    new Foo().foo = Foo.bar;
+
+    // Output (with --target=es2022)
+    class Foo {
+      #foo;
+      get foo() {
+        return this.#foo;
+      }
+      set foo(_) {
+        this.#foo = _;
+      }
+      static #bar;
+      static get bar() {
+        return this.#bar;
+      }
+      static set bar(_) {
+        this.#bar = _;
+      }
+    }
+    new Foo().foo = Foo.bar;
+
+    // Output (with --target=es2021)
+    var _foo, _bar;
+    class Foo {
+      constructor() {
+        __privateAdd(this, _foo, void 0);
+      }
+      get foo() {
+        return __privateGet(this, _foo);
+      }
+      set foo(_) {
+        __privateSet(this, _foo, _);
+      }
+      static get bar() {
+        return __privateGet(this, _bar);
+      }
+      static set bar(_) {
+        __privateSet(this, _bar, _);
+      }
+    }
+    _foo = new WeakMap();
+    _bar = new WeakMap();
+    __privateAdd(Foo, _bar, void 0);
+    new Foo().foo = Foo.bar;
+    ```
+
+    You can also now use auto-accessors with esbuild's TypeScript experimental decorator transformation, which should behave the same as decorating the underlying getter/setter pair.
+
+    **Please keep in mind that this syntax is not yet part of JavaScript.** This release enables auto-accessors in `.js` files with the expectation that it will be a part of JavaScript soon. However, esbuild may change or remove this feature in the future if JavaScript ends up changing or removing this feature. Use this feature with caution for now.
+
+* Pass through JavaScript decorators ([#104](https://github.com/evanw/esbuild/issues/104))
+
+    In this release, esbuild now parses decorators from the upcoming [JavaScript decorators proposal](https://github.com/tc39/proposal-decorators) and passes them through to the output unmodified (as long as the language target is set to `esnext`). Transforming JavaScript decorators to environments that don't support them has not been implemented yet. The only decorator transform that esbuild currently implements is still the TypeScript experimental decorator transform, which only works in `.ts` files and which requires `"experimentalDecorators": true` in your `tsconfig.json` file.
+
+* Static fields with assign semantics now use static blocks if possible
+
+    Setting `useDefineForClassFields` to false in TypeScript requires rewriting class fields to assignment statements. Previously this was done by removing the field from the class body and adding an assignment statement after the class declaration. However, this also caused any private fields to also be lowered by necessity (in case a field initializer uses a private symbol, either directly or indirectly). This release changes this transform to use an inline static block if it's supported, which avoids needing to lower private fields in this scenario:
+
+    ```js
+    // Original code
+    class Test {
+      static #foo = 123
+      static bar = this.#foo
+    }
+
+    // Old output (with useDefineForClassFields=false)
+    var _foo;
+    const _Test = class _Test {
+    };
+    _foo = new WeakMap();
+    __privateAdd(_Test, _foo, 123);
+    _Test.bar = __privateGet(_Test, _foo);
+    let Test = _Test;
+
+    // New output (with useDefineForClassFields=false)
+    class Test {
+      static #foo = 123;
+      static {
+        this.bar = this.#foo;
+      }
+    }
+    ```
+
+* Fix TypeScript experimental decorators combined with `--mangle-props` ([#3177](https://github.com/evanw/esbuild/issues/3177))
+
+    Previously using TypeScript experimental decorators combined with the `--mangle-props` setting could result in a crash, as the experimental decorator transform was not expecting a mangled property as a class member. This release fixes the crash so you can now combine both of these features together safely.
+
+## 0.18.4
+
+* Bundling no longer unnecessarily transforms class syntax ([#1360](https://github.com/evanw/esbuild/issues/1360), [#1328](https://github.com/evanw/esbuild/issues/1328), [#1524](https://github.com/evanw/esbuild/issues/1524), [#2416](https://github.com/evanw/esbuild/issues/2416))
+
+    When bundling, esbuild automatically converts top-level class statements to class expressions. Previously this conversion had the unfortunate side-effect of also transforming certain other class-related syntax features to avoid correctness issues when the references to the class name within the class body. This conversion has been reworked to avoid doing this:
+
+    ```js
+    // Original code
+    export class Foo {
+      static foo = () => Foo
+    }
+
+    // Old output (with --bundle)
+    var _Foo = class {
+    };
+    var Foo = _Foo;
+    __publicField(Foo, "foo", () => _Foo);
+
+    // New output (with --bundle)
+    var Foo = class _Foo {
+      static foo = () => _Foo;
+    };
+    ```
+
+    This conversion process is very complicated and has many edge cases (including interactions with static fields, static blocks, private class properties, and TypeScript experimental decorators). It should already be pretty robust but a change like this may introduce new unintentional behavior. Please report any issues with this upgrade on the esbuild bug tracker.
+
+    You may be wondering why esbuild needs to do this at all. One reason to do this is that esbuild's bundler sometimes needs to lazily-evaluate a module. For example, a module may end up being both the target of a dynamic `import()` call and a static `import` statement. Lazy module evaluation is done by wrapping the top-level module code in a closure. To avoid a performance hit for static `import` statements, esbuild stores top-level exported symbols outside of the closure and references them directly instead of indirectly.
+
+    Another reason to do this is that multiple JavaScript VMs have had and continue to have performance issues with TDZ (i.e. "temporal dead zone") checks. These checks validate that a let, or const, or class symbol isn't used before it's initialized. Here are two issues with well-known VMs:
+
+    * V8: https://bugs.chromium.org/p/v8/issues/detail?id=13723 (10% slowdown)
+    * JavaScriptCore: https://bugs.webkit.org/show_bug.cgi?id=199866 (1,000% slowdown!)
+
+    JavaScriptCore had a severe performance issue as their TDZ implementation had time complexity that was quadratic in the number of variables needing TDZ checks in the same scope (with the top-level scope typically being the worst offender). V8 has ongoing issues with TDZ checks being present throughout the code their JIT generates even when they have already been checked earlier in the same function or when the function in question has already been run (so the checks have already happened).
+
+    Due to esbuild's parallel architecture, esbuild both a) needs to convert class statements into class expressions during parsing and b) doesn't yet know whether this module will need to be lazily-evaluated or not in the parser. So esbuild always does this conversion during bundling in case it's needed for correctness (and also to avoid potentially catastrophic performance issues due to bundling creating a large scope with many TDZ variables).
+
+* Enforce TDZ errors in computed class property keys ([#2045](https://github.com/evanw/esbuild/issues/2045))
+
+    JavaScript allows class property keys to be generated at run-time using code, like this:
+
+    ```js
+    class Foo {
+      static foo = 'foo'
+      static [Foo.foo + '2'] = 2
+    }
+    ```
+
+    Previously esbuild treated references to the containing class name within computed property keys as a reference to the partially-initialized class object. That meant code that attempted to reference properties of the class object (such as the code above) would get back `undefined` instead of throwing an error.
+
+    This release rewrites references to the containing class name within computed property keys into code that always throws an error at run-time, which is how this JavaScript code is supposed to work. Code that does this will now also generate a warning. You should never write code like this, but it now should be more obvious when incorrect code like this is written.
+
+* Fix an issue with experimental decorators and static fields ([#2629](https://github.com/evanw/esbuild/issues/2629))
+
+    This release also fixes a bug regarding TypeScript experimental decorators and static class fields which reference the enclosing class name in their initializer. This affected top-level classes when bundling was enabled. Previously code that does this could crash because the class name wasn't initialized yet. This case should now be handled correctly:
+
+    ```ts
+    // Original code
+    class Foo {
+      @someDecorator
+      static foo = 'foo'
+      static bar = Foo.foo.length
+    }
+
+    // Old output
+    const _Foo = class {
+      static foo = "foo";
+      static bar = _Foo.foo.length;
+    };
+    let Foo = _Foo;
+    __decorateClass([
+      someDecorator
+    ], Foo, "foo", 2);
+
+    // New output
+    const _Foo = class _Foo {
+      static foo = "foo";
+      static bar = _Foo.foo.length;
+    };
+    __decorateClass([
+      someDecorator
+    ], _Foo, "foo", 2);
+    let Foo = _Foo;
+    ```
+
+* Fix a minification regression with negative numeric properties ([#3169](https://github.com/evanw/esbuild/issues/3169))
+
+    Version 0.18.0 introduced a regression where computed properties with negative numbers were incorrectly shortened into a non-computed property when minification was enabled. This regression has been fixed:
+
+    ```js
+    // Original code
+    x = {
+      [1]: 1,
+      [-1]: -1,
+      [NaN]: NaN,
+      [Infinity]: Infinity,
+      [-Infinity]: -Infinity,
+    }
+
+    // Old output (with --minify)
+    x={1:1,-1:-1,NaN:NaN,1/0:1/0,-1/0:-1/0};
+
+    // New output (with --minify)
+    x={1:1,[-1]:-1,NaN:NaN,[1/0]:1/0,[-1/0]:-1/0};
+    ```
+
+## 0.18.3
+
+* Fix a panic due to empty static class blocks ([#3161](https://github.com/evanw/esbuild/issues/3161))
+
+    This release fixes a bug where an internal invariant that was introduced in the previous release was sometimes violated, which then caused a panic. It happened when bundling code containing an empty static class block with both minification and bundling enabled.
+
 ## 0.18.2
 
 * Lower static blocks when static fields are lowered ([#2800](https://github.com/evanw/esbuild/issues/2800), [#2950](https://github.com/evanw/esbuild/issues/2950), [#3025](https://github.com/evanw/esbuild/issues/3025))

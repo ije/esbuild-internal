@@ -695,6 +695,13 @@ func TestClass(t *testing.T) {
 	expectPrinted(t, "class Foo { static set foo(x) {} }", "class Foo {\n  static set foo(x) {\n  }\n}\n")
 }
 
+func TestAutoAccessors(t *testing.T) {
+	expectPrinted(t, "class Foo { accessor x; static accessor y }", "class Foo {\n  accessor x;\n  static accessor y;\n}\n")
+	expectPrinted(t, "class Foo { accessor [x]; static accessor [y] }", "class Foo {\n  accessor [x];\n  static accessor [y];\n}\n")
+	expectPrintedMinify(t, "class Foo { accessor x; static accessor y }", "class Foo{accessor x;static accessor y}")
+	expectPrintedMinify(t, "class Foo { accessor [x]; static accessor [y] }", "class Foo{accessor[x];static accessor[y]}")
+}
+
 func TestPrivateIdentifiers(t *testing.T) {
 	expectPrinted(t, "class Foo { #foo; foo() { return #foo in this } }", "class Foo {\n  #foo;\n  foo() {\n    return #foo in this;\n  }\n}\n")
 	expectPrintedMinify(t, "class Foo { #foo; foo() { return #foo in this } }", "class Foo{#foo;foo(){return#foo in this}}")
@@ -1095,4 +1102,17 @@ func TestBinaryOperatorVisitor(t *testing.T) {
 	// Make sure deeply-nested ASTs don't cause a stack overflow
 	x := "x = f()" + strings.Repeat(" || f()", 10_000) + ";\n"
 	expectPrinted(t, x, x)
+}
+
+// See: https://github.com/tc39/proposal-explicit-resource-management
+func TestUsing(t *testing.T) {
+	expectPrinted(t, "using x = y", "using x = y;\n")
+	expectPrinted(t, "using x = y, z = _", "using x = y, z = _;\n")
+	expectPrintedMinify(t, "using x = y", "using x=y;")
+	expectPrintedMinify(t, "using x = y, z = _", "using x=y,z=_;")
+
+	expectPrinted(t, "await using x = y", "await using x = y;\n")
+	expectPrinted(t, "await using x = y, z = _", "await using x = y, z = _;\n")
+	expectPrintedMinify(t, "await using x = y", "await using x=y;")
+	expectPrintedMinify(t, "await using x = y, z = _", "await using x=y,z=_;")
 }
