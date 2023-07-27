@@ -180,6 +180,32 @@ console.log(void 0);
 
 ================================================================================
 TestCSSNestingOldBrowser
+---------- /out/two-type-selectors.css ----------
+/* two-type-selectors.css */
+.c a:is(b) {
+  color: red;
+}
+
+---------- /out/two-parent-selectors.css ----------
+/* two-parent-selectors.css */
+.c :is(a b) {
+  color: red;
+}
+
+---------- /out/only-one-warning.css ----------
+/* only-one-warning.css */
+.a > .a,
+.a > :is(.b .c),
+.a > .d,
+.b .c > .a,
+.b .c > :is(.b .c),
+.b .c > .d,
+.d > .a,
+.d > :is(.b .c),
+.d > .d {
+  color: red;
+}
+
 ---------- /out/nested-@layer.css ----------
 /* nested-@layer.css */
 @layer base {
@@ -622,13 +648,445 @@ TestIgnoreURLsInAtRulePrelude
 }
 
 ================================================================================
-TestImportCSSFromJS
+TestImportCSSFromJSLocalVsGlobal
 ---------- /out/entry.js ----------
+// normal.css
+var normal_default = {};
+
+// LOCAL.global-css
+var LOCAL_default = {
+  local: "LOCAL_local",
+  local_a: "LOCAL_local_a",
+  local_b: "LOCAL_local_b",
+  local_c: "LOCAL_local_c"
+};
+
+// LOCAL.local-css
+var LOCAL_default2 = {
+  top_level: "LOCAL_top_level",
+  local: "LOCAL_local2",
+  local_a: "LOCAL_local_a2",
+  local_b: "LOCAL_local_b2",
+  local_c: "LOCAL_local_c2",
+  nested: "LOCAL_nested"
+};
+
+// entry.js
+console.log("should be empty:", normal_default);
+console.log("fewer local names:", LOCAL_default);
+console.log("more local names:", LOCAL_default2);
+
+---------- /out/entry.css ----------
+/* normal.css */
+.top_level {
+  color: #000;
+}
+:global(.GLOBAL) {
+  color: #001;
+}
+:local(.local) {
+  color: #002;
+}
+div:global(.GLOBAL) {
+  color: #003;
+}
+div:local(.local) {
+  color: #004;
+}
+.top_level:global(div) {
+  color: #005;
+}
+.top_level:local(div) {
+  color: #006;
+}
+:global(div.GLOBAL) {
+  color: #007;
+}
+:local(div.local) {
+  color: #008;
+}
+div:global(span.GLOBAL) {
+  color: #009;
+}
+div:local(span.local) {
+  color: #00A;
+}
+div:global(#GLOBAL_A.GLOBAL_B.GLOBAL_C):local(.local_a.local_b#local_c) {
+  color: #00B;
+}
+div:global(#GLOBAL_A .GLOBAL_B .GLOBAL_C):local(.local_a .local_b #local_c) {
+  color: #00C;
+}
+.nested {
+  :global(&.GLOBAL) {
+    color: #00D;
+  }
+  :local(&.local) {
+    color: #00E;
+  }
+  &:global(.GLOBAL) {
+    color: #00F;
+  }
+  &:local(.local) {
+    color: #010;
+  }
+}
+:global(.GLOBAL_A .GLOBAL_B) {
+  color: #011;
+}
+:local(.local_a .local_b) {
+  color: #012;
+}
+div:global(.GLOBAL_A .GLOBAL_B):hover {
+  color: #013;
+}
+div:local(.local_a .local_b):hover {
+  color: #014;
+}
+div :global(.GLOBAL_A .GLOBAL_B) span {
+  color: #015;
+}
+div :local(.local_a .local_b) span {
+  color: #016;
+}
+div > :global(.GLOBAL_A ~ .GLOBAL_B) + span {
+  color: #017;
+}
+div > :local(.local_a ~ .local_b) + span {
+  color: #018;
+}
+div:global(+ .GLOBAL_A):hover {
+  color: #019;
+}
+div:local(+ .local_a):hover {
+  color: #01A;
+}
+:global.GLOBAL:local.local {
+  color: #01B;
+}
+:global .GLOBAL :local .local {
+  color: #01C;
+}
+:global {
+  .GLOBAL {
+    :local {
+      .local {
+        color: #01D;
+      }
+    }
+  }
+}
+
+/* LOCAL.global-css */
+.top_level {
+  color: #000;
+}
+.GLOBAL {
+  color: #001;
+}
+.LOCAL_local {
+  color: #002;
+}
+div.GLOBAL {
+  color: #003;
+}
+div.LOCAL_local {
+  color: #004;
+}
+div.top_level {
+  color: #005;
+}
+div.top_level {
+  color: #006;
+}
+div.GLOBAL {
+  color: #007;
+}
+div.LOCAL_local {
+  color: #008;
+}
+div:is(span).GLOBAL {
+  color: #009;
+}
+div:is(span).LOCAL_local {
+  color: #00A;
+}
+div#GLOBAL_A.GLOBAL_B.GLOBAL_C.LOCAL_local_a.LOCAL_local_b#LOCAL_local_c {
+  color: #00B;
+}
+div#GLOBAL_A .GLOBAL_B .GLOBAL_C.LOCAL_local_a .LOCAL_local_b #LOCAL_local_c {
+  color: #00C;
+}
+.nested {
+  &.GLOBAL {
+    color: #00D;
+  }
+  &.LOCAL_local {
+    color: #00E;
+  }
+  &.GLOBAL {
+    color: #00F;
+  }
+  &.LOCAL_local {
+    color: #010;
+  }
+}
+.GLOBAL_A .GLOBAL_B {
+  color: #011;
+}
+.LOCAL_local_a .LOCAL_local_b {
+  color: #012;
+}
+div.GLOBAL_A .GLOBAL_B:hover {
+  color: #013;
+}
+div.LOCAL_local_a .LOCAL_local_b:hover {
+  color: #014;
+}
+div .GLOBAL_A .GLOBAL_B span {
+  color: #015;
+}
+div .LOCAL_local_a .LOCAL_local_b span {
+  color: #016;
+}
+div > .GLOBAL_A ~ .GLOBAL_B + span {
+  color: #017;
+}
+div > .LOCAL_local_a ~ .LOCAL_local_b + span {
+  color: #018;
+}
+div + .GLOBAL_A:hover {
+  color: #019;
+}
+div + .LOCAL_local_a:hover {
+  color: #01A;
+}
+.GLOBAL.LOCAL_local {
+  color: #01B;
+}
+.GLOBAL .LOCAL_local {
+  color: #01C;
+}
+& {
+  .GLOBAL {
+    & {
+      .LOCAL_local {
+        color: #01D;
+      }
+    }
+  }
+}
+
+/* LOCAL.local-css */
+.LOCAL_top_level {
+  color: #000;
+}
+.GLOBAL {
+  color: #001;
+}
+.LOCAL_local2 {
+  color: #002;
+}
+div.GLOBAL {
+  color: #003;
+}
+div.LOCAL_local2 {
+  color: #004;
+}
+div.LOCAL_top_level {
+  color: #005;
+}
+div.LOCAL_top_level {
+  color: #006;
+}
+div.GLOBAL {
+  color: #007;
+}
+div.LOCAL_local2 {
+  color: #008;
+}
+div:is(span).GLOBAL {
+  color: #009;
+}
+div:is(span).LOCAL_local2 {
+  color: #00A;
+}
+div#GLOBAL_A.GLOBAL_B.GLOBAL_C.LOCAL_local_a2.LOCAL_local_b2#LOCAL_local_c2 {
+  color: #00B;
+}
+div#GLOBAL_A .GLOBAL_B .GLOBAL_C.LOCAL_local_a2 .LOCAL_local_b2 #LOCAL_local_c2 {
+  color: #00C;
+}
+.LOCAL_nested {
+  &.GLOBAL {
+    color: #00D;
+  }
+  &.LOCAL_local2 {
+    color: #00E;
+  }
+  &.GLOBAL {
+    color: #00F;
+  }
+  &.LOCAL_local2 {
+    color: #010;
+  }
+}
+.GLOBAL_A .GLOBAL_B {
+  color: #011;
+}
+.LOCAL_local_a2 .LOCAL_local_b2 {
+  color: #012;
+}
+div.GLOBAL_A .GLOBAL_B:hover {
+  color: #013;
+}
+div.LOCAL_local_a2 .LOCAL_local_b2:hover {
+  color: #014;
+}
+div .GLOBAL_A .GLOBAL_B span {
+  color: #015;
+}
+div .LOCAL_local_a2 .LOCAL_local_b2 span {
+  color: #016;
+}
+div > .GLOBAL_A ~ .GLOBAL_B + span {
+  color: #017;
+}
+div > .LOCAL_local_a2 ~ .LOCAL_local_b2 + span {
+  color: #018;
+}
+div + .GLOBAL_A:hover {
+  color: #019;
+}
+div + .LOCAL_local_a2:hover {
+  color: #01A;
+}
+.GLOBAL.LOCAL_local2 {
+  color: #01B;
+}
+.GLOBAL .LOCAL_local2 {
+  color: #01C;
+}
+& {
+  .GLOBAL {
+    & {
+      .LOCAL_local2 {
+        color: #01D;
+      }
+    }
+  }
+}
+
+================================================================================
+TestImportCSSFromJSLowerBareLocalAndGlobal
+---------- /out/entry.js ----------
+// styles.css
+var styles_default = {
+  before: "styles_before",
+  button: "styles_button",
+  after: "styles_after"
+};
+
+// entry.js
+console.log(styles_default);
+
+---------- /out/entry.css ----------
+/* styles.css */
+.styles_before {
+  color: #000;
+}
+:scope .styles_button {
+  color: #000;
+}
+.styles_after {
+  color: #000;
+}
+.styles_before {
+  color: #001;
+}
+:scope .button {
+  color: #001;
+}
+.styles_after {
+  color: #001;
+}
+div .styles_button {
+  color: #002;
+}
+div .button {
+  color: #003;
+}
+:scope {
+  color: #004;
+}
+:scope {
+  color: #005;
+}
+:scope .styles_button {
+  color: #006;
+}
+:scope .styles_button {
+  color: #007;
+}
+
+================================================================================
+TestImportCSSFromJSNthIndexLocal
+---------- /out/entry.js ----------
+// styles.css
+var styles_default = {
+  local: "styles_local",
+  local1: "styles_local1",
+  local2: "styles_local2"
+};
+
+// entry.js
+console.log(styles_default);
+
+---------- /out/entry.css ----------
+/* styles.css */
+:nth-child(2n of .styles_local) {
+  color: #000;
+}
+:nth-child(2n of #styles_local, .GLOBAL) {
+  color: #001;
+}
+:nth-child(2n of .styles_local1 .GLOBAL1, .GLOBAL2 .styles_local2) {
+  color: #002;
+}
+.styles_local1,
+:nth-child(2n of .GLOBAL),
+.styles_local2 {
+  color: #003;
+}
+:nth-last-child(2n of .styles_local) {
+  color: #000;
+}
+:nth-last-child(2n of #styles_local, .GLOBAL) {
+  color: #001;
+}
+:nth-last-child(2n of .styles_local1 .GLOBAL1, .GLOBAL2 .styles_local2) {
+  color: #002;
+}
+.styles_local1,
+:nth-last-child(2n of .GLOBAL),
+.styles_local2 {
+  color: #003;
+}
+
+================================================================================
+TestImportGlobalCSSFromJS
+---------- /out/entry.js ----------
+// a.css
+var a_default = {};
+
 // a.js
-console.log("a");
+console.log("a", void 0, a_default.a);
+
+// b.css
+var b_default = {};
 
 // b.js
-console.log("b");
+console.log("b", void 0, b_default.b);
 
 ---------- /out/entry.css ----------
 /* a.css */
@@ -642,8 +1100,105 @@ console.log("b");
 }
 
 ================================================================================
+TestImportLocalCSSFromJS
+---------- /out/entry.js ----------
+// dir1/style.css
+var button = "style_button";
+var style_default = {
+  a: "style_a",
+  button
+};
+
+// a.js
+console.log("file 1", button, style_default.a);
+
+// dir2/style.css
+var button2 = "style_button2";
+var style_default2 = {
+  b: "style_b",
+  button: button2
+};
+
+// b.js
+console.log("file 2", button2, style_default2.b);
+
+---------- /out/entry.css ----------
+/* dir1/style.css */
+.style_a {
+  color: red;
+}
+.style_button {
+  display: none;
+}
+
+/* dir2/style.css */
+.style_b {
+  color: blue;
+}
+.style_button2 {
+  display: none;
+}
+
+================================================================================
+TestImportLocalCSSFromJSMinifyIdentifiers
+---------- /out/entry.js ----------
+// dir1/style.css
+var t = "l";
+var l = {
+  a: "o",
+  button: t
+};
+
+// a.js
+console.log("file 1", t, l.a);
+
+// dir2/style.css
+var e = "n";
+var n = {
+  b: "e",
+  button: e
+};
+
+// b.js
+console.log("file 2", e, n.b);
+
+---------- /out/entry.css ----------
+/* dir1/style.css */
+.o {
+  color: red;
+}
+.l {
+  display: none;
+}
+
+/* dir2/style.css */
+.e {
+  color: blue;
+}
+.n {
+  display: none;
+}
+
+================================================================================
+TestImportLocalCSSFromJSMinifyIdentifiersAvoidGlobalNames
+---------- /out/entry.js ----------
+
+---------- /out/entry.css ----------
+/* global.css */
+:is(.a, .b, .c, .d, .e, .f, .g, .h, .i, .j, .k, .l, .m, .n, .o, .p, .q, .r, .s, .t, .u, .v, .w, .x, .y, .z),
+:is(.A, .B, .C, .D, .E, .F, .G, .H, .I, .J, .K, .L, .M, .N, .O, .P, .Q, .R, .S, .T, .U, .V, .W, .X, .Y, .Z),
+._ {
+  color: red;
+}
+
+/* local.module.css */
+.oo {
+  color: blue;
+}
+
+================================================================================
 TestMetafileCSSBundleTwoToOne
----------- /out/js/UOATE6K4.js ----------
+---------- /out/js/2PSDKYWE.js ----------
 // foo/entry.js
 console.log("foo");
 
@@ -653,7 +1208,7 @@ body {
   color: red;
 }
 
----------- /out/js/6ZCNL5VY.js ----------
+---------- /out/js/MA6C7ZBK.js ----------
 // bar/entry.js
 console.log("bar");
 ---------- metafile.json ----------
@@ -687,7 +1242,7 @@ console.log("bar");
     }
   },
   "outputs": {
-    "out/js/UOATE6K4.js": {
+    "out/js/2PSDKYWE.js": {
       "imports": [],
       "exports": [],
       "entryPoint": "foo/entry.js",
@@ -711,7 +1266,7 @@ console.log("bar");
       },
       "bytes": 40
     },
-    "out/js/6ZCNL5VY.js": {
+    "out/js/MA6C7ZBK.js": {
       "imports": [],
       "exports": [],
       "entryPoint": "bar/entry.js",
@@ -755,3 +1310,59 @@ TestTextImportURLInCSSText
 a {
   background: url(data:text/plain;base64,VGhpcyBpcyBzb21lIHRleHQu);
 }
+
+================================================================================
+TestUndefinedImportWarningCSS
+---------- /out/entry.js ----------
+// empty.js
+var require_empty = __commonJS({
+  "empty.js"() {
+  }
+});
+
+// node_modules/pkg/empty.js
+var require_empty2 = __commonJS({
+  "node_modules/pkg/empty.js"() {
+  }
+});
+
+// entry.js
+var empty_js2 = __toESM(require_empty());
+var pkg_empty_js = __toESM(require_empty2());
+
+// node_modules/pkg/index.js
+var empty_js = __toESM(require_empty2());
+console.log(
+  void 0,
+  void 0,
+  void 0,
+  void 0,
+  void 0,
+  void 0
+);
+
+// entry.js
+console.log(
+  void 0,
+  void 0,
+  void 0,
+  void 0,
+  void 0,
+  void 0
+);
+console.log(
+  void 0,
+  void 0,
+  void 0,
+  void 0,
+  void 0,
+  void 0
+);
+
+---------- /out/entry.css ----------
+/* empty.css */
+/* empty.global-css */
+/* empty.local-css */
+/* node_modules/pkg/empty.css */
+/* node_modules/pkg/empty.global-css */
+/* node_modules/pkg/empty.local-css */

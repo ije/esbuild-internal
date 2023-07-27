@@ -301,27 +301,46 @@ var foo = bar();
 TestTSEnumCrossModuleInliningAccess
 ---------- /out/entry.js ----------
 // enums.ts
-var c = /* @__PURE__ */ ((c2) => {
-  c2[c2["x"] = 123] = "x";
-  return c2;
-})(c || {});
-var d = /* @__PURE__ */ ((d2) => {
-  d2[d2["x"] = 123] = "x";
-  return d2;
-})(d || {});
-var e = /* @__PURE__ */ ((e2) => {
-  e2[e2["x"] = 123] = "x";
-  return e2;
-})(e || {});
+var c_num = /* @__PURE__ */ ((c_num2) => {
+  c_num2[c_num2["x"] = 123] = "x";
+  return c_num2;
+})(c_num || {});
+var d_num = /* @__PURE__ */ ((d_num2) => {
+  d_num2[d_num2["x"] = 123] = "x";
+  return d_num2;
+})(d_num || {});
+var e_num = /* @__PURE__ */ ((e_num2) => {
+  e_num2[e_num2["x"] = 123] = "x";
+  return e_num2;
+})(e_num || {});
+var c_str = /* @__PURE__ */ ((c_str2) => {
+  c_str2["x"] = "abc";
+  return c_str2;
+})(c_str || {});
+var d_str = /* @__PURE__ */ ((d_str2) => {
+  d_str2["x"] = "abc";
+  return d_str2;
+})(d_str || {});
+var e_str = /* @__PURE__ */ ((e_str2) => {
+  e_str2["x"] = "abc";
+  return e_str2;
+})(e_str || {});
 
 // entry.ts
-console.log([
+inlined = [
   123 /* x */,
   123 /* x */,
-  c?.x,
-  d?.["x"],
-  e
-]);
+  "abc" /* x */,
+  "abc" /* x */
+];
+not_inlined = [
+  c_num?.x,
+  d_num?.["x"],
+  e_num,
+  c_str?.x,
+  d_str?.["x"],
+  e_str
+];
 
 ================================================================================
 TestTSEnumCrossModuleInliningDefinitions
@@ -486,25 +505,44 @@ var x;
 TestTSEnumSameModuleInliningAccess
 ---------- /out/entry.js ----------
 // entry.ts
-var c = /* @__PURE__ */ ((c2) => {
-  c2[c2["x"] = 123] = "x";
-  return c2;
-})(c || {});
-var d = /* @__PURE__ */ ((d2) => {
-  d2[d2["x"] = 123] = "x";
-  return d2;
-})(d || {});
-var e = /* @__PURE__ */ ((e2) => {
-  e2[e2["x"] = 123] = "x";
-  return e2;
-})(e || {});
-console.log([
+var c_num = /* @__PURE__ */ ((c_num2) => {
+  c_num2[c_num2["x"] = 123] = "x";
+  return c_num2;
+})(c_num || {});
+var d_num = /* @__PURE__ */ ((d_num2) => {
+  d_num2[d_num2["x"] = 123] = "x";
+  return d_num2;
+})(d_num || {});
+var e_num = /* @__PURE__ */ ((e_num2) => {
+  e_num2[e_num2["x"] = 123] = "x";
+  return e_num2;
+})(e_num || {});
+var c_str = /* @__PURE__ */ ((c_str2) => {
+  c_str2["x"] = "abc";
+  return c_str2;
+})(c_str || {});
+var d_str = /* @__PURE__ */ ((d_str2) => {
+  d_str2["x"] = "abc";
+  return d_str2;
+})(d_str || {});
+var e_str = /* @__PURE__ */ ((e_str2) => {
+  e_str2["x"] = "abc";
+  return e_str2;
+})(e_str || {});
+inlined = [
   123 /* x */,
   123 /* x */,
-  c?.x,
-  d?.["x"],
-  e
-]);
+  "abc" /* x */,
+  "abc" /* x */
+];
+not_inlined = [
+  c_num?.x,
+  d_num?.["x"],
+  e_num,
+  c_str?.x,
+  d_str?.["x"],
+  e_str
+];
 
 ================================================================================
 TestTSEnumTreeShaking
@@ -1375,6 +1413,36 @@ console.log("correct");
 // order-jsx.ts
 console.log("correct");
 
+// node_modules/pkg/foo-js.ts
+console.log("correct");
+
+// node_modules/pkg/foo-jsx.tsx
+console.log("correct");
+
+// node_modules/pkg-exports/abc-js.ts
+console.log("correct");
+
+// node_modules/pkg-exports/abc-jsx.tsx
+console.log("correct");
+
+// node_modules/pkg-exports/lib/foo-js.ts
+console.log("correct");
+
+// node_modules/pkg-exports/lib/foo-jsx.tsx
+console.log("correct");
+
+// node_modules/pkg-imports/abc-js.ts
+console.log("correct");
+
+// node_modules/pkg-imports/abc-jsx.tsx
+console.log("correct");
+
+// node_modules/pkg-imports/lib/foo-js.ts
+console.log("correct");
+
+// node_modules/pkg-imports/lib/foo-jsx.tsx
+console.log("correct");
+
 ================================================================================
 TestTSImportCTS
 ---------- /out.js ----------
@@ -1423,7 +1491,6 @@ TestTSImportEqualsTreeShakingFalse
 ---------- /out.js ----------
 import { foo } from "pkg";
 const used = foo.used;
-const unused = foo.unused;
 export { used };
 
 ================================================================================
@@ -1432,6 +1499,17 @@ TestTSImportEqualsTreeShakingTrue
 import { foo } from "pkg";
 const used = foo.used;
 export { used };
+
+================================================================================
+TestTSImportEqualsUndefinedImport
+---------- /out.js ----------
+// import.ts
+var value = 123;
+
+// entry.ts
+var value_copy = value;
+var foo = value_copy;
+console.log(foo);
 
 ================================================================================
 TestTSImportMTS
@@ -1609,6 +1687,45 @@ function foo(){let u;return(n=>(n[n.A=0]="A",n[n.B=1]="B",n[n.C=n]="C"))(u||(u={
 
 ---------- /b.js ----------
 export function foo(){let e;return(n=>(n[n.X=0]="X",n[n.Y=1]="Y",n[n.Z=n]="Z"))(e||(e={})),e}
+
+================================================================================
+TestTSNamespaceKeepNames
+---------- /out.js ----------
+// entry.ts
+var ns;
+((ns2) => {
+  ns2.foo = /* @__PURE__ */ __name(() => {
+  }, "foo");
+  function bar() {
+  }
+  ns2.bar = bar;
+  __name(bar, "bar");
+  class Baz {
+    static {
+      __name(this, "Baz");
+    }
+  }
+  ns2.Baz = Baz;
+})(ns || (ns = {}));
+
+================================================================================
+TestTSNamespaceKeepNamesTargetES2015
+---------- /out.js ----------
+// entry.ts
+var ns;
+((ns2) => {
+  ns2.foo = /* @__PURE__ */ __name(() => {
+  }, "foo");
+  function bar() {
+  }
+  ns2.bar = bar;
+  __name(bar, "bar");
+  const _Baz = class _Baz {
+  };
+  __name(_Baz, "Baz");
+  let Baz = _Baz;
+  ns2.Baz = _Baz;
+})(ns || (ns = {}));
 
 ================================================================================
 TestTSPreferJSOverTSInsideNodeModules

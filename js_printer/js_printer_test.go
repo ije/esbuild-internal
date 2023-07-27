@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ije/esbuild-internal/ast"
 	"github.com/ije/esbuild-internal/compat"
 	"github.com/ije/esbuild-internal/config"
-	"github.com/ije/esbuild-internal/js_ast"
 	"github.com/ije/esbuild-internal/js_parser"
 	"github.com/ije/esbuild-internal/logger"
 	"github.com/ije/esbuild-internal/renamer"
@@ -35,7 +35,7 @@ func expectPrintedCommon(t *testing.T, name string, contents string, expected st
 		if !ok {
 			t.Fatal("Parse error")
 		}
-		symbols := js_ast.NewSymbolMap(1)
+		symbols := ast.NewSymbolMap(1)
 		symbols.SymbolsForSource[0] = tree.Symbols
 		r := renamer.NewNoOpRenamer(symbols)
 		js := Print(tree, symbols, r, Options{

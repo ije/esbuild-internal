@@ -161,13 +161,12 @@ func TestCSSFromJSMissingStarImport(t *testing.T) {
 			Mode:         config.ModeBundle,
 			AbsOutputDir: "/out",
 		},
-		debugLogs: true,
-		expectedCompileLog: `entry.js: DEBUG: Import "missing" will always be undefined because there is no matching export in "a.css"
+		expectedCompileLog: `entry.js: WARNING: Import "missing" will always be undefined because there is no matching export in "a.css"
 `,
 	})
 }
 
-func TestImportCSSFromJS(t *testing.T) {
+func TestImportGlobalCSSFromJS(t *testing.T) {
 	css_suite.expectBundled(t, bundled{
 		files: map[string]string{
 			"/entry.js": `
@@ -175,15 +174,15 @@ func TestImportCSSFromJS(t *testing.T) {
 				import "./b.js"
 			`,
 			"/a.js": `
-				import "./a.css";
-				console.log('a')
+				import * as stylesA from "./a.css"
+				console.log('a', stylesA.a, stylesA.default.a)
 			`,
 			"/a.css": `
 				.a { color: red }
 			`,
 			"/b.js": `
-				import "./b.css";
-				console.log('b')
+				import * as stylesB from "./b.css"
+				console.log('b', stylesB.b, stylesB.default.b)
 			`,
 			"/b.css": `
 				.b { color: blue }
@@ -193,6 +192,262 @@ func TestImportCSSFromJS(t *testing.T) {
 		options: config.Options{
 			Mode:         config.ModeBundle,
 			AbsOutputDir: "/out",
+		},
+		expectedCompileLog: `a.js: WARNING: Import "a" will always be undefined because there is no matching export in "a.css"
+b.js: WARNING: Import "b" will always be undefined because there is no matching export in "b.css"
+`,
+	})
+}
+
+func TestImportLocalCSSFromJS(t *testing.T) {
+	css_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import "./a.js"
+				import "./b.js"
+			`,
+			"/a.js": `
+				import * as stylesA from "./dir1/style.css"
+				console.log('file 1', stylesA.button, stylesA.default.a)
+			`,
+			"/dir1/style.css": `
+				.a { color: red }
+				.button { display: none }
+			`,
+			"/b.js": `
+				import * as stylesB from "./dir2/style.css"
+				console.log('file 2', stylesB.button, stylesB.default.b)
+			`,
+			"/dir2/style.css": `
+				.b { color: blue }
+				.button { display: none }
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
+			ExtensionToLoader: map[string]config.Loader{
+				".js":  config.LoaderJS,
+				".css": config.LoaderLocalCSS,
+			},
+		},
+	})
+}
+
+func TestImportLocalCSSFromJSMinifyIdentifiers(t *testing.T) {
+	css_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import "./a.js"
+				import "./b.js"
+			`,
+			"/a.js": `
+				import * as stylesA from "./dir1/style.css"
+				console.log('file 1', stylesA.button, stylesA.default.a)
+			`,
+			"/dir1/style.css": `
+				.a { color: red }
+				.button { display: none }
+			`,
+			"/b.js": `
+				import * as stylesB from "./dir2/style.css"
+				console.log('file 2', stylesB.button, stylesB.default.b)
+			`,
+			"/dir2/style.css": `
+				.b { color: blue }
+				.button { display: none }
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
+			ExtensionToLoader: map[string]config.Loader{
+				".js":  config.LoaderJS,
+				".css": config.LoaderLocalCSS,
+			},
+			MinifyIdentifiers: true,
+		},
+	})
+}
+
+func TestImportLocalCSSFromJSMinifyIdentifiersAvoidGlobalNames(t *testing.T) {
+	css_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import "./global.css"
+				import "./local.module.css"
+			`,
+			"/global.css": `
+				:is(.a, .b, .c, .d, .e, .f, .g, .h, .i, .j, .k, .l, .m, .n, .o, .p, .q, .r, .s, .t, .u, .v, .w, .x, .y, .z),
+				:is(.A, .B, .C, .D, .E, .F, .G, .H, .I, .J, .K, .L, .M, .N, .O, .P, .Q, .R, .S, .T, .U, .V, .W, .X, .Y, .Z),
+				._ { color: red }
+			`,
+			"/local.module.css": `
+				.rename-this { color: blue }
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
+			ExtensionToLoader: map[string]config.Loader{
+				".js":         config.LoaderJS,
+				".css":        config.LoaderCSS,
+				".module.css": config.LoaderLocalCSS,
+			},
+			MinifyIdentifiers: true,
+		},
+	})
+}
+
+func TestImportCSSFromJSLocalVsGlobal(t *testing.T) {
+	css := `
+		.top_level { color: #000 }
+
+		:global(.GLOBAL) { color: #001 }
+		:local(.local) { color: #002 }
+
+		div:global(.GLOBAL) { color: #003 }
+		div:local(.local) { color: #004 }
+
+		.top_level:global(div) { color: #005 }
+		.top_level:local(div) { color: #006 }
+
+		:global(div.GLOBAL) { color: #007 }
+		:local(div.local) { color: #008 }
+
+		div:global(span.GLOBAL) { color: #009 }
+		div:local(span.local) { color: #00A }
+
+		div:global(#GLOBAL_A.GLOBAL_B.GLOBAL_C):local(.local_a.local_b#local_c) { color: #00B }
+		div:global(#GLOBAL_A .GLOBAL_B .GLOBAL_C):local(.local_a .local_b #local_c) { color: #00C }
+
+		.nested {
+			:global(&.GLOBAL) { color: #00D }
+			:local(&.local) { color: #00E }
+
+			&:global(.GLOBAL) { color: #00F }
+			&:local(.local) { color: #010 }
+		}
+
+		:global(.GLOBAL_A .GLOBAL_B) { color: #011 }
+		:local(.local_a .local_b) { color: #012 }
+
+		div:global(.GLOBAL_A .GLOBAL_B):hover { color: #013 }
+		div:local(.local_a .local_b):hover { color: #014 }
+
+		div :global(.GLOBAL_A .GLOBAL_B) span { color: #015 }
+		div :local(.local_a .local_b) span { color: #016 }
+
+		div > :global(.GLOBAL_A ~ .GLOBAL_B) + span { color: #017 }
+		div > :local(.local_a ~ .local_b) + span { color: #018 }
+
+		div:global(+ .GLOBAL_A):hover { color: #019 }
+		div:local(+ .local_a):hover { color: #01A }
+
+		:global.GLOBAL:local.local { color: #01B }
+		:global .GLOBAL :local .local { color: #01C }
+		:global { .GLOBAL { :local { .local { color: #01D } } } }
+	`
+
+	css_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import normalStyles from "./normal.css"
+				import globalStyles from "./LOCAL.global-css"
+				import localStyles from "./LOCAL.local-css"
+
+				console.log('should be empty:', normalStyles)
+				console.log('fewer local names:', globalStyles)
+				console.log('more local names:', localStyles)
+			`,
+			"/normal.css":       css,
+			"/LOCAL.global-css": css,
+			"/LOCAL.local-css":  css,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
+			ExtensionToLoader: map[string]config.Loader{
+				".js":         config.LoaderJS,
+				".css":        config.LoaderCSS,
+				".global-css": config.LoaderGlobalCSS,
+				".local-css":  config.LoaderLocalCSS,
+			},
+		},
+	})
+}
+
+func TestImportCSSFromJSLowerBareLocalAndGlobal(t *testing.T) {
+	css_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import styles from "./styles.css"
+				console.log(styles)
+			`,
+			"/styles.css": `
+				.before { color: #000 }
+				:local { .button { color: #000 } }
+				.after { color: #000 }
+
+				.before { color: #001 }
+				:global { .button { color: #001 } }
+				.after { color: #001 }
+
+				div { :local { .button { color: #002 } } }
+				div { :global { .button { color: #003 } } }
+
+				:local(:global) { color: #004 }
+				:global(:local) { color: #005 }
+
+				:local(:global) { .button { color: #006 } }
+				:global(:local) { .button { color: #007 } }
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
+			ExtensionToLoader: map[string]config.Loader{
+				".js":  config.LoaderJS,
+				".css": config.LoaderLocalCSS,
+			},
+			UnsupportedCSSFeatures: compat.Nesting,
+		},
+	})
+}
+
+func TestImportCSSFromJSNthIndexLocal(t *testing.T) {
+	css_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import styles from "./styles.css"
+				console.log(styles)
+			`,
+			"/styles.css": `
+				:nth-child(2n of .local) { color: #000 }
+				:nth-child(2n of :local(#local), :global(.GLOBAL)) { color: #001 }
+				:nth-child(2n of .local1 :global .GLOBAL1, .GLOBAL2 :local .local2) { color: #002 }
+				.local1, :nth-child(2n of :global .GLOBAL), .local2 { color: #003 }
+
+				:nth-last-child(2n of .local) { color: #000 }
+				:nth-last-child(2n of :local(#local), :global(.GLOBAL)) { color: #001 }
+				:nth-last-child(2n of .local1 :global .GLOBAL1, .GLOBAL2 :local .local2) { color: #002 }
+				.local1, :nth-last-child(2n of :global .GLOBAL), .local2 { color: #003 }
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
+			ExtensionToLoader: map[string]config.Loader{
+				".js":  config.LoaderJS,
+				".css": config.LoaderLocalCSS,
+			},
+			UnsupportedCSSFeatures: compat.Nesting,
 		},
 	})
 }
@@ -700,6 +955,13 @@ func TestCSSExternalQueryAndHashMatchIssue1822(t *testing.T) {
 func TestCSSNestingOldBrowser(t *testing.T) {
 	css_suite.expectBundled(t, bundled{
 		files: map[string]string{
+			// These are now the only two cases that warn about ":is" not being supported
+			"/two-type-selectors.css":   `a { .c b& { color: red; } }`,
+			"/two-parent-selectors.css": `a b { .c & { color: red; } }`,
+
+			// Make sure this only generates one warning (even though it generates ":is" three times)
+			"/only-one-warning.css": `.a, .b .c, .d { & > & { color: red; } }`,
+
 			"/nested-@layer.css":          `a { @layer base { color: red; } }`,
 			"/nested-@media.css":          `a { @media screen { color: red; } }`,
 			"/nested-ampersand-twice.css": `a { &, & { color: red; } }`,
@@ -738,6 +1000,11 @@ func TestCSSNestingOldBrowser(t *testing.T) {
 			"/page-no-warning.css": `@page { @top-left { background: red } }`,
 		},
 		entryPaths: []string{
+			"/two-type-selectors.css",
+			"/two-parent-selectors.css",
+
+			"/only-one-warning.css",
+
 			"/nested-@layer.css",
 			"/nested-@media.css",
 			"/nested-ampersand-twice.css",
@@ -780,31 +1047,12 @@ func TestCSSNestingOldBrowser(t *testing.T) {
 			UnsupportedCSSFeatures: compat.Nesting | compat.IsPseudoClass,
 			OriginalTargetEnv:      "chrome10",
 		},
-		expectedScanLog: `media-ampersand-first.css: WARNING: CSS nesting syntax is not supported in the configured target environment (chrome10)
-media-ampersand-second.css: WARNING: CSS nesting syntax is not supported in the configured target environment (chrome10)
-media-ampersand-twice.css: WARNING: CSS nesting syntax is not supported in the configured target environment (chrome10)
-media-ampersand-twice.css: WARNING: CSS nesting syntax is not supported in the configured target environment (chrome10)
-media-greaterthan.css: WARNING: CSS nesting syntax is not supported in the configured target environment (chrome10)
-media-plus.css: WARNING: CSS nesting syntax is not supported in the configured target environment (chrome10)
-media-tilde.css: WARNING: CSS nesting syntax is not supported in the configured target environment (chrome10)
-nested-@layer.css: WARNING: CSS nesting syntax is not supported in the configured target environment (chrome10)
-nested-@media.css: WARNING: CSS nesting syntax is not supported in the configured target environment (chrome10)
-nested-ampersand-first.css: WARNING: CSS nesting syntax is not supported in the configured target environment (chrome10)
-nested-ampersand-twice.css: WARNING: CSS nesting syntax is not supported in the configured target environment (chrome10)
-nested-attribute.css: WARNING: CSS nesting syntax is not supported in the configured target environment (chrome10)
-nested-colon.css: WARNING: CSS nesting syntax is not supported in the configured target environment (chrome10)
-nested-dot.css: WARNING: CSS nesting syntax is not supported in the configured target environment (chrome10)
-nested-greaterthan.css: WARNING: CSS nesting syntax is not supported in the configured target environment (chrome10)
-nested-hash.css: WARNING: CSS nesting syntax is not supported in the configured target environment (chrome10)
-nested-plus.css: WARNING: CSS nesting syntax is not supported in the configured target environment (chrome10)
-nested-tilde.css: WARNING: CSS nesting syntax is not supported in the configured target environment (chrome10)
-toplevel-ampersand-first.css: WARNING: CSS nesting syntax is not supported in the configured target environment (chrome10)
-toplevel-ampersand-second.css: WARNING: CSS nesting syntax is not supported in the configured target environment (chrome10)
-toplevel-ampersand-twice.css: WARNING: CSS nesting syntax is not supported in the configured target environment (chrome10)
-toplevel-ampersand-twice.css: WARNING: CSS nesting syntax is not supported in the configured target environment (chrome10)
-toplevel-greaterthan.css: WARNING: CSS nesting syntax is not supported in the configured target environment (chrome10)
-toplevel-plus.css: WARNING: CSS nesting syntax is not supported in the configured target environment (chrome10)
-toplevel-tilde.css: WARNING: CSS nesting syntax is not supported in the configured target environment (chrome10)
+		expectedScanLog: `only-one-warning.css: WARNING: Transforming this CSS nesting syntax is not supported in the configured target environment (chrome10)
+NOTE: The nesting transform for this case must generate an ":is(...)" but the configured target environment does not support the ":is" pseudo-class.
+two-parent-selectors.css: WARNING: Transforming this CSS nesting syntax is not supported in the configured target environment (chrome10)
+NOTE: The nesting transform for this case must generate an ":is(...)" but the configured target environment does not support the ":is" pseudo-class.
+two-type-selectors.css: WARNING: Transforming this CSS nesting syntax is not supported in the configured target environment (chrome10)
+NOTE: The nesting transform for this case must generate an ":is(...)" but the configured target environment does not support the ":is" pseudo-class.
 `,
 	})
 }
@@ -897,5 +1145,107 @@ func TestDeduplicateRules(t *testing.T) {
 			AbsOutputDir: "/out",
 			MinifySyntax: true,
 		},
+	})
+}
+
+// This test makes sure JS files that import local CSS names using the
+// wrong name (e.g. a typo) get a warning so that the problem is noticed.
+func TestUndefinedImportWarningCSS(t *testing.T) {
+	css_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import * as empty_js from './empty.js'
+				import * as empty_esm_js from './empty.esm.js'
+				import * as empty_json from './empty.json'
+				import * as empty_css from './empty.css'
+				import * as empty_global_css from './empty.global-css'
+				import * as empty_local_css from './empty.local-css'
+
+				import * as pkg_empty_js from 'pkg/empty.js'
+				import * as pkg_empty_esm_js from 'pkg/empty.esm.js'
+				import * as pkg_empty_json from 'pkg/empty.json'
+				import * as pkg_empty_css from 'pkg/empty.css'
+				import * as pkg_empty_global_css from 'pkg/empty.global-css'
+				import * as pkg_empty_local_css from 'pkg/empty.local-css'
+
+				import 'pkg'
+
+				console.log(
+					empty_js.foo,
+					empty_esm_js.foo,
+					empty_json.foo,
+					empty_css.foo,
+					empty_global_css.foo,
+					empty_local_css.foo,
+				)
+
+				console.log(
+					pkg_empty_js.foo,
+					pkg_empty_esm_js.foo,
+					pkg_empty_json.foo,
+					pkg_empty_css.foo,
+					pkg_empty_global_css.foo,
+					pkg_empty_local_css.foo,
+				)
+			`,
+
+			"/empty.js":         ``,
+			"/empty.esm.js":     `export {}`,
+			"/empty.json":       `{}`,
+			"/empty.css":        ``,
+			"/empty.global-css": ``,
+			"/empty.local-css":  ``,
+
+			"/node_modules/pkg/empty.js":         ``,
+			"/node_modules/pkg/empty.esm.js":     `export {}`,
+			"/node_modules/pkg/empty.json":       `{}`,
+			"/node_modules/pkg/empty.css":        ``,
+			"/node_modules/pkg/empty.global-css": ``,
+			"/node_modules/pkg/empty.local-css":  ``,
+
+			// Files inside of "node_modules" should not generate a warning
+			"/node_modules/pkg/index.js": `
+				import * as empty_js from './empty.js'
+				import * as empty_esm_js from './empty.esm.js'
+				import * as empty_json from './empty.json'
+				import * as empty_css from './empty.css'
+				import * as empty_global_css from './empty.global-css'
+				import * as empty_local_css from './empty.local-css'
+
+				console.log(
+					empty_js.foo,
+					empty_esm_js.foo,
+					empty_json.foo,
+					empty_css.foo,
+					empty_global_css.foo,
+					empty_local_css.foo,
+				)
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
+			ExtensionToLoader: map[string]config.Loader{
+				".js":         config.LoaderJS,
+				".json":       config.LoaderJSON,
+				".css":        config.LoaderCSS,
+				".global-css": config.LoaderGlobalCSS,
+				".local-css":  config.LoaderLocalCSS,
+			},
+		},
+		expectedCompileLog: `entry.js: WARNING: Import "foo" will always be undefined because the file "empty.js" has no exports
+entry.js: WARNING: Import "foo" will always be undefined because there is no matching export in "empty.esm.js"
+entry.js: WARNING: Import "foo" will always be undefined because there is no matching export in "empty.json"
+entry.js: WARNING: Import "foo" will always be undefined because there is no matching export in "empty.css"
+entry.js: WARNING: Import "foo" will always be undefined because there is no matching export in "empty.global-css"
+entry.js: WARNING: Import "foo" will always be undefined because there is no matching export in "empty.local-css"
+entry.js: WARNING: Import "foo" will always be undefined because the file "node_modules/pkg/empty.js" has no exports
+entry.js: WARNING: Import "foo" will always be undefined because there is no matching export in "node_modules/pkg/empty.esm.js"
+entry.js: WARNING: Import "foo" will always be undefined because there is no matching export in "node_modules/pkg/empty.json"
+entry.js: WARNING: Import "foo" will always be undefined because there is no matching export in "node_modules/pkg/empty.css"
+entry.js: WARNING: Import "foo" will always be undefined because there is no matching export in "node_modules/pkg/empty.global-css"
+entry.js: WARNING: Import "foo" will always be undefined because there is no matching export in "node_modules/pkg/empty.local-css"
+`,
 	})
 }

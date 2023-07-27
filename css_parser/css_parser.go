@@ -19,9 +19,15 @@ type parser struct {
 	log                logger.Log
 	source             logger.Source
 	tokens             []css_lexer.Token
+	allComments        []logger.Range
 	legalComments      []css_lexer.Comment
 	stack              []css_lexer.T
 	importRecords      []ast.ImportRecord
+	symbols            []ast.Symbol
+	defineLocs         map[ast.Ref]logger.Loc
+	localSymbolMap     map[string]ast.Ref
+	globalSymbolMap    map[string]ast.Ref
+	nestingWarnings    map[logger.Loc]struct{}
 	tracker            logger.LineColumnTracker
 	index              int
 	end                int
@@ -30,6 +36,7 @@ type parser struct {
 	prevError          logger.Loc
 	options            Options
 	shouldLowerNesting bool
+	makeLocalSymbols   bool
 }
 
 type Options struct {
@@ -41,22 +48,42 @@ type Options struct {
 	optionsThatSupportStructuralEquality
 }
 
+type symbolMode uint8
+
+const (
+	symbolModeDisabled symbolMode = iota
+	symbolModeGlobal
+	symbolModeLocal
+)
+
 type optionsThatSupportStructuralEquality struct {
 	originalTargetEnv      string
 	unsupportedCSSFeatures compat.CSSFeature
 	minifySyntax           bool
 	minifyWhitespace       bool
+	minifyIdentifiers      bool
+	symbolMode             symbolMode
 }
 
-func OptionsFromConfig(options *config.Options) Options {
+func OptionsFromConfig(loader config.Loader, options *config.Options) Options {
+	var symbolMode symbolMode
+	switch loader {
+	case config.LoaderGlobalCSS:
+		symbolMode = symbolModeGlobal
+	case config.LoaderLocalCSS:
+		symbolMode = symbolModeLocal
+	}
+
 	return Options{
 		cssPrefixData: options.CSSPrefixData,
 
 		optionsThatSupportStructuralEquality: optionsThatSupportStructuralEquality{
 			minifySyntax:           options.MinifySyntax,
 			minifyWhitespace:       options.MinifyWhitespace,
+			minifyIdentifiers:      options.MinifyIdentifiers,
 			unsupportedCSSFeatures: options.UnsupportedCSSFeatures,
 			originalTargetEnv:      options.OriginalTargetEnv,
+			symbolMode:             symbolMode,
 		},
 	}
 }
@@ -87,15 +114,22 @@ func (a *Options) Equal(b *Options) bool {
 }
 
 func Parse(log logger.Log, source logger.Source, options Options) css_ast.AST {
-	result := css_lexer.Tokenize(log, source)
+	result := css_lexer.Tokenize(log, source, css_lexer.Options{
+		RecordAllComments: options.minifyIdentifiers,
+	})
 	p := parser{
-		log:           log,
-		source:        source,
-		tracker:       logger.MakeLineColumnTracker(&source),
-		options:       options,
-		tokens:        result.Tokens,
-		legalComments: result.LegalComments,
-		prevError:     logger.Loc{Start: -1},
+		log:              log,
+		source:           source,
+		tracker:          logger.MakeLineColumnTracker(&source),
+		options:          options,
+		tokens:           result.Tokens,
+		allComments:      result.AllComments,
+		legalComments:    result.LegalComments,
+		prevError:        logger.Loc{Start: -1},
+		defineLocs:       make(map[ast.Ref]logger.Loc),
+		localSymbolMap:   make(map[string]ast.Ref),
+		globalSymbolMap:  make(map[string]ast.Ref),
+		makeLocalSymbols: options.symbolMode == symbolModeLocal,
 	}
 	p.end = len(p.tokens)
 	rules := p.parseListOfRules(ruleContext{
@@ -105,10 +139,48 @@ func Parse(log logger.Log, source logger.Source, options Options) css_ast.AST {
 	p.expect(css_lexer.TEndOfFile)
 	return css_ast.AST{
 		Rules:                rules,
+		CharFreq:             p.computeCharacterFrequency(),
+		Symbols:              p.symbols,
 		ImportRecords:        p.importRecords,
 		ApproximateLineCount: result.ApproximateLineCount,
 		SourceMapComment:     result.SourceMapComment,
+		DefineLocs:           p.defineLocs,
 	}
+}
+
+// Compute a character frequency histogram for everything that's not a bound
+// symbol. This is used to modify how minified names are generated for slightly
+// better gzip compression. Even though it's a very small win, we still do it
+// because it's simple to do and very cheap to compute.
+func (p *parser) computeCharacterFrequency() *ast.CharFreq {
+	if !p.options.minifyIdentifiers {
+		return nil
+	}
+
+	// Add everything in the file to the histogram
+	charFreq := &ast.CharFreq{}
+	charFreq.Scan(p.source.Contents, 1)
+
+	// Subtract out all comments
+	for _, commentRange := range p.allComments {
+		charFreq.Scan(p.source.TextForRange(commentRange), -1)
+	}
+
+	// Subtract out all import paths
+	for _, record := range p.importRecords {
+		if !record.SourceIndex.IsValid() {
+			charFreq.Scan(record.Path.Text, -1)
+		}
+	}
+
+	// Subtract out all symbols that will be minified
+	for _, symbol := range p.symbols {
+		if symbol.Kind == ast.SymbolLocalCSS {
+			charFreq.Scan(symbol.OriginalName, -int32(symbol.UseCountEstimate))
+		}
+	}
+
+	return charFreq
 }
 
 func (p *parser) advance() {
@@ -232,6 +304,37 @@ func (p *parser) unexpected() {
 	}
 }
 
+func (p *parser) symbolForName(loc logger.Loc, name string) ast.Ref {
+	var kind ast.SymbolKind
+	var scope map[string]ast.Ref
+
+	if p.makeLocalSymbols {
+		kind = ast.SymbolLocalCSS
+		scope = p.globalSymbolMap
+	} else {
+		kind = ast.SymbolGlobalCSS
+		scope = p.localSymbolMap
+	}
+
+	ref, ok := scope[name]
+	if !ok {
+		ref = ast.Ref{
+			SourceIndex: p.source.Index,
+			InnerIndex:  uint32(len(p.symbols)),
+		}
+		p.symbols = append(p.symbols, ast.Symbol{
+			Kind:         kind,
+			OriginalName: name,
+			Link:         ast.InvalidRef,
+		})
+		scope[name] = ref
+		p.defineLocs[ref] = loc
+	}
+
+	p.symbols[ref.InnerIndex].UseCountEstimate++
+	return ref
+}
+
 type ruleContext struct {
 	isTopLevel     bool
 	parseSelectors bool
@@ -321,8 +424,8 @@ loop:
 			}
 
 			// Lower CSS nesting if it's not supported (but only at the top level)
-			if context.isTopLevel && p.shouldLowerNesting {
-				rules = lowerNestingInRule(rule, rules)
+			if p.shouldLowerNesting && p.options.unsupportedCSSFeatures.Has(compat.Nesting) && context.isTopLevel {
+				rules = p.lowerNestingInRule(rule, rules)
 			} else {
 				rules = append(rules, rule)
 			}
@@ -343,14 +446,14 @@ loop:
 
 		var rule css_ast.Rule
 		if context.parseSelectors {
-			rule = p.parseSelectorRuleFrom(p.index, context.isTopLevel, parseSelectorOpts{})
+			rule = p.parseSelectorRule(context.isTopLevel, parseSelectorOpts{})
 		} else {
-			rule = p.parseQualifiedRuleFrom(p.index, parseQualifiedRuleOpts{isTopLevel: context.isTopLevel})
+			rule = p.parseQualifiedRule(parseQualifiedRuleOpts{isTopLevel: context.isTopLevel})
 		}
 
 		// Lower CSS nesting if it's not supported (but only at the top level)
-		if context.isTopLevel && p.shouldLowerNesting {
-			rules = lowerNestingInRule(rule, rules)
+		if p.shouldLowerNesting && p.options.unsupportedCSSFeatures.Has(compat.Nesting) && context.isTopLevel {
+			rules = p.lowerNestingInRule(rule, rules)
 		} else {
 			rules = append(rules, rule)
 		}
@@ -407,7 +510,7 @@ func (p *parser) parseListOfDeclarations(opts listOfDeclarationsOpts) (list []cs
 
 		case css_lexer.TAtKeyword:
 			if p.inSelectorSubtree > 0 {
-				p.reportUseOfNesting(p.current().Range, false)
+				p.shouldLowerNesting = true
 			}
 			list = append(list, p.parseAtRule(atRuleContext{
 				isDeclarationList:    true,
@@ -425,8 +528,8 @@ func (p *parser) parseListOfDeclarations(opts listOfDeclarationsOpts) (list []cs
 			css_lexer.TDelimPlus,
 			css_lexer.TDelimGreaterThan,
 			css_lexer.TDelimTilde:
-			p.reportUseOfNesting(p.current().Range, false)
-			list = append(list, p.parseSelectorRuleFrom(p.index, false, parseSelectorOpts{isDeclarationContext: true}))
+			p.shouldLowerNesting = true
+			list = append(list, p.parseSelectorRule(false, parseSelectorOpts{isDeclarationContext: true}))
 			foundNesting = true
 
 		default:
@@ -706,12 +809,12 @@ var nonDeprecatedElementsSupportedByIE7 = map[string]bool{
 func isSafeSelectors(complexSelectors []css_ast.ComplexSelector) bool {
 	for _, complex := range complexSelectors {
 		for _, compound := range complex.Selectors {
-			if compound.HasNestingSelector {
+			if compound.HasNestingSelector() {
 				// Bail because this is an extension: https://drafts.csswg.org/css-nesting-1/
 				return false
 			}
 
-			if compound.Combinator != 0 {
+			if compound.Combinator.Byte != 0 {
 				// "Before Internet Explorer 10, the combinator only works in standards mode"
 				// Reference: https://developer.mozilla.org/en-US/docs/Web/CSS/CSS_Selectors
 				return false
@@ -731,7 +834,7 @@ func isSafeSelectors(complexSelectors []css_ast.ComplexSelector) bool {
 			}
 
 			for _, ss := range compound.SubclassSelectors {
-				switch s := ss.(type) {
+				switch s := ss.Data.(type) {
 				case *css_ast.SSAttribute:
 					if s.MatcherModifier != 0 {
 						// Bail if we hit a case modifier, which doesn't work in IE at all
@@ -749,6 +852,10 @@ func isSafeSelectors(complexSelectors []css_ast.ComplexSelector) bool {
 							continue
 						}
 					}
+					return false
+
+				case *css_ast.SSPseudoClassWithSelectorList:
+					// These definitely don't work in IE 7
 					return false
 				}
 			}
@@ -882,6 +989,10 @@ var specialAtRules = map[string]atRuleKind{
 	// Container Queries
 	// Reference: https://drafts.csswg.org/css-contain-3/#container-rule
 	"container": atRuleInheritContext,
+
+	// Defining before-change style: the @starting-style rule
+	// Reference: https://drafts.csswg.org/css-transitions-2/#defining-before-change-style-the-starting-style-rule
+	"starting-style": atRuleInheritContext,
 }
 
 var atKnownRuleCanBeRemovedIfEmpty = map[string]bool{
@@ -1058,11 +1169,13 @@ abortRuleParser:
 					continue
 
 				case css_lexer.TCloseBrace:
+					closeBraceLoc := p.current().Range.Loc
 					p.advance()
 					return css_ast.Rule{Loc: atRange.Loc, Data: &css_ast.RAtKeyframes{
-						AtToken: atToken,
-						Name:    name,
-						Blocks:  blocks,
+						AtToken:       atToken,
+						Name:          name,
+						Blocks:        blocks,
+						CloseBraceLoc: closeBraceLoc,
 					}}
 
 				case css_lexer.TEndOfFile:
@@ -1074,6 +1187,7 @@ abortRuleParser:
 
 				default:
 					var selectors []string
+					var firstSelectorLoc logger.Loc
 
 				selectors:
 					for {
@@ -1087,13 +1201,18 @@ abortRuleParser:
 							blockMatchingLoc := p.current().Range.Loc
 							p.advance()
 							rules := p.parseListOfDeclarations(listOfDeclarationsOpts{})
-							p.expectWithMatchingLoc(css_lexer.TCloseBrace, blockMatchingLoc)
+							closeBraceLoc := p.current().Range.Loc
+							if !p.expectWithMatchingLoc(css_lexer.TCloseBrace, blockMatchingLoc) {
+								closeBraceLoc = logger.Loc{}
+							}
 
 							// "@keyframes { from {} to { color: red } }" => "@keyframes { to { color: red } }"
 							if !p.options.minifySyntax || len(rules) > 0 {
 								blocks = append(blocks, css_ast.KeyframeBlock{
-									Selectors: selectors,
-									Rules:     rules,
+									Selectors:     selectors,
+									Rules:         rules,
+									Loc:           firstSelectorLoc,
+									CloseBraceLoc: closeBraceLoc,
 								})
 							}
 							break selectors
@@ -1103,6 +1222,9 @@ abortRuleParser:
 							break badSyntax
 
 						case css_lexer.TIdent, css_lexer.TPercentage:
+							if firstSelectorLoc.Start == 0 {
+								firstSelectorLoc = p.current().Range.Loc
+							}
 							text := p.decoded()
 							if t.Kind == css_lexer.TIdent {
 								if text == "from" {
@@ -1196,8 +1318,11 @@ abortRuleParser:
 					parseSelectors: true,
 				})
 			}
-			p.expectWithMatchingLoc(css_lexer.TCloseBrace, matchingLoc)
-			return css_ast.Rule{Loc: atRange.Loc, Data: &css_ast.RAtLayer{Names: names, Rules: rules}}
+			closeBraceLoc := p.current().Range.Loc
+			if !p.expectWithMatchingLoc(css_lexer.TCloseBrace, matchingLoc) {
+				closeBraceLoc = logger.Loc{}
+			}
+			return css_ast.Rule{Loc: atRange.Loc, Data: &css_ast.RAtLayer{Names: names, Rules: rules, CloseBraceLoc: closeBraceLoc}}
 		}
 
 		// Handle lack of a block
@@ -1293,8 +1418,11 @@ prelude:
 		matchingLoc := p.current().Range.Loc
 		p.expect(css_lexer.TOpenBrace)
 		rules := p.parseListOfDeclarations(listOfDeclarationsOpts{})
-		p.expectWithMatchingLoc(css_lexer.TCloseBrace, matchingLoc)
-		return css_ast.Rule{Loc: atRange.Loc, Data: &css_ast.RKnownAt{AtToken: atToken, Prelude: prelude, Rules: rules}}
+		closeBraceLoc := p.current().Range.Loc
+		if !p.expectWithMatchingLoc(css_lexer.TCloseBrace, matchingLoc) {
+			closeBraceLoc = logger.Loc{}
+		}
+		return css_ast.Rule{Loc: atRange.Loc, Data: &css_ast.RKnownAt{AtToken: atToken, Prelude: prelude, Rules: rules, CloseBraceLoc: closeBraceLoc}}
 
 	case atRuleInheritContext:
 		// Parse known rules whose blocks consist of whatever the current context is
@@ -1310,8 +1438,11 @@ prelude:
 				parseSelectors: true,
 			})
 		}
-		p.expectWithMatchingLoc(css_lexer.TCloseBrace, matchingLoc)
-		return css_ast.Rule{Loc: atRange.Loc, Data: &css_ast.RKnownAt{AtToken: atToken, Prelude: prelude, Rules: rules}}
+		closeBraceLoc := p.current().Range.Loc
+		if !p.expectWithMatchingLoc(css_lexer.TCloseBrace, matchingLoc) {
+			closeBraceLoc = logger.Loc{}
+		}
+		return css_ast.Rule{Loc: atRange.Loc, Data: &css_ast.RKnownAt{AtToken: atToken, Prelude: prelude, Rules: rules, CloseBraceLoc: closeBraceLoc}}
 
 	case atRuleQualifiedOrEmpty:
 		matchingLoc := p.current().Range.Loc
@@ -1319,8 +1450,11 @@ prelude:
 			rules := p.parseListOfRules(ruleContext{
 				parseSelectors: true,
 			})
-			p.expectWithMatchingLoc(css_lexer.TCloseBrace, matchingLoc)
-			return css_ast.Rule{Loc: atRange.Loc, Data: &css_ast.RKnownAt{AtToken: atToken, Prelude: prelude, Rules: rules}}
+			closeBraceLoc := p.current().Range.Loc
+			if !p.expectWithMatchingLoc(css_lexer.TCloseBrace, matchingLoc) {
+				closeBraceLoc = logger.Loc{}
+			}
+			return css_ast.Rule{Loc: atRange.Loc, Data: &css_ast.RKnownAt{AtToken: atToken, Prelude: prelude, Rules: rules, CloseBraceLoc: closeBraceLoc}}
 		}
 		p.expect(css_lexer.TSemicolon)
 		return css_ast.Rule{Loc: atRange.Loc, Data: &css_ast.RKnownAt{AtToken: atToken, Prelude: prelude}}
@@ -1346,19 +1480,6 @@ func (p *parser) expectValidLayerNameIdent() (string, bool) {
 		return "", false
 	}
 	return text, true
-}
-
-func (p *parser) reportUseOfNesting(r logger.Range, didWarnAlready bool) {
-	if p.options.unsupportedCSSFeatures.Has(compat.Nesting) {
-		p.shouldLowerNesting = true
-		if p.options.unsupportedCSSFeatures.Has(compat.IsPseudoClass) && !didWarnAlready {
-			text := "CSS nesting syntax is not supported in the configured target environment"
-			if p.options.originalTargetEnv != "" {
-				text = fmt.Sprintf("%s (%s)", text, p.options.originalTargetEnv)
-			}
-			p.log.AddID(logger.MsgID_CSS_UnsupportedCSSNesting, logger.Warning, &p.tracker, r, text)
-		}
-	}
 }
 
 func (p *parser) convertTokens(tokens []css_lexer.Token) []css_ast.Token {
@@ -1416,6 +1537,7 @@ loop:
 			break loop
 		}
 		token := css_ast.Token{
+			Loc:        t.Range.Loc,
 			Kind:       t.Kind,
 			Text:       t.DecodedText(p.source.Contents),
 			Whitespace: nextWhitespace,
@@ -1708,7 +1830,13 @@ func mangleNumber(t string) (string, bool) {
 	return t, t != original
 }
 
-func (p *parser) parseSelectorRuleFrom(preludeStart int, isTopLevel bool, opts parseSelectorOpts) css_ast.Rule {
+func (p *parser) parseSelectorRule(isTopLevel bool, opts parseSelectorOpts) css_ast.Rule {
+	// Save and restore the local symbol state in case there are any bare
+	// ":global" or ":local" annotations. The effect of these should be scoped
+	// to within the selector rule.
+	local := p.makeLocalSymbols
+	preludeStart := p.index
+
 	// Try parsing the prelude as a selector list
 	if list, ok := p.parseSelectorList(opts); ok {
 		canInlineNoOpNesting := true
@@ -1733,25 +1861,35 @@ func (p *parser) parseSelectorRuleFrom(preludeStart int, isTopLevel bool, opts p
 				canInlineNoOpNesting: canInlineNoOpNesting,
 			})
 			p.inSelectorSubtree--
-			p.expectWithMatchingLoc(css_lexer.TCloseBrace, matchingLoc)
+			closeBraceLoc := p.current().Range.Loc
+			if p.expectWithMatchingLoc(css_lexer.TCloseBrace, matchingLoc) {
+				selector.CloseBraceLoc = closeBraceLoc
+			}
+			p.makeLocalSymbols = local
 			return css_ast.Rule{Loc: p.tokens[preludeStart].Range.Loc, Data: &selector}
 		}
 	}
 
+	p.makeLocalSymbols = local
+	p.index = preludeStart
+
 	// Otherwise, parse a generic qualified rule
-	return p.parseQualifiedRuleFrom(preludeStart, parseQualifiedRuleOpts{
-		isAlreadyInvalid: true,
-		isTopLevel:       isTopLevel,
+	return p.parseQualifiedRule(parseQualifiedRuleOpts{
+		isAlreadyInvalid:     true,
+		isTopLevel:           isTopLevel,
+		isDeclarationContext: opts.isDeclarationContext,
 	})
 }
 
 type parseQualifiedRuleOpts struct {
-	isAlreadyInvalid bool
-	isTopLevel       bool
+	isAlreadyInvalid     bool
+	isTopLevel           bool
+	isDeclarationContext bool
 }
 
-func (p *parser) parseQualifiedRuleFrom(preludeStart int, opts parseQualifiedRuleOpts) css_ast.Rule {
-	preludeLoc := p.tokens[preludeStart].Range.Loc
+func (p *parser) parseQualifiedRule(opts parseQualifiedRuleOpts) css_ast.Rule {
+	preludeStart := p.index
+	preludeLoc := p.current().Range.Loc
 
 loop:
 	for {
@@ -1763,11 +1901,16 @@ loop:
 			if !opts.isTopLevel {
 				break loop
 			}
-			p.parseComponentValue()
 
-		default:
-			p.parseComponentValue()
+		case css_lexer.TSemicolon:
+			if opts.isDeclarationContext {
+				return css_ast.Rule{Loc: preludeLoc, Data: &css_ast.RBadDeclaration{
+					Tokens: p.convertTokens(p.tokens[preludeStart:p.index]),
+				}}
+			}
 		}
+
+		p.parseComponentValue()
 	}
 
 	qualified := css_ast.RQualified{
@@ -1777,7 +1920,10 @@ loop:
 	matchingLoc := p.current().Range.Loc
 	if p.eat(css_lexer.TOpenBrace) {
 		qualified.Rules = p.parseListOfDeclarations(listOfDeclarationsOpts{})
-		p.expectWithMatchingLoc(css_lexer.TCloseBrace, matchingLoc)
+		closeBraceLoc := p.current().Range.Loc
+		if p.expectWithMatchingLoc(css_lexer.TCloseBrace, matchingLoc) {
+			qualified.CloseBraceLoc = closeBraceLoc
+		}
 	} else if !opts.isAlreadyInvalid {
 		p.expect(css_lexer.TOpenBrace)
 	}

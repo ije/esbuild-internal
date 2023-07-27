@@ -210,6 +210,9 @@ func TestTSTypes(t *testing.T) {
 	expectPrintedTS(t, "type x = {0: number, readonly 1: boolean}\n[]", "[];\n")
 	expectPrintedTS(t, "type x = {'a': number, readonly 'b': boolean}\n[]", "[];\n")
 	expectPrintedTS(t, "type\nFoo = {}", "type;\nFoo = {};\n")
+	expectPrintedTS(t, "export type\n{ Foo } \n x", "x;\n")
+	expectPrintedTS(t, "export type\n* from 'foo' \n x", "x;\n")
+	expectPrintedTS(t, "export type\n* as ns from 'foo' \n x", "x;\n")
 	expectParseErrorTS(t, "export type\nFoo = {}", "<stdin>: ERROR: Unexpected newline after \"type\"\n")
 	expectPrintedTS(t, "let x: {x: 'a', y: false, z: null}", "let x;\n")
 	expectPrintedTS(t, "let x: {foo(): void}", "let x;\n")
@@ -1597,6 +1600,16 @@ var Foo = /* @__PURE__ */ ((Foo) => {
   return Foo;
 })(Foo || {});
 bar = 0 /* FOO */;
+`)
+
+	// https://github.com/evanw/esbuild/issues/3205
+	expectPrintedTS(t, "(() => { const enum Foo { A } () => Foo.A })", `() => {
+  let Foo;
+  ((Foo) => {
+    Foo[Foo["A"] = 0] = "A";
+  })(Foo || (Foo = {}));
+  () => 0 /* A */;
+};
 `)
 }
 
