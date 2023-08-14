@@ -30,7 +30,51 @@ type AST struct {
 	Rules                []Rule
 	SourceMapComment     logger.Span
 	ApproximateLineCount int32
-	DefineLocs           map[ast.Ref]logger.Loc
+	LocalSymbols         []ast.LocRef
+	LocalScope           map[string]ast.LocRef
+	GlobalScope          map[string]ast.LocRef
+	Composes             map[ast.Ref]*Composes
+
+	// These contain all layer names in the file. It can be used to replace the
+	// layer-related side effects of importing this file. They are split into two
+	// groups (those before and after "@import" rules) so that the linker can put
+	// them in the right places.
+	LayersPreImport  [][]string
+	LayersPostImport [][]string
+}
+
+type Composes struct {
+	// Note that each of these can be either local or global. Local examples:
+	//
+	//   .foo { composes: bar }
+	//   .bar { color: red }
+	//
+	// Global examples:
+	//
+	//   .foo { composes: bar from global }
+	//   .foo :global { composes: bar }
+	//   .foo { :global { composes: bar } }
+	//   :global .bar { color: red }
+	//
+	Names []ast.LocRef
+
+	// Each of these is local in another file. For example:
+	//
+	//   .foo { composes: bar from "bar.css" }
+	//   .foo { composes: bar from url(bar.css) }
+	//
+	ImportedNames []ImportedComposesName
+
+	// This tracks what CSS properties each class uses so that we can warn when
+	// "composes" is used incorrectly to compose two classes from separate files
+	// that declare the same CSS properties.
+	Properties map[string]logger.Loc
+}
+
+type ImportedComposesName struct {
+	Alias             string
+	AliasLoc          logger.Loc
+	ImportRecordIndex uint32
 }
 
 // We create a lot of tokens, so make sure this layout is memory-efficient.
@@ -52,7 +96,11 @@ type Token struct {
 
 	// URL tokens have an associated import record at the top-level of the AST.
 	// This index points to that import record.
-	ImportRecordIndex uint32 // 4 bytes
+	//
+	// Symbol tokens have an associated symbol. This index is the "InnerIndex"
+	// of the "Ref" for this symbol. The "SourceIndex" for the "Ref" is just
+	// the source index of the file for this AST.
+	PayloadIndex uint32 // 4 bytes
 
 	// The division between the number and the unit for "TDimension" tokens.
 	UnitOffset uint16 // 2 bytes
@@ -89,6 +137,26 @@ const (
 type CrossFileEqualityCheck struct {
 	ImportRecordsA []ast.ImportRecord
 	ImportRecordsB []ast.ImportRecord
+	Symbols        ast.SymbolMap
+	SourceIndexA   uint32
+	SourceIndexB   uint32
+}
+
+func (check *CrossFileEqualityCheck) RefsAreEquivalent(a ast.Ref, b ast.Ref) bool {
+	if a == b {
+		return true
+	}
+	if check == nil || check.Symbols.SymbolsForSource == nil {
+		return false
+	}
+	a = ast.FollowSymbols(check.Symbols, a)
+	b = ast.FollowSymbols(check.Symbols, b)
+	if a == b {
+		return true
+	}
+	symbolA := check.Symbols.Get(a)
+	symbolB := check.Symbols.Get(b)
+	return symbolA.Kind == ast.SymbolGlobalCSS && symbolB.Kind == ast.SymbolGlobalCSS && symbolA.OriginalName == symbolB.OriginalName
 }
 
 func (a Token) Equal(b Token, check *CrossFileEqualityCheck) bool {
@@ -98,7 +166,7 @@ func (a Token) Equal(b Token, check *CrossFileEqualityCheck) bool {
 		if a.Kind == css_lexer.TURL {
 			if check == nil {
 				// If both tokens are in the same file, just compare the index
-				if a.ImportRecordIndex != b.ImportRecordIndex {
+				if a.PayloadIndex != b.PayloadIndex {
 					return false
 				}
 			} else {
@@ -109,8 +177,26 @@ func (a Token) Equal(b Token, check *CrossFileEqualityCheck) bool {
 				// linking, paths inside the bundle (e.g. due to the "copy" loader)
 				// should have already been converted into text (e.g. the "unique key"
 				// string).
-				if check.ImportRecordsA[a.ImportRecordIndex].Path.Text !=
-					check.ImportRecordsB[b.ImportRecordIndex].Path.Text {
+				if check.ImportRecordsA[a.PayloadIndex].Path.Text !=
+					check.ImportRecordsB[b.PayloadIndex].Path.Text {
+					return false
+				}
+			}
+		}
+
+		// Symbols should be compared based on the symbol reference instead of the
+		// original text
+		if a.Kind == css_lexer.TSymbol {
+			if check == nil {
+				// If both tokens are in the same file, just compare the index
+				if a.PayloadIndex != b.PayloadIndex {
+					return false
+				}
+			} else {
+				// If the tokens come from separate files, compare the symbols themselves
+				refA := ast.Ref{SourceIndex: check.SourceIndexA, InnerIndex: a.PayloadIndex}
+				refB := ast.Ref{SourceIndex: check.SourceIndexB, InnerIndex: b.PayloadIndex}
+				if !check.RefsAreEquivalent(refA, refB) {
 					return false
 				}
 			}
@@ -157,7 +243,7 @@ func HashTokens(hash uint32, tokens []Token) uint32 {
 }
 
 func (a Token) EqualIgnoringWhitespace(b Token) bool {
-	if a.Kind == b.Kind && a.Text == b.Text && a.ImportRecordIndex == b.ImportRecordIndex {
+	if a.Kind == b.Kind && a.Text == b.Text && a.PayloadIndex == b.PayloadIndex {
 		if a.Children == nil && b.Children == nil {
 			return true
 		}
@@ -283,12 +369,20 @@ func CloneTokensWithImportRecords(
 	tokensIn []Token, importRecordsIn []ast.ImportRecord,
 	tokensOut []Token, importRecordsOut []ast.ImportRecord,
 ) ([]Token, []ast.ImportRecord) {
+	// Preallocate the output array if we can
+	if tokensOut == nil {
+		tokensOut = make([]Token, 0, len(tokensIn))
+	}
+
 	for _, t := range tokensIn {
+		// Clear the source mapping if this token is being used in another file
+		t.Loc.Start = 0
+
 		// If this is a URL token, also clone the import record
 		if t.Kind == css_lexer.TURL {
 			importRecordIndex := uint32(len(importRecordsOut))
-			importRecordsOut = append(importRecordsOut, importRecordsIn[t.ImportRecordIndex])
-			t.ImportRecordIndex = importRecordIndex
+			importRecordsOut = append(importRecordsOut, importRecordsIn[t.PayloadIndex])
+			t.PayloadIndex = importRecordIndex
 		}
 
 		// Also search for URL tokens in this token's children
@@ -353,8 +447,41 @@ func (r *RAtCharset) Hash() (uint32, bool) {
 	return hash, true
 }
 
+type ImportConditions struct {
+	// The syntax for "@import" has been extended with optional conditions that
+	// behave as if the imported file was wrapped in a "@layer", "@supports",
+	// and/or "@media" rule. The possible syntax combinations are as follows:
+	//
+	//   @import url(...);
+	//   @import url(...) layer;
+	//   @import url(...) layer(layer-name);
+	//   @import url(...) layer(layer-name) supports(supports-condition);
+	//   @import url(...) layer(layer-name) supports(supports-condition) list-of-media-queries;
+	//   @import url(...) layer(layer-name) list-of-media-queries;
+	//   @import url(...) supports(supports-condition);
+	//   @import url(...) supports(supports-condition) list-of-media-queries;
+	//   @import url(...) list-of-media-queries;
+	//
+	// From: https://developer.mozilla.org/en-US/docs/Web/CSS/@import#syntax
+	Media []Token
+
+	// These two fields will only ever have zero or one tokens. However, they are
+	// implemented as arrays for convenience because most of esbuild's helper
+	// functions that operate on tokens take arrays instead of individual tokens.
+	Layers   []Token
+	Supports []Token
+}
+
+func (c *ImportConditions) CloneWithImportRecords(importRecordsIn []ast.ImportRecord, importRecordsOut []ast.ImportRecord) (ImportConditions, []ast.ImportRecord) {
+	result := ImportConditions{}
+	result.Layers, importRecordsOut = CloneTokensWithImportRecords(c.Layers, importRecordsIn, nil, importRecordsOut)
+	result.Supports, importRecordsOut = CloneTokensWithImportRecords(c.Supports, importRecordsIn, nil, importRecordsOut)
+	result.Media, importRecordsOut = CloneTokensWithImportRecords(c.Media, importRecordsIn, nil, importRecordsOut)
+	return result, importRecordsOut
+}
+
 type RAtImport struct {
-	ImportConditions  []Token
+	ImportConditions  *ImportConditions
 	ImportRecordIndex uint32
 }
 
@@ -368,7 +495,7 @@ func (r *RAtImport) Hash() (uint32, bool) {
 
 type RAtKeyframes struct {
 	AtToken       string
-	Name          string
+	Name          ast.LocRef
 	Blocks        []KeyframeBlock
 	CloseBraceLoc logger.Loc
 }
@@ -381,7 +508,7 @@ type KeyframeBlock struct {
 }
 
 func (a *RAtKeyframes) Equal(rule R, check *CrossFileEqualityCheck) bool {
-	if b, ok := rule.(*RAtKeyframes); ok && a.AtToken == b.AtToken && a.Name == b.Name && len(a.Blocks) == len(b.Blocks) {
+	if b, ok := rule.(*RAtKeyframes); ok && a.AtToken == b.AtToken && check.RefsAreEquivalent(a.Name.Ref, b.Name.Ref) && len(a.Blocks) == len(b.Blocks) {
 		for i, ai := range a.Blocks {
 			bi := b.Blocks[i]
 			if len(ai.Selectors) != len(bi.Selectors) {
@@ -404,7 +531,6 @@ func (a *RAtKeyframes) Equal(rule R, check *CrossFileEqualityCheck) bool {
 func (r *RAtKeyframes) Hash() (uint32, bool) {
 	hash := uint32(2)
 	hash = helpers.HashCombineString(hash, r.AtToken)
-	hash = helpers.HashCombineString(hash, r.Name)
 	hash = helpers.HashCombine(hash, uint32(len(r.Blocks)))
 	for _, block := range r.Blocks {
 		hash = helpers.HashCombine(hash, uint32(len(block.Selectors)))
@@ -736,6 +862,9 @@ type CompoundSelector struct {
 	SubclassSelectors  []SubclassSelector
 	NestingSelectorLoc ast.Index32 // "&"
 	Combinator         Combinator  // Optional, may be 0
+
+	// If this is true, this is a "&" that was generated by a bare ":local" or ":global"
+	WasEmptyFromLocalOrGlobal bool
 }
 
 func (sel *CompoundSelector) HasNestingSelector() bool {
@@ -750,17 +879,22 @@ func (sel CompoundSelector) IsInvalidBecauseEmpty() bool {
 	return !sel.HasNestingSelector() && sel.TypeSelector == nil && len(sel.SubclassSelectors) == 0
 }
 
-func (sel CompoundSelector) FirstLoc() logger.Loc {
-	var firstLoc ast.Index32
+func (sel CompoundSelector) Range() (r logger.Range) {
+	if sel.Combinator.Byte != 0 {
+		r = logger.Range{Loc: sel.Combinator.Loc, Len: 1}
+	}
 	if sel.TypeSelector != nil {
-		firstLoc = ast.MakeIndex32(uint32(sel.TypeSelector.FirstLoc().Start))
-	} else if len(sel.SubclassSelectors) > 0 {
-		firstLoc = ast.MakeIndex32(uint32(sel.SubclassSelectors[0].Loc.Start))
+		r.ExpandBy(sel.TypeSelector.Range())
 	}
-	if firstLoc.IsValid() && (!sel.NestingSelectorLoc.IsValid() || firstLoc.GetIndex() < sel.NestingSelectorLoc.GetIndex()) {
-		return logger.Loc{Start: int32(firstLoc.GetIndex())}
+	if sel.NestingSelectorLoc.IsValid() {
+		r.ExpandBy(logger.Range{Loc: logger.Loc{Start: int32(sel.NestingSelectorLoc.GetIndex())}, Len: 1})
 	}
-	return logger.Loc{Start: int32(sel.NestingSelectorLoc.GetIndex())}
+	if len(sel.SubclassSelectors) > 0 {
+		for _, ss := range sel.SubclassSelectors {
+			r.ExpandBy(ss.Range)
+		}
+	}
+	return
 }
 
 func (sel CompoundSelector) Clone() CompoundSelector {
@@ -784,9 +918,9 @@ func (sel CompoundSelector) Clone() CompoundSelector {
 }
 
 type NameToken struct {
-	Text string
-	Loc  logger.Loc
-	Kind css_lexer.T
+	Text  string
+	Range logger.Range
+	Kind  css_lexer.T
 }
 
 func (a NameToken) Equal(b NameToken) bool {
@@ -801,11 +935,12 @@ type NamespacedName struct {
 	Name NameToken
 }
 
-func (n NamespacedName) FirstLoc() logger.Loc {
+func (n NamespacedName) Range() logger.Range {
 	if n.NamespacePrefix != nil {
-		return n.NamespacePrefix.Loc
+		loc := n.NamespacePrefix.Range.Loc
+		return logger.Range{Loc: loc, Len: n.Name.Range.End() - loc.Start}
 	}
-	return n.Name.Loc
+	return n.Name.Range
 }
 
 func (n NamespacedName) Clone() NamespacedName {
@@ -823,8 +958,8 @@ func (a NamespacedName) Equal(b NamespacedName) bool {
 }
 
 type SubclassSelector struct {
-	Data SS
-	Loc  logger.Loc
+	Data  SS
+	Range logger.Range
 }
 
 type SS interface {
@@ -839,13 +974,11 @@ type SSHash struct {
 
 func (a *SSHash) Equal(ss SS, check *CrossFileEqualityCheck) bool {
 	b, ok := ss.(*SSHash)
-	return ok && a.Name.Ref == b.Name.Ref
+	return ok && check.RefsAreEquivalent(a.Name.Ref, b.Name.Ref)
 }
 
 func (ss *SSHash) Hash() uint32 {
 	hash := uint32(1)
-	hash = helpers.HashCombine(hash, ss.Name.Ref.SourceIndex)
-	hash = helpers.HashCombine(hash, ss.Name.Ref.InnerIndex)
 	return hash
 }
 
@@ -860,13 +993,11 @@ type SSClass struct {
 
 func (a *SSClass) Equal(ss SS, check *CrossFileEqualityCheck) bool {
 	b, ok := ss.(*SSClass)
-	return ok && a.Name.Ref == b.Name.Ref
+	return ok && check.RefsAreEquivalent(a.Name.Ref, b.Name.Ref)
 }
 
 func (ss *SSClass) Hash() uint32 {
 	hash := uint32(2)
-	hash = helpers.HashCombine(hash, ss.Name.Ref.SourceIndex)
-	hash = helpers.HashCombine(hash, ss.Name.Ref.InnerIndex)
 	return hash
 }
 

@@ -1,5 +1,485 @@
 # Changelog
 
+## 0.19.2
+
+* Update how CSS nesting is parsed again
+
+    CSS nesting syntax has been changed again, and esbuild has been updated to match. Type selectors may now be used with CSS nesting:
+
+    ```css
+    .foo {
+      div {
+        color: red;
+      }
+    }
+    ```
+
+    Previously this was disallowed in the CSS specification because it's ambiguous whether an identifier is a declaration or a nested rule starting with a type selector without requiring unbounded lookahead in the parser. It has now been allowed because the CSS working group has decided that requiring unbounded lookahead is acceptable after all.
+
+    Note that this change means esbuild no longer considers any existing browser to support CSS nesting since none of the existing browsers support this new syntax. CSS nesting will now always be transformed when targeting a browser. This situation will change in the future as browsers add support for this new syntax.
+
+* Fix a scope-related bug with `--drop-labels=` ([#3311](https://github.com/evanw/esbuild/issues/3311))
+
+    The recently-released `--drop-labels=` feature previously had a bug where esbuild's internal scope stack wasn't being restored properly when a statement with a label was dropped. This could manifest as a tree-shaking issue, although it's possible that this could have also been causing other subtle problems too. The bug has been fixed in this release.
+
+* Make renamed CSS names unique across entry points ([#3295](https://github.com/evanw/esbuild/issues/3295))
+
+    Previously esbuild's generated names for local names in CSS were only unique within a given entry point (or across all entry points when code splitting was enabled). That meant that building multiple entry points with esbuild could result in local names being renamed to the same identifier even when those entry points were built simultaneously within a single esbuild API call. This problem was especially likely to happen with minification enabled. With this release, esbuild will now avoid renaming local names from two separate entry points to the same name if those entry points were built with a single esbuild API call, even when code splitting is disabled.
+
+* Fix CSS ordering bug with `@layer` before `@import`
+
+    CSS lets you put `@layer` rules before `@import` rules to define the order of layers in a stylesheet. Previously esbuild's CSS bundler incorrectly ordered these after the imported files because before the introduction of cascade layers to CSS, imported files could be bundled by removing the `@import` rules and then joining files together in the right order. But with `@layer`, CSS files may now need to be split apart into multiple pieces in the bundle. For example:
+
+    ```
+    /* Original code */
+    @layer start;
+    @import "data:text/css,@layer inner.start;";
+    @import "data:text/css,@layer inner.end;";
+    @layer end;
+
+    /* Old output (with --bundle) */
+    @layer inner.start;
+    @layer inner.end;
+    @layer start;
+    @layer end;
+
+    /* New output (with --bundle) */
+    @layer start;
+    @layer inner.start;
+    @layer inner.end;
+    @layer end;
+    ```
+
+* Unwrap nested duplicate `@media` rules ([#3226](https://github.com/evanw/esbuild/issues/3226))
+
+    With this release, esbuild's CSS minifier will now automatically unwrap duplicate nested `@media` rules:
+
+    ```css
+    /* Original code */
+    @media (min-width: 1024px) {
+      .foo { color: red }
+      @media (min-width: 1024px) {
+        .bar { color: blue }
+      }
+    }
+
+    /* Old output (with --minify) */
+    @media (min-width: 1024px){.foo{color:red}@media (min-width: 1024px){.bar{color:#00f}}}
+
+    /* New output (with --minify) */
+    @media (min-width: 1024px){.foo{color:red}.bar{color:#00f}}
+    ```
+
+    These rules are unlikely to be authored manually but may result from using frameworks such as Tailwind to generate CSS.
+
+## 0.19.1
+
+* Fix a regression with `baseURL` in `tsconfig.json` ([#3307](https://github.com/evanw/esbuild/issues/3307))
+
+    The previous release moved `tsconfig.json` path resolution before `--packages=external` checks to allow the [`paths` field](https://www.typescriptlang.org/tsconfig#paths) in `tsconfig.json` to avoid a package being marked as external. However, that reordering accidentally broke the behavior of the `baseURL` field from `tsconfig.json`. This release moves these path resolution rules around again in an attempt to allow both of these cases to work.
+
+* Parse TypeScript type arguments for JavaScript decorators ([#3308](https://github.com/evanw/esbuild/issues/3308))
+
+    When parsing JavaScript decorators in TypeScript (i.e. with `experimentalDecorators` disabled), esbuild previously didn't parse type arguments. Type arguments will now be parsed starting with this release. For example:
+
+    ```ts
+    @foo<number>
+    @bar<number, string>()
+    class Foo {}
+    ```
+
+* Fix glob patterns matching extra stuff at the end ([#3306](https://github.com/evanw/esbuild/issues/3306))
+
+    Previously glob patterns such as `./*.js` would incorrectly behave like `./*.js*` during path matching (also matching `.js.map` files, for example). This was never intentional behavior, and has now been fixed.
+
+* Change the permissions of esbuild's generated output files ([#3285](https://github.com/evanw/esbuild/issues/3285))
+
+    This release changes the permissions of the output files that esbuild generates to align with the default behavior of node's [`fs.writeFileSync`](https://nodejs.org/api/fs.html#fswritefilesyncfile-data-options) function. Since most tools written in JavaScript use `fs.writeFileSync`, this should make esbuild more consistent with how other JavaScript build tools behave.
+
+    The full Unix-y details: Unix permissions use three-digit octal notation where the three digits mean "user, group, other" in that order. Within a digit, 4 means "read" and 2 means "write" and 1 means "execute". So 6 == 4 + 2 == read + write. Previously esbuild uses 0644 permissions (the leading 0 means octal notation) but the permissions for `fs.writeFileSync` defaults to 0666, so esbuild will now use 0666 permissions. This does not necessarily mean that the files esbuild generates will end up having 0666 permissions, however, as there is another Unix feature called "umask" where the operating system masks out some of these bits. If your umask is set to 0022 then the generated files will have 0644 permissions, and if your umask is set to 0002 then the generated files will have 0664 permissions.
+
+* Fix a subtle CSS ordering issue with `@import` and `@layer`
+
+    With this release, esbuild may now introduce additional `@layer` rules when bundling CSS to better preserve the layer ordering of the input code. Here's an example of an edge case where this matters:
+
+    ```css
+    /* entry.css */
+    @import "a.css";
+    @import "b.css";
+    @import "a.css";
+    ```
+
+    ```css
+    /* a.css */
+    @layer a {
+      body {
+        background: red;
+      }
+    }
+    ```
+
+    ```css
+    /* b.css */
+    @layer b {
+      body {
+        background: green;
+      }
+    }
+    ```
+
+    This CSS should set the body background to `green`, which is what happens in the browser. Previously esbuild generated the following output which incorrectly sets the body background to `red`:
+
+    ```css
+    /* b.css */
+    @layer b {
+      body {
+        background: green;
+      }
+    }
+
+    /* a.css */
+    @layer a {
+      body {
+        background: red;
+      }
+    }
+    ```
+
+    This difference in behavior is because the browser evaluates `a.css` + `b.css` + `a.css` (in CSS, each `@import` is replaced with a copy of the imported file) while esbuild was only writing out `b.css` + `a.css`. The first copy of `a.css` wasn't being written out by esbuild for two reasons: 1) bundlers care about code size and try to avoid emitting duplicate CSS and 2) when there are multiple copies of a CSS file, normally only the _last_ copy matters since the last declaration with equal specificity wins in CSS.
+
+    However, `@layer` was recently added to CSS and for `@layer` the _first_ copy matters because layers are ordered using their first location in source code order. This introduction of `@layer` means esbuild needs to change its bundling algorithm. An easy solution would be for esbuild to write out `a.css` twice, but that would be inefficient. So what I'm going to try to have esbuild do with this release is to write out an abbreviated form of the first copy of a CSS file that only includes the `@layer` information, and then still only write out the full CSS file once for the last copy. So esbuild's output for this edge case now looks like this:
+
+    ```css
+    /* a.css */
+    @layer a;
+
+    /* b.css */
+    @layer b {
+      body {
+        background: green;
+      }
+    }
+
+    /* a.css */
+    @layer a {
+      body {
+        background: red;
+      }
+    }
+    ```
+
+    The behavior of the bundled CSS now matches the behavior of the unbundled CSS. You may be wondering why esbuild doesn't just write out `a.css` first followed by `b.css`. That would work in this case but it doesn't work in general because for any rules outside of a `@layer` rule, the last copy should still win instead of the first copy.
+
+* Fix a bug with esbuild's TypeScript type definitions ([#3299](https://github.com/evanw/esbuild/pull/3299))
+
+    This release fixes a copy/paste error with the TypeScript type definitions for esbuild's JS API:
+
+    ```diff
+     export interface TsconfigRaw {
+       compilerOptions?: {
+    -    baseUrl?: boolean
+    +    baseUrl?: string
+         ...
+       }
+     }
+    ```
+
+    This fix was contributed by [@privatenumber](https://github.com/privatenumber).
+
+## 0.19.0
+
+**This release deliberately contains backwards-incompatible changes.** To avoid automatically picking up releases like this, you should either be pinning the exact version of `esbuild` in your `package.json` file (recommended) or be using a version range syntax that only accepts patch upgrades such as `^0.18.0` or `~0.18.0`. See npm's documentation about [semver](https://docs.npmjs.com/cli/v6/using-npm/semver/) for more information.
+
+* Handle import paths containing wildcards ([#56](https://github.com/evanw/esbuild/issues/56), [#700](https://github.com/evanw/esbuild/issues/700), [#875](https://github.com/evanw/esbuild/issues/875), [#976](https://github.com/evanw/esbuild/issues/976), [#2221](https://github.com/evanw/esbuild/issues/2221), [#2515](https://github.com/evanw/esbuild/issues/2515))
+
+    This release introduces wildcards in import paths in two places:
+
+    * **Entry points**
+
+        You can now pass a string containing glob-style wildcards such as `./src/*.ts` as an entry point and esbuild will search the file system for files that match the pattern. This can be used to easily pass esbuild all files with a certain extension on the command line in a cross-platform way. Previously you had to rely on the shell to perform glob expansion, but that is obviously shell-dependent and didn't work at all on Windows. Note that to use this feature on the command line you will have to quote the pattern so it's passed verbatim to esbuild without any expansion by the shell. Here's an example:
+
+        ```sh
+        esbuild --minify "./src/*.ts" --outdir=out
+        ```
+
+        Specifically the `*` character will match any character except for the `/` character, and the `/**/` character sequence will match a path separator followed by zero or more path elements. Other wildcard operators found in glob patterns such as `?` and `[...]` are not supported.
+
+    * **Run-time import paths**
+
+        Import paths that are evaluated at run-time can now be bundled in certain limited situations. The import path expression must be a form of string concatenation and must start with either `./` or `../`. Each non-string expression in the string concatenation chain becomes a wildcard. The `*` wildcard is chosen unless the previous character is a `/`, in which case the `/**/*` character sequence is used. Some examples:
+
+        ```js
+        // These two forms are equivalent
+        const json1 = await import('./data/' + kind + '.json')
+        const json2 = await import(`./data/${kind}.json`)
+        ```
+
+        This feature works with `require(...)` and `import(...)` because these can all accept run-time expressions. It does not work with `import` and `export` statements because these cannot accept run-time expressions. If you want to prevent esbuild from trying to bundle these imports, you should move the string concatenation expression outside of the `require(...)` or `import(...)`. For example:
+
+        ```js
+        // This will be bundled
+        const json1 = await import('./data/' + kind + '.json')
+
+        // This will not be bundled
+        const path = './data/' + kind + '.json'
+        const json2 = await import(path)
+        ```
+
+        Note that using this feature means esbuild will potentially do a lot of file system I/O to find all possible files that might match the pattern. This is by design, and is not a bug. If this is a concern, I recommend either avoiding the `/**/` pattern (e.g. by not putting a `/` before a wildcard) or using this feature only in directory subtrees which do not have many files that don't match the pattern (e.g. making a subdirectory for your JSON files and explicitly including that subdirectory in the pattern).
+
+* Path aliases in `tsconfig.json` no longer count as packages ([#2792](https://github.com/evanw/esbuild/issues/2792), [#3003](https://github.com/evanw/esbuild/issues/3003), [#3160](https://github.com/evanw/esbuild/issues/3160), [#3238](https://github.com/evanw/esbuild/issues/3238))
+
+    Setting `--packages=external` tells esbuild to make all import paths external when they look like a package path. For example, an import of `./foo/bar` is not a package path and won't be external while an import of `foo/bar` is a package path and will be external. However, the [`paths` field](https://www.typescriptlang.org/tsconfig#paths) in `tsconfig.json` allows you to create import paths that look like package paths but that do not resolve to packages. People do not want these paths to count as package paths. So with this release, the behavior of `--packages=external` has been changed to happen after the `tsconfig.json` path remapping step.
+
+* Use the `local-css` loader for `.module.css` files by default ([#20](https://github.com/evanw/esbuild/issues/20))
+
+    With this release the `css` loader is still used for `.css` files except that `.module.css` files now use the `local-css` loader. This is a common convention in the web development community. If you need `.module.css` files to use the `css` loader instead, then you can override this behavior with `--loader:.module.css=css`.
+
+## 0.18.20
+
+* Support advanced CSS `@import` rules ([#953](https://github.com/evanw/esbuild/issues/953), [#3137](https://github.com/evanw/esbuild/issues/3137))
+
+    CSS `@import` statements have been extended to allow additional trailing tokens after the import path. These tokens sort of make the imported file behave as if it were wrapped in a `@layer`, `@supports`, and/or `@media` rule. Here are some examples:
+
+    ```css
+    @import url(foo.css);
+    @import url(foo.css) layer;
+    @import url(foo.css) layer(bar);
+    @import url(foo.css) layer(bar) supports(display: flex);
+    @import url(foo.css) layer(bar) supports(display: flex) print;
+    @import url(foo.css) layer(bar) print;
+    @import url(foo.css) supports(display: flex);
+    @import url(foo.css) supports(display: flex) print;
+    @import url(foo.css) print;
+    ```
+
+    You can read more about this advanced syntax [here](https://developer.mozilla.org/en-US/docs/Web/CSS/@import). With this release, esbuild will now bundle `@import` rules with these trailing tokens and will wrap the imported files in the corresponding rules. Note that this now means a given imported file can potentially appear in multiple places in the bundle. However, esbuild will still only load it once (e.g. on-load plugins will only run once per file, not once per import).
+
+## 0.18.19
+
+* Implement `composes` from CSS modules ([#20](https://github.com/evanw/esbuild/issues/20))
+
+    This release implements the `composes` annotation from the [CSS modules specification](https://github.com/css-modules/css-modules#composition). It provides a way for class selectors to reference other class selectors (assuming you are using the `local-css` loader). And with the `from` syntax, this can even work with local names across CSS files. For example:
+
+    ```js
+    // app.js
+    import { submit } from './style.css'
+    const div = document.createElement('div')
+    div.className = submit
+    document.body.appendChild(div)
+    ```
+
+    ```css
+    /* style.css */
+    .button {
+      composes: pulse from "anim.css";
+      display: inline-block;
+    }
+    .submit {
+      composes: button;
+      font-weight: bold;
+    }
+    ```
+
+    ```css
+    /* anim.css */
+    @keyframes pulse {
+      from, to { opacity: 1 }
+      50% { opacity: 0.5 }
+    }
+    .pulse {
+      animation: 2s ease-in-out infinite pulse;
+    }
+    ```
+
+    Bundling this with esbuild using `--bundle --outdir=dist --loader:.css=local-css` now gives the following:
+
+    ```js
+    (() => {
+      // style.css
+      var submit = "anim_pulse style_button style_submit";
+
+      // app.js
+      var div = document.createElement("div");
+      div.className = submit;
+      document.body.appendChild(div);
+    })();
+    ```
+
+    ```css
+    /* anim.css */
+    @keyframes anim_pulse {
+      from, to {
+        opacity: 1;
+      }
+      50% {
+        opacity: 0.5;
+      }
+    }
+    .anim_pulse {
+      animation: 2s ease-in-out infinite anim_pulse;
+    }
+
+    /* style.css */
+    .style_button {
+      display: inline-block;
+    }
+    .style_submit {
+      font-weight: bold;
+    }
+    ```
+
+    Import paths in the `composes: ... from` syntax are resolved using the new `composes-from` import kind, which can be intercepted by plugins during import path resolution when bundling is enabled.
+
+    Note that the order in which composed CSS classes from separate files appear in the bundled output file is deliberately _**undefined**_ by design (see [the specification](https://github.com/css-modules/css-modules#composing-from-other-files) for details). You are not supposed to declare the same CSS property in two separate class selectors and then compose them together. You are only supposed to compose CSS class selectors that declare non-overlapping CSS properties.
+
+    Issue [#20](https://github.com/evanw/esbuild/issues/20) (the issue tracking CSS modules) is esbuild's most-upvoted issue! With this change, I now consider esbuild's implementation of CSS modules to be complete. There are still improvements to make and there may also be bugs with the current implementation, but these can be tracked in separate issues.
+
+* Fix non-determinism with `tsconfig.json` and symlinks ([#3284](https://github.com/evanw/esbuild/issues/3284))
+
+    This release fixes an issue that could cause esbuild to sometimes emit incorrect build output in cases where a file under the effect of `tsconfig.json` is inconsistently referenced through a symlink. It can happen when using `npm link` to create a symlink within `node_modules` to an unpublished package. The build result was non-deterministic because esbuild runs module resolution in parallel and the result of the `tsconfig.json` lookup depended on whether the import through the symlink or not through the symlink was resolved first. This problem was fixed by moving the `realpath` operation before the `tsconfig.json` lookup.
+
+* Add a `hash` property to output files ([#3084](https://github.com/evanw/esbuild/issues/3084), [#3293](https://github.com/evanw/esbuild/issues/3293))
+
+    As a convenience, every output file in esbuild's API now includes a `hash` property that is a hash of the `contents` field. This is the hash that's used internally by esbuild to detect changes between builds for esbuild's live-reload feature. You may also use it to detect changes between your own builds if its properties are sufficient for your use case.
+
+    This feature has been added directly to output file objects since it's just a hash of the `contents` field, so it makes conceptual sense to store it in the same location. Another benefit of putting it there instead of including it as a part of the watch mode API is that it can be used without watch mode enabled. You can use it to compare the output of two independent builds that were done at different times.
+
+    The hash algorithm (currently [XXH64](https://xxhash.com/)) is implementation-dependent and may be changed at any time in between esbuild versions. If you don't like esbuild's choice of hash algorithm then you are welcome to hash the contents yourself instead. As with any hash algorithm, note that while two different hashes mean that the contents are different, two equal hashes do not necessarily mean that the contents are equal. You may still want to compare the contents in addition to the hashes to detect with certainty when output files have been changed.
+
+* Avoid generating duplicate prefixed declarations in CSS ([#3292](https://github.com/evanw/esbuild/issues/3292))
+
+    There was a request for esbuild's CSS prefixer to avoid generating a prefixed declaration if a declaration by that name is already present in the same rule block. So with this release, esbuild will now avoid doing this:
+
+    ```css
+    /* Original code */
+    body {
+      backdrop-filter: blur(30px);
+      -webkit-backdrop-filter: blur(45px);
+    }
+
+    /* Old output (with --target=safari12) */
+    body {
+      -webkit-backdrop-filter: blur(30px);
+      backdrop-filter: blur(30px);
+      -webkit-backdrop-filter: blur(45px);
+    }
+
+    /* New output (with --target=safari12) */
+    body {
+      backdrop-filter: blur(30px);
+      -webkit-backdrop-filter: blur(45px);
+    }
+    ```
+
+    This can result in a visual difference in certain cases (for example if the browser understands `blur(30px)` but not `blur(45px)`, it will be able to fall back to `blur(30px)`). But this change means esbuild now matches the behavior of [Autoprefixer](https://autoprefixer.github.io/) which is probably a good representation of how people expect this feature to work.
+
+## 0.18.18
+
+* Fix asset references with the `--line-limit` flag ([#3286](https://github.com/evanw/esbuild/issues/3286))
+
+    The recently-released `--line-limit` flag tells esbuild to terminate long lines after they pass this length limit. This includes automatically wrapping long strings across multiple lines using escaped newline syntax. However, using this could cause esbuild to generate incorrect code for references from generated output files to assets in the bundle (i.e. files loaded with the `file` or `copy` loaders). This is because esbuild implements asset references internally using find-and-replace with a randomly-generated string, but the find operation fails if the string is split by an escaped newline due to line wrapping. This release fixes the problem by not wrapping these strings. This issue affected asset references in both JS and CSS files.
+
+* Support local names in CSS for `@keyframe`, `@counter-style`, and `@container` ([#20](https://github.com/evanw/esbuild/issues/20))
+
+    This release extends support for local names in CSS files loaded with the `local-css` loader to cover the `@keyframe`, `@counter-style`, and `@container` rules (and also `animation`, `list-style`, and `container` declarations). Here's an example:
+
+    ```css
+    @keyframes pulse {
+      from, to { opacity: 1 }
+      50% { opacity: 0.5 }
+    }
+    @counter-style moon {
+      system: cyclic;
+      symbols: 🌕 🌖 🌗 🌘 🌑 🌒 🌓 🌔;
+    }
+    @container squish {
+      li { float: left }
+    }
+    ul {
+      animation: 2s ease-in-out infinite pulse;
+      list-style: inside moon;
+      container: squish / size;
+    }
+    ```
+
+    With the `local-css` loader enabled, that CSS will be turned into something like this (with the local name mapping exposed to JS):
+
+    ```css
+    @keyframes stdin_pulse {
+      from, to {
+        opacity: 1;
+      }
+      50% {
+        opacity: 0.5;
+      }
+    }
+    @counter-style stdin_moon {
+      system: cyclic;
+      symbols: 🌕 🌖 🌗 🌘 🌑 🌒 🌓 🌔;
+    }
+    @container stdin_squish {
+      li {
+        float: left;
+      }
+    }
+    ul {
+      animation: 2s ease-in-out infinite stdin_pulse;
+      list-style: inside stdin_moon;
+      container: stdin_squish / size;
+    }
+    ```
+
+    If you want to use a global name within a file loaded with the `local-css` loader, you can use a `:global` selector to do that:
+
+    ```css
+    div {
+      /* All symbols are global inside this scope (i.e.
+       * "pulse", "moon", and "squish" are global below) */
+      :global {
+        animation: 2s ease-in-out infinite pulse;
+        list-style: inside moon;
+        container: squish / size;
+      }
+    }
+    ```
+
+    If you want to use `@keyframes`, `@counter-style`, or `@container` with a global name, make sure it's in a file that uses the `css` or `global-css` loader instead of the `local-css` loader. For example, you can configure `--loader:.module.css=local-css` so that the `local-css` loader only applies to `*.module.css` files.
+
+* Support strings as keyframe animation names in CSS ([#2555](https://github.com/evanw/esbuild/issues/2555))
+
+    With this release, esbuild will now parse animation names that are specified as strings and will convert them to identifiers. The CSS specification allows animation names to be specified using either identifiers or strings but Chrome only understands identifiers, so esbuild will now always convert string names to identifier names for Chrome compatibility:
+
+    ```css
+    /* Original code */
+    @keyframes "hide menu" {
+      from { opacity: 1 }
+      to { opacity: 0 }
+    }
+    menu.hide {
+      animation: 0.5s ease-in-out "hide menu";
+    }
+
+    /* Old output */
+    @keyframes "hide menu" { from { opacity: 1 } to { opacity: 0 } }
+    menu.hide {
+      animation: 0.5s ease-in-out "hide menu";
+    }
+
+    /* New output */
+    @keyframes hide\ menu {
+      from {
+        opacity: 1;
+      }
+      to {
+        opacity: 0;
+      }
+    }
+    menu.hide {
+      animation: 0.5s ease-in-out hide\ menu;
+    }
+    ```
+
 ## 0.18.17
 
 * Support `An+B` syntax and `:nth-*()` pseudo-classes in CSS

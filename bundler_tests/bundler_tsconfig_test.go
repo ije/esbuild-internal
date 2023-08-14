@@ -2457,3 +2457,84 @@ func TestTsconfigIgnoreInsideNodeModules(t *testing.T) {
 		},
 	})
 }
+
+func TestTsconfigJsonPackagesExternal(t *testing.T) {
+	tsconfig_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/entry.js": `
+				import truePkg from 'pkg1'
+				import falsePkg from 'internal/pkg2'
+				truePkg()
+				falsePkg()
+			`,
+			"/Users/user/project/src/tsconfig.json": `
+				{
+					"compilerOptions": {
+						"paths": {
+							"internal/*": ["./stuff/*"]
+						}
+					}
+				}
+			`,
+			"/Users/user/project/src/stuff/pkg2.js": `
+				export default success
+			`,
+		},
+		entryPaths: []string{"/Users/user/project/src/entry.js"},
+		options: config.Options{
+			Mode:             config.ModeBundle,
+			AbsOutputFile:    "/Users/user/project/out.js",
+			ExternalPackages: true,
+		},
+	})
+}
+
+func TestTsconfigJsonTopLevelMistakeWarning(t *testing.T) {
+	tsconfig_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/entry.ts": `
+				@foo
+				class Foo {}
+			`,
+			"/Users/user/project/src/tsconfig.json": `
+				{
+					"experimentalDecorators": true
+				}
+			`,
+		},
+		entryPaths: []string{"/Users/user/project/src/entry.ts"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+		},
+		expectedScanLog: `Users/user/project/src/tsconfig.json: WARNING: Expected the "experimentalDecorators" option to be nested inside a "compilerOptions" object
+`,
+	})
+}
+
+// https://github.com/evanw/esbuild/issues/3307
+func TestTsconfigJsonBaseUrlIssue3307(t *testing.T) {
+	tsconfig_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/tsconfig.json": `
+				{
+					"compilerOptions": {
+						"baseUrl": "./subdir"
+					}
+				}
+			`,
+			"/Users/user/project/src/test.ts": `
+				export const foo = "well, this is correct...";
+			`,
+			"/Users/user/project/src/subdir/test.ts": `
+				export const foo = "WRONG";
+			`,
+		},
+		entryPaths:    []string{"test.ts"},
+		absWorkingDir: "/Users/user/project/src",
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+		},
+	})
+}

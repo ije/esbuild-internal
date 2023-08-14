@@ -43,6 +43,7 @@ type Options struct {
 	LocalNames map[ast.Ref]string
 
 	LineLimit           int
+	InputSourceIndex    uint32
 	UnsupportedFeatures compat.CSSFeature
 	MinifyWhitespace    bool
 	ASCIIOnly           bool
@@ -153,7 +154,7 @@ func (p *printer) printRule(rule css_ast.Rule, indent int32, omitTrailingSemicol
 		p.print("@charset ")
 
 		// It's not valid to print the string with single quotes
-		p.printQuotedWithQuote(r.Encoding, '"')
+		p.printQuotedWithQuote(r.Encoding, '"', 0)
 		p.print(";")
 
 	case *css_ast.RAtImport:
@@ -162,16 +163,43 @@ func (p *printer) printRule(rule css_ast.Rule, indent int32, omitTrailingSemicol
 		} else {
 			p.print("@import ")
 		}
-		p.printQuoted(p.importRecords[r.ImportRecordIndex].Path.Text)
+		record := p.importRecords[r.ImportRecordIndex]
+		var flags printQuotedFlags
+		if record.Flags.Has(ast.ContainsUniqueKey) {
+			flags |= printQuotedNoWrap
+		}
+		p.printQuoted(record.Path.Text, flags)
 		p.recordImportPathForMetafile(r.ImportRecordIndex)
-		p.printTokens(r.ImportConditions, printTokensOpts{})
+		if conditions := r.ImportConditions; conditions != nil {
+			space := !p.options.MinifyWhitespace
+			if len(conditions.Layers) > 0 {
+				if space {
+					p.print(" ")
+				}
+				p.printTokens(conditions.Layers, printTokensOpts{})
+				space = true
+			}
+			if len(conditions.Supports) > 0 {
+				if space {
+					p.print(" ")
+				}
+				p.printTokens(conditions.Supports, printTokensOpts{})
+				space = true
+			}
+			if len(conditions.Media) > 0 {
+				if space {
+					p.print(" ")
+				}
+				p.printTokens(conditions.Media, printTokensOpts{})
+			}
+		}
 		p.print(";")
 
 	case *css_ast.RAtKeyframes:
 		p.print("@")
 		p.printIdent(r.AtToken, identNormal, mayNeedWhitespaceAfter)
 		p.print(" ")
-		p.printIdent(r.Name, identNormal, canDiscardWhitespaceAfter)
+		p.printSymbol(r.Name.Loc, r.Name.Ref, identNormal, canDiscardWhitespaceAfter)
 		if !p.options.MinifyWhitespace {
 			p.print(" ")
 		}
@@ -448,7 +476,7 @@ func (p *printer) printCompoundSelector(sel css_ast.CompoundSelector, isFirst bo
 		}
 
 		if p.options.AddSourceMappings {
-			p.builder.AddSourceMapping(ss.Loc, "", p.css)
+			p.builder.AddSourceMapping(ss.Range.Loc, "", p.css)
 		}
 
 		switch s := ss.Data.(type) {
@@ -484,7 +512,7 @@ func (p *printer) printCompoundSelector(sel css_ast.CompoundSelector, isFirst bo
 				if printAsIdent {
 					p.printIdent(s.MatcherValue, identNormal, canDiscardWhitespaceAfter)
 				} else {
-					p.printQuoted(s.MatcherValue)
+					p.printQuoted(s.MatcherValue, 0)
 				}
 			}
 			if s.MatcherModifier != 0 {
@@ -541,7 +569,7 @@ func (p *printer) printNthIndex(index css_ast.NthIndex) {
 func (p *printer) printNamespacedName(nsName css_ast.NamespacedName, whitespace trailingWhitespace) {
 	if prefix := nsName.NamespacePrefix; prefix != nil {
 		if p.options.AddSourceMappings {
-			p.builder.AddSourceMapping(prefix.Loc, "", p.css)
+			p.builder.AddSourceMapping(prefix.Range.Loc, "", p.css)
 		}
 
 		switch prefix.Kind {
@@ -557,7 +585,7 @@ func (p *printer) printNamespacedName(nsName css_ast.NamespacedName, whitespace 
 	}
 
 	if p.options.AddSourceMappings {
-		p.builder.AddSourceMapping(nsName.Name.Loc, "", p.css)
+		p.builder.AddSourceMapping(nsName.Name.Range.Loc, "", p.css)
 	}
 
 	switch nsName.Name.Kind {
@@ -632,8 +660,14 @@ func bestQuoteCharForString(text string, forURL bool) byte {
 	return '"'
 }
 
-func (p *printer) printQuoted(text string) {
-	p.printQuotedWithQuote(text, bestQuoteCharForString(text, false))
+type printQuotedFlags uint8
+
+const (
+	printQuotedNoWrap printQuotedFlags = 1 << iota
+)
+
+func (p *printer) printQuoted(text string, flags printQuotedFlags) {
+	p.printQuotedWithQuote(text, bestQuoteCharForString(text, false), flags)
 }
 
 type escapeKind uint8
@@ -684,7 +718,7 @@ func (p *printer) printWithEscape(c rune, escape escapeKind, remainingText strin
 }
 
 // Note: This function is hot in profiles
-func (p *printer) printQuotedWithQuote(text string, quote byte) {
+func (p *printer) printQuotedWithQuote(text string, quote byte, flags printQuotedFlags) {
 	if quote != quoteForURL {
 		p.css = append(p.css, quote)
 	}
@@ -696,7 +730,7 @@ func (p *printer) printQuotedWithQuote(text string, quote byte) {
 	// Only compute the line length if necessary
 	var startLineLength int
 	wrapLongLines := false
-	if p.options.LineLimit > 0 && quote != quoteForURL {
+	if p.options.LineLimit > 0 && quote != quoteForURL && (flags&printQuotedNoWrap) == 0 {
 		startLineLength = p.currentLineLength()
 		if startLineLength > p.options.LineLimit {
 			startLineLength = p.options.LineLimit
@@ -956,6 +990,10 @@ func (p *printer) printTokens(tokens []css_ast.Token, opts printTokensOpts) bool
 		case css_lexer.TIdent:
 			p.printIdent(t.Text, identNormal, whitespace)
 
+		case css_lexer.TSymbol:
+			ref := ast.Ref{SourceIndex: p.options.InputSourceIndex, InnerIndex: t.PayloadIndex}
+			p.printSymbol(t.Loc, ref, identNormal, whitespace)
+
 		case css_lexer.TFunction:
 			p.printIdent(t.Text, identNormal, whitespace)
 			p.print("(")
@@ -978,18 +1016,22 @@ func (p *printer) printTokens(tokens []css_ast.Token, opts printTokensOpts) bool
 			p.printIdent(t.Text, identHash, whitespace)
 
 		case css_lexer.TString:
-			p.printQuoted(t.Text)
+			p.printQuoted(t.Text, 0)
 
 		case css_lexer.TURL:
-			text := p.importRecords[t.ImportRecordIndex].Path.Text
+			record := p.importRecords[t.PayloadIndex]
+			text := record.Path.Text
 			tryToAvoidQuote := true
-			if p.options.LineLimit > 0 && p.currentLineLength()+len(text) >= p.options.LineLimit {
+			var flags printQuotedFlags
+			if record.Flags.Has(ast.ContainsUniqueKey) {
+				flags |= printQuotedNoWrap
+			} else if p.options.LineLimit > 0 && p.currentLineLength()+len(text) >= p.options.LineLimit {
 				tryToAvoidQuote = false
 			}
 			p.print("url(")
-			p.printQuotedWithQuote(text, bestQuoteCharForString(text, tryToAvoidQuote))
+			p.printQuotedWithQuote(text, bestQuoteCharForString(text, tryToAvoidQuote), flags)
 			p.print(")")
-			p.recordImportPathForMetafile(t.ImportRecordIndex)
+			p.recordImportPathForMetafile(t.PayloadIndex)
 
 		case css_lexer.TUnterminatedString:
 			// We must end this with a newline so that this string stays unterminated

@@ -32,8 +32,8 @@ const (
 	// A CSS "@import" rule
 	ImportAt
 
-	// A CSS "@import" rule with import conditions
-	ImportAtConditional
+	// A CSS "composes" declaration
+	ImportComposesFrom
 
 	// A CSS "url(...)" token
 	ImportURL
@@ -49,8 +49,10 @@ func (kind ImportKind) StringForMetafile() string {
 		return "dynamic-import"
 	case ImportRequireResolve:
 		return "require-resolve"
-	case ImportAt, ImportAtConditional:
+	case ImportAt:
 		return "import-rule"
+	case ImportComposesFrom:
+		return "composes-from"
 	case ImportURL:
 		return "url-token"
 	case ImportEntryPoint:
@@ -61,7 +63,19 @@ func (kind ImportKind) StringForMetafile() string {
 }
 
 func (kind ImportKind) IsFromCSS() bool {
-	return kind == ImportAt || kind == ImportURL
+	switch kind {
+	case ImportAt, ImportComposesFrom, ImportURL:
+		return true
+	}
+	return false
+}
+
+func (kind ImportKind) MustResolveToCSS() bool {
+	switch kind {
+	case ImportAt, ImportComposesFrom:
+		return true
+	}
+	return false
 }
 
 type ImportRecordFlags uint16
@@ -124,6 +138,10 @@ const (
 
 	// CSS "@import" of an empty file should be removed
 	WasLoadedWithEmptyLoader
+
+	// Unique keys are randomly-generated strings that are used to replace paths
+	// in the source code after it's printed. These must not ever be split apart.
+	ContainsUniqueKey
 )
 
 func (flags ImportRecordFlags) Has(flag ImportRecordFlags) bool {
@@ -131,9 +149,10 @@ func (flags ImportRecordFlags) Has(flag ImportRecordFlags) bool {
 }
 
 type ImportRecord struct {
-	Assertions *ImportAssertions
-	Path       logger.Path
-	Range      logger.Range
+	Assertions  *ImportAssertions
+	GlobPattern *GlobPattern
+	Path        logger.Path
+	Range       logger.Range
 
 	// If the "HandlesImportErrors" flag is present, then this is the location
 	// of the error handler. This is used for error reporting.
@@ -175,6 +194,12 @@ func FindAssertion(assertions []AssertEntry, name string) *AssertEntry {
 		}
 	}
 	return nil
+}
+
+type GlobPattern struct {
+	Parts       []helpers.GlobPart
+	ExportAlias string
+	Kind        ImportKind
 }
 
 // This stores a 32-bit index where the zero value is an invalid index. This is

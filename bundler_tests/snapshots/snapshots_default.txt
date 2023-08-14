@@ -2979,8 +2979,24 @@ BzdHJva2U9IiMxOTE5MTkiIHN0cm9rZS\
 
 ================================================================================
 TestLineLimitNotMinified
+---------- /out/x-TZ25B4WH.file ----------
+...file...
+---------- /out/x-UF3O47Y3.copy ----------
+...copy...
 ---------- /out/script.js ----------
-export const SignUpForm = (props) => {
+// x.file
+var x_default = "./x-TZ25B4WH.file";
+
+// script.jsx
+import copyURL from "./x-UF3O47Y3.copy";
+
+// x.data
+var x_default2 = "data:text/plai\
+n;charset=utf-8,...lots of long \
+data...lots of long data...";
+
+// script.jsx
+var SignUpForm = (props) => {
   return /* @__PURE__ */ React.createElement(
   "p", { class: "signup" }, /* @__PURE__ */ React.
   createElement("label", null, "\
@@ -2998,10 +3014,19 @@ led" }, props.buttonText), /* @__PURE__ */ React.
 By signing up, you are agreeing \
 to our ", /* @__PURE__ */ React.
   createElement("a", { href: "/t\
-os/" }, "terms of service"), "."));
+os/" }, "terms of service"), "."),
+  /* @__PURE__ */ React.createElement(
+  "img", { src: x_default }), /* @__PURE__ */ React.
+  createElement("img", { src: copyURL }),
+  /* @__PURE__ */ React.createElement(
+  "img", { src: x_default2 }));
+};
+export {
+  SignUpForm
 };
 
 ---------- /out/style.css ----------
+/* style.css */
 body.light-mode.new-user-segment:not(.logged-in)
 .signup,
 body.light-mode.new-user-segment:not(.logged-in)
@@ -3027,6 +3052,11 @@ tNjAtOTVMMTU1IDEwMGwtNDcuNSA0Ny4\
 1IiBmaWxsPSJub25lIiBzdHJva2U9IiM\
 xOTE5MTkiIHN0cm9rZS13aWR0aD0iMjQ\
 iLz4KPC9zdmc+Cg==");
+  cursor: url(./x-TZ25B4WH.file);
+  cursor: url(./x-UF3O47Y3.copy);
+  cursor: url("data:text/plain;c\
+harset=utf-8,...lots of long dat\
+a...lots of long data...");
 }
 
 ================================================================================
@@ -3253,8 +3283,8 @@ x = class {
   b: 2,
   _doNotMangleThis: 3
 }, x.a = 1, x.b = 2, x._doNotMangleThis = 3, x([
-  "foo.a = bar.b",
-  "foo.notMangled = bar.notMangledEither"
+  `${foo}.a = bar.b`,
+  `${foo}.notMangled = bar.notMangledEither`
 ]);
 
 ================================================================================
@@ -3923,7 +3953,7 @@ copy
 import {
   __commonJS,
   __require
-} from "./chunk-O3JHV3KG.js";
+} from "./chunk-WXLYCZIT.js";
 
 // project/cjs.js
 var require_cjs = __commonJS({
@@ -3954,15 +3984,15 @@ console.log(
   e,
   __require("extern-cjs"),
   require_cjs(),
-  import("./dynamic-3QRP4J6Z.js")
+  import("./dynamic-TGITTCVZ.js")
 );
 var exported;
 export {
   exported
 };
 
----------- /out/dynamic-3QRP4J6Z.js ----------
-import "./chunk-O3JHV3KG.js";
+---------- /out/dynamic-TGITTCVZ.js ----------
+import "./chunk-WXLYCZIT.js";
 
 // project/dynamic.js
 var dynamic_default = 5;
@@ -3970,7 +4000,7 @@ export {
   dynamic_default as default
 };
 
----------- /out/chunk-O3JHV3KG.js ----------
+---------- /out/chunk-WXLYCZIT.js ----------
 export {
   __require,
   __commonJS
@@ -4127,7 +4157,7 @@ d {
     "out/entry.js": {
       "imports": [
         {
-          "path": "out/chunk-O3JHV3KG.js",
+          "path": "out/chunk-WXLYCZIT.js",
           "kind": "import-statement"
         },
         {
@@ -4149,7 +4179,7 @@ d {
           "external": true
         },
         {
-          "path": "out/dynamic-3QRP4J6Z.js",
+          "path": "out/dynamic-TGITTCVZ.js",
           "kind": "dynamic-import"
         }
       ],
@@ -4176,10 +4206,10 @@ d {
       },
       "bytes": 642
     },
-    "out/dynamic-3QRP4J6Z.js": {
+    "out/dynamic-TGITTCVZ.js": {
       "imports": [
         {
-          "path": "out/chunk-O3JHV3KG.js",
+          "path": "out/chunk-WXLYCZIT.js",
           "kind": "import-statement"
         }
       ],
@@ -4194,7 +4224,7 @@ d {
       },
       "bytes": 119
     },
-    "out/chunk-O3JHV3KG.js": {
+    "out/chunk-WXLYCZIT.js": {
       "imports": [],
       "exports": [
         "__commonJS",
@@ -5038,27 +5068,54 @@ class Bar {
 ================================================================================
 TestRequireAndDynamicImportInvalidTemplate
 ---------- /out.js ----------
-// entry.js
-__require(tag`./b`);
-__require(`./${b}`);
-try {
-  __require(tag`./b`);
-  __require(`./${b}`);
-} catch {
-}
-(async () => {
-  import(tag`./b`);
-  import(`./${b}`);
-  await import(tag`./b`);
-  await import(`./${b}`);
-  try {
-    import(tag`./b`);
-    import(`./${b}`);
-    await import(tag`./b`);
-    await import(`./${b}`);
-  } catch {
+// require("./**/*") in entry.js
+var globRequire;
+var init_ = __esm({
+  'require("./**/*") in entry.js'() {
+    globRequire = __glob({
+      "./entry.js": () => require_entry()
+    });
   }
-})();
+});
+
+// import("./**/*") in entry.js
+var globImport;
+var init_2 = __esm({
+  'import("./**/*") in entry.js'() {
+    globImport = __glob({
+      "./entry.js": () => Promise.resolve().then(() => __toESM(require_entry()))
+    });
+  }
+});
+
+// entry.js
+var require_entry = __commonJS({
+  "entry.js"() {
+    init_();
+    init_2();
+    __require(tag`./b`);
+    globRequire(`./${b}`);
+    try {
+      __require(tag`./b`);
+      globRequire(`./${b}`);
+    } catch {
+    }
+    (async () => {
+      import(tag`./b`);
+      globImport(`./${b}`);
+      await import(tag`./b`);
+      await globImport(`./${b}`);
+      try {
+        import(tag`./b`);
+        globImport(`./${b}`);
+        await import(tag`./b`);
+        await globImport(`./${b}`);
+      } catch {
+      }
+    })();
+  }
+});
+export default require_entry();
 
 ================================================================================
 TestRequireBadArgumentCount

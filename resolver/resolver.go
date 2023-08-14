@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -193,7 +194,7 @@ type Resolver struct {
 	// order but avoids the scenario where we match an import in a CSS file to a
 	// JavaScript-related file. It's probably not perfect with plugins in the
 	// picture but it's better than some alternatives and probably pretty good.
-	atImportExtensionOrder []string
+	cssExtensionOrder []string
 
 	// A special sorted import order for imports inside packages.
 	//
@@ -240,10 +241,10 @@ type resolverQuery struct {
 
 func NewResolver(call config.APICall, fs fs.FS, log logger.Log, caches *cache.CacheSet, options *config.Options) *Resolver {
 	// Filter out non-CSS extensions for CSS "@import" imports
-	atImportExtensionOrder := make([]string, 0, len(options.ExtensionOrder))
+	cssExtensionOrder := make([]string, 0, len(options.ExtensionOrder))
 	for _, ext := range options.ExtensionOrder {
-		if loader, ok := options.ExtensionToLoader[ext]; !ok || loader == config.LoaderCSS {
-			atImportExtensionOrder = append(atImportExtensionOrder, ext)
+		if loader, ok := options.ExtensionToLoader[ext]; !ok || loader.IsCSS() {
+			cssExtensionOrder = append(cssExtensionOrder, ext)
 		}
 	}
 
@@ -287,7 +288,7 @@ func NewResolver(call config.APICall, fs fs.FS, log logger.Log, caches *cache.Ca
 		options:                   *options,
 		caches:                    caches,
 		dirCache:                  make(map[string]*dirInfo),
-		atImportExtensionOrder:    atImportExtensionOrder,
+		cssExtensionOrder:         cssExtensionOrder,
 		nodeModulesExtensionOrder: nodeModulesExtensionOrder,
 		esmConditionsDefault:      esmConditionsDefault,
 		esmConditionsImport:       esmConditionsImport,
@@ -435,19 +436,6 @@ func (res *Resolver) Resolve(sourceDir string, importPath string, kind ast.Impor
 		}, debugMeta
 	}
 
-	// "import 'pkg'" when all packages are external (vs. "import './pkg'")
-	if r.options.ExternalPackages && IsPackagePath(importPath) && !r.fs.IsAbs(importPath) && !strings.HasPrefix(importPath, "#") {
-		if r.debugLogs != nil {
-			r.debugLogs.addNote("Marking this path as external because it's a package path")
-		}
-
-		r.flushDebugLogs(flushDueToSuccess)
-		return &ResolveResult{
-			PathPair:   PathPair{Primary: logger.Path{Text: importPath}},
-			IsExternal: true,
-		}, debugMeta
-	}
-
 	// "import fs from 'fs'"
 	if r.options.Platform == config.PlatformNode && BuiltInNodeModules[importPath] {
 		if r.debugLogs != nil {
@@ -543,6 +531,15 @@ func (res *Resolver) Resolve(sourceDir string, importPath string, kind ast.Impor
 		return nil, debugMeta
 	}
 
+	// Glob imports only work in a multi-path context
+	if strings.ContainsRune(importPath, '*') {
+		if r.debugLogs != nil {
+			r.debugLogs.addNote("Cannot resolve a path containing a wildcard character in a single-path context")
+		}
+		r.flushDebugLogs(flushDueToFailure)
+		return nil, debugMeta
+	}
+
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	sourceDirInfo := r.dirInfoCached(sourceDir)
@@ -601,6 +598,169 @@ func (res *Resolver) Resolve(sourceDir string, importPath string, kind ast.Impor
 	r.finalizeResolve(result)
 	r.flushDebugLogs(flushDueToSuccess)
 	return result, debugMeta
+}
+
+// This returns nil on failure and non-nil on success. Note that this may
+// return an empty array to indicate a successful search that returned zero
+// results.
+func (res *Resolver) ResolveGlob(sourceDir string, importPathPattern []helpers.GlobPart, kind ast.ImportKind, prettyPattern string) (map[string]ResolveResult, *logger.Msg) {
+	var debugMeta DebugMeta
+	r := resolverQuery{
+		Resolver:  res,
+		debugMeta: &debugMeta,
+		kind:      kind,
+	}
+
+	if r.log.Level <= logger.LevelDebug {
+		r.debugLogs = &debugLogs{what: fmt.Sprintf(
+			"Resolving glob import %s in directory %q of type %q",
+			prettyPattern, sourceDir, kind.StringForMetafile())}
+	}
+
+	if len(importPathPattern) == 0 {
+		if r.debugLogs != nil {
+			r.debugLogs.addNote("Ignoring empty glob pattern")
+		}
+		r.flushDebugLogs(flushDueToFailure)
+		return nil, nil
+	}
+	firstPrefix := importPathPattern[0].Prefix
+
+	// Glob patterns only work for relative URLs
+	if !strings.HasPrefix(firstPrefix, "./") && !strings.HasPrefix(firstPrefix, "../") &&
+		!strings.HasPrefix(firstPrefix, ".\\") && !strings.HasPrefix(firstPrefix, "..\\") {
+		if kind == ast.ImportEntryPoint {
+			// Be permissive about forgetting "./" for entry points since it's common
+			// to omit "./" on the command line. But don't accidentally treat absolute
+			// paths as relative (even on Windows).
+			if !r.fs.IsAbs(firstPrefix) {
+				firstPrefix = "./" + firstPrefix
+			}
+		} else {
+			// Don't allow omitting "./" for other imports since node doesn't let you do this either
+			if r.debugLogs != nil {
+				r.debugLogs.addNote("Ignoring glob import that doesn't start with \"./\" or \"../\"")
+			}
+			r.flushDebugLogs(flushDueToFailure)
+			return nil, nil
+		}
+	}
+
+	// Handle leading directories in the pattern (including "../")
+	dirPrefix := 0
+	for {
+		slash := strings.IndexAny(firstPrefix[dirPrefix:], "/\\")
+		if slash == -1 {
+			break
+		}
+		if star := strings.IndexByte(firstPrefix[dirPrefix:], '*'); star != -1 && slash > star {
+			break
+		}
+		dirPrefix += slash + 1
+	}
+
+	// If the pattern is an absolute path, then just replace source directory.
+	// Otherwise join the source directory with the prefix from the pattern.
+	if suffix := firstPrefix[:dirPrefix]; r.fs.IsAbs(suffix) {
+		sourceDir = suffix
+	} else {
+		sourceDir = r.fs.Join(sourceDir, suffix)
+	}
+
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+
+	// Look up the directory to start from
+	sourceDirInfo := r.dirInfoCached(sourceDir)
+	if sourceDirInfo == nil {
+		if r.debugLogs != nil {
+			r.debugLogs.addNote(fmt.Sprintf("Failed to find the directory %q", sourceDir))
+		}
+		r.flushDebugLogs(flushDueToFailure)
+		return nil, nil
+	}
+
+	// Turn the glob pattern into a regular expression
+	canMatchOnSlash := false
+	wasGlobStar := false
+	sb := strings.Builder{}
+	sb.WriteByte('^')
+	for i, part := range importPathPattern {
+		prefix := part.Prefix
+		if i == 0 {
+			prefix = firstPrefix
+		}
+		if wasGlobStar && len(prefix) > 0 && (prefix[0] == '/' || prefix[0] == '\\') {
+			prefix = prefix[1:] // Move over the "/" after a globstar
+		}
+		sb.WriteString(regexp.QuoteMeta(prefix))
+		switch part.Wildcard {
+		case helpers.GlobAllIncludingSlash:
+			// It's a globstar, so match zero or more path segments
+			sb.WriteString("(?:[^/]*(?:/|$))*")
+			canMatchOnSlash = true
+			wasGlobStar = true
+		case helpers.GlobAllExceptSlash:
+			// It's not a globstar, so only match one path segment
+			sb.WriteString("[^/]*")
+			wasGlobStar = false
+		}
+	}
+	sb.WriteByte('$')
+	re := regexp.MustCompile(sb.String())
+
+	// Initialize "results" to a non-nil value to indicate that the glob is valid
+	results := make(map[string]ResolveResult)
+
+	var visit func(dirInfo *dirInfo, dir string)
+	visit = func(dirInfo *dirInfo, dir string) {
+		for _, key := range dirInfo.entries.SortedKeys() {
+			entry, _ := dirInfo.entries.Get(key)
+			switch entry.Kind(r.fs) {
+			case fs.DirEntry:
+				// To avoid infinite loops, don't follow any symlinks
+				if canMatchOnSlash && entry.Symlink(r.fs) == "" {
+					if childDirInfo := r.dirInfoCached(r.fs.Join(dirInfo.absPath, key)); childDirInfo != nil {
+						visit(childDirInfo, fmt.Sprintf("%s%s/", dir, key))
+					}
+				}
+
+			case fs.FileEntry:
+				if relPath := dir + key; re.MatchString(relPath) {
+					var result ResolveResult
+
+					if r.isExternal(r.options.ExternalSettings.PreResolve, relPath, kind) {
+						result.PathPair = PathPair{Primary: logger.Path{Text: relPath}}
+						result.IsExternal = true
+
+						if r.debugLogs != nil {
+							r.debugLogs.addNote(fmt.Sprintf("The path %q was marked as external by the user", result.PathPair.Primary.Text))
+						}
+					} else {
+						absPath := r.fs.Join(dirInfo.absPath, key)
+						result.PathPair = PathPair{Primary: logger.Path{Text: absPath, Namespace: "file"}}
+					}
+
+					r.finalizeResolve(&result)
+					results[relPath] = result
+				}
+			}
+		}
+	}
+
+	visit(sourceDirInfo, firstPrefix[:dirPrefix])
+
+	var warning *logger.Msg
+	if len(results) == 0 {
+		warning = &logger.Msg{
+			ID:   logger.MsgID_Bundler_EmptyGlob,
+			Kind: logger.Warning,
+			Data: logger.MsgData{Text: fmt.Sprintf("The glob pattern %s did not match any files", prettyPattern)},
+		}
+	}
+
+	r.flushDebugLogs(flushDueToSuccess)
+	return results, warning
 }
 
 func (r resolverQuery) isExternal(matchers config.ExternalMatchers, path string, kind ast.ImportKind) bool {
@@ -692,92 +852,104 @@ func (r resolverQuery) finalizeResolve(result *ResolveResult) {
 			r.debugLogs.addNote(fmt.Sprintf("The path %q was marked as external by the user", result.PathPair.Primary.Text))
 		}
 		result.IsExternal = true
-		return
-	}
+	} else {
+		for i, path := range result.PathPair.iter() {
+			if path.Namespace != "file" {
+				continue
+			}
+			dirInfo := r.dirInfoCached(r.fs.Dir(path.Text))
+			if dirInfo == nil {
+				continue
+			}
+			base := r.fs.Base(path.Text)
 
-	for _, path := range result.PathPair.iter() {
-		if path.Namespace == "file" {
-			if dirInfo := r.dirInfoCached(r.fs.Dir(path.Text)); dirInfo != nil {
-				base := r.fs.Base(path.Text)
-
-				// Look up this file in the "sideEffects" map in the nearest enclosing
-				// directory with a "package.json" file.
-				//
-				// Only do this for the primary path. Some packages have the primary
-				// path marked as having side effects and the secondary path marked
-				// as not having side effects. This is likely a bug in the package
-				// definition but we don't want to consider the primary path as not
-				// having side effects just because the secondary path is marked as
-				// not having side effects.
-				if pkgJSON := dirInfo.enclosingPackageJSON; pkgJSON != nil && *path == result.PathPair.Primary {
-					if pkgJSON.sideEffectsMap != nil {
-						hasSideEffects := false
-						pathLookup := strings.ReplaceAll(path.Text, "\\", "/") // Avoid problems with Windows-style slashes
-						if pkgJSON.sideEffectsMap[pathLookup] {
-							// Fast path: map lookup
-							hasSideEffects = true
-						} else {
-							// Slow path: glob tests
-							for _, re := range pkgJSON.sideEffectsRegexps {
-								if re.MatchString(pathLookup) {
-									hasSideEffects = true
-									break
-								}
-							}
-						}
-						if !hasSideEffects {
-							if r.debugLogs != nil {
-								r.debugLogs.addNote(fmt.Sprintf("Marking this file as having no side effects due to %q",
-									pkgJSON.source.KeyPath.Text))
-							}
-							result.PrimarySideEffectsData = pkgJSON.sideEffectsData
-						}
+			// If the path contains symlinks, rewrite the path to the real path
+			if !r.options.PreserveSymlinks {
+				if entry, _ := dirInfo.entries.Get(base); entry != nil {
+					symlink := entry.Symlink(r.fs)
+					if symlink != "" {
+						// This means the entry itself is a symlink
+					} else if dirInfo.absRealPath != "" {
+						// There is at least one parent directory with a symlink
+						symlink = r.fs.Join(dirInfo.absRealPath, base)
 					}
-
-					// Also copy over the "type" field
-					result.ModuleTypeData = pkgJSON.moduleTypeData
-				}
-
-				// Copy various fields from the nearest enclosing "tsconfig.json" file if present
-				if path == &result.PathPair.Primary {
-					if tsConfigJSON := r.tsConfigForDir(dirInfo); tsConfigJSON != nil {
-						result.TSConfig = &tsConfigJSON.Settings
-						result.TSConfigJSX = tsConfigJSON.JSXSettings
-						result.TSAlwaysStrict = tsConfigJSON.TSAlwaysStrictOrStrict()
-
+					if symlink != "" {
 						if r.debugLogs != nil {
-							r.debugLogs.addNote(fmt.Sprintf("This import is under the effect of %q",
-								tsConfigJSON.AbsPath))
-							if result.TSConfigJSX.JSXFactory != nil {
-								r.debugLogs.addNote(fmt.Sprintf("\"jsxFactory\" is %q due to %q",
-									strings.Join(result.TSConfigJSX.JSXFactory, "."),
-									tsConfigJSON.AbsPath))
-							}
-							if result.TSConfigJSX.JSXFragmentFactory != nil {
-								r.debugLogs.addNote(fmt.Sprintf("\"jsxFragment\" is %q due to %q",
-									strings.Join(result.TSConfigJSX.JSXFragmentFactory, "."),
-									tsConfigJSON.AbsPath))
+							r.debugLogs.addNote(fmt.Sprintf("Resolved symlink %q to %q", path.Text, symlink))
+						}
+						path.Text = symlink
+
+						// Look up the directory over again if it was changed
+						dirInfo = r.dirInfoCached(r.fs.Dir(path.Text))
+						if dirInfo == nil {
+							continue
+						}
+						base = r.fs.Base(path.Text)
+					}
+				}
+			}
+
+			// Path attributes are only taken from the primary path
+			if i > 0 {
+				continue
+			}
+
+			// Look up this file in the "sideEffects" map in the nearest enclosing
+			// directory with a "package.json" file.
+			//
+			// Only do this for the primary path. Some packages have the primary
+			// path marked as having side effects and the secondary path marked
+			// as not having side effects. This is likely a bug in the package
+			// definition but we don't want to consider the primary path as not
+			// having side effects just because the secondary path is marked as
+			// not having side effects.
+			if pkgJSON := dirInfo.enclosingPackageJSON; pkgJSON != nil {
+				if pkgJSON.sideEffectsMap != nil {
+					hasSideEffects := false
+					pathLookup := strings.ReplaceAll(path.Text, "\\", "/") // Avoid problems with Windows-style slashes
+					if pkgJSON.sideEffectsMap[pathLookup] {
+						// Fast path: map lookup
+						hasSideEffects = true
+					} else {
+						// Slow path: glob tests
+						for _, re := range pkgJSON.sideEffectsRegexps {
+							if re.MatchString(pathLookup) {
+								hasSideEffects = true
+								break
 							}
 						}
 					}
+					if !hasSideEffects {
+						if r.debugLogs != nil {
+							r.debugLogs.addNote(fmt.Sprintf("Marking this file as having no side effects due to %q",
+								pkgJSON.source.KeyPath.Text))
+						}
+						result.PrimarySideEffectsData = pkgJSON.sideEffectsData
+					}
 				}
 
-				if !r.options.PreserveSymlinks {
-					if entry, _ := dirInfo.entries.Get(base); entry != nil {
-						if symlink := entry.Symlink(r.fs); symlink != "" {
-							// Is this entry itself a symlink?
-							if r.debugLogs != nil {
-								r.debugLogs.addNote(fmt.Sprintf("Resolved symlink %q to %q", path.Text, symlink))
-							}
-							path.Text = symlink
-						} else if dirInfo.absRealPath != "" {
-							// Is there at least one parent directory with a symlink?
-							symlink := r.fs.Join(dirInfo.absRealPath, base)
-							if r.debugLogs != nil {
-								r.debugLogs.addNote(fmt.Sprintf("Resolved symlink %q to %q", path.Text, symlink))
-							}
-							path.Text = symlink
-						}
+				// Also copy over the "type" field
+				result.ModuleTypeData = pkgJSON.moduleTypeData
+			}
+
+			// Copy various fields from the nearest enclosing "tsconfig.json" file if present
+			if tsConfigJSON := r.tsConfigForDir(dirInfo); tsConfigJSON != nil {
+				result.TSConfig = &tsConfigJSON.Settings
+				result.TSConfigJSX = tsConfigJSON.JSXSettings
+				result.TSAlwaysStrict = tsConfigJSON.TSAlwaysStrictOrStrict()
+
+				if r.debugLogs != nil {
+					r.debugLogs.addNote(fmt.Sprintf("This import is under the effect of %q",
+						tsConfigJSON.AbsPath))
+					if result.TSConfigJSX.JSXFactory != nil {
+						r.debugLogs.addNote(fmt.Sprintf("\"jsxFactory\" is %q due to %q",
+							strings.Join(result.TSConfigJSX.JSXFactory, "."),
+							tsConfigJSON.AbsPath))
+					}
+					if result.TSConfigJSX.JSXFragmentFactory != nil {
+						r.debugLogs.addNote(fmt.Sprintf("\"jsxFragment\" is %q due to %q",
+							strings.Join(result.TSConfigJSX.JSXFragmentFactory, "."),
+							tsConfigJSON.AbsPath))
 					}
 				}
 			}
@@ -826,11 +998,36 @@ func (r resolverQuery) resolveWithoutSymlinks(sourceDir string, sourceDirInfo *d
 		}
 	}
 
+	// First, check path overrides from the nearest enclosing TypeScript "tsconfig.json" file
+	if sourceDirInfo != nil {
+		if tsConfigJSON := r.tsConfigForDir(sourceDirInfo); tsConfigJSON != nil && tsConfigJSON.Paths != nil {
+			if absolute, ok, diffCase := r.matchTSConfigPaths(tsConfigJSON, importPath); ok {
+				return &ResolveResult{PathPair: absolute, DifferentCase: diffCase}
+			}
+		}
+	}
+
 	// Check both relative and package paths for CSS URL tokens, with relative
 	// paths taking precedence over package paths to match Webpack behavior.
 	isPackagePath := IsPackagePath(importPath)
-	checkRelative := !isPackagePath || r.kind == ast.ImportURL || r.kind == ast.ImportAt
+	checkRelative := !isPackagePath || r.kind.IsFromCSS()
 	checkPackage := isPackagePath
+
+	// "import 'pkg'" when all packages are external (vs. "import './pkg'"). This
+	// is deliberately done after we check for "tsconfig.json" aliases because
+	// people want to be able to make things look like packages but have them not
+	// be packages.
+	if r.options.ExternalPackages && isPackagePath && !strings.HasPrefix(importPath, "#") {
+		if r.debugLogs != nil {
+			r.debugLogs.addNote("Marking this path as external because it's a package path")
+		}
+
+		r.flushDebugLogs(flushDueToSuccess)
+		return &ResolveResult{
+			PathPair:   PathPair{Primary: logger.Path{Text: importPath}},
+			IsExternal: true,
+		}
+	}
 
 	if checkRelative {
 		absPath := r.fs.Join(sourceDir, importPath)
@@ -1669,8 +1866,7 @@ func (r resolverQuery) loadAsIndexWithBrowserRemapping(dirInfo *dirInfo, path st
 func getProperty(json js_ast.Expr, name string) (js_ast.Expr, logger.Loc, bool) {
 	if obj, ok := json.Data.(*js_ast.EObject); ok {
 		for _, prop := range obj.Properties {
-			if key, ok := prop.Key.Data.(*js_ast.EString); ok && key.Value != nil &&
-				len(key.Value) == len(name) && helpers.UTF16ToString(key.Value) == name {
+			if key, ok := prop.Key.Data.(*js_ast.EString); ok && key.Value != nil && helpers.UTF16EqualsString(key.Value, name) {
 				return prop.ValueOrNil, prop.Key.Loc, true
 			}
 		}
@@ -1694,9 +1890,9 @@ func getBool(json js_ast.Expr) (bool, bool) {
 
 func (r resolverQuery) loadAsFileOrDirectory(path string) (PathPair, bool, *fs.DifferentCase) {
 	extensionOrder := r.options.ExtensionOrder
-	if r.kind == ast.ImportAt || r.kind == ast.ImportAtConditional {
+	if r.kind.MustResolveToCSS() {
 		// Use a special import order for CSS "@import" imports
-		extensionOrder = r.atImportExtensionOrder
+		extensionOrder = r.cssExtensionOrder
 	} else if helpers.IsInsideNodeModules(path) {
 		// Use a special import order for imports inside "node_modules"
 		extensionOrder = r.nodeModulesExtensionOrder
@@ -2111,21 +2307,11 @@ func (r resolverQuery) loadNodeModules(importPath string, dirInfo *dirInfo, forb
 		defer r.debugLogs.decreaseIndent()
 	}
 
-	// First, check path overrides from the nearest enclosing TypeScript "tsconfig.json" file
-	if tsConfigJSON := r.tsConfigForDir(dirInfo); tsConfigJSON != nil {
-		// Try path substitutions first
-		if tsConfigJSON.Paths != nil {
-			if absolute, ok, diffCase := r.matchTSConfigPaths(tsConfigJSON, importPath); ok {
-				return absolute, true, diffCase
-			}
-		}
-
-		// Try looking up the path relative to the base URL
-		if tsConfigJSON.BaseURL != nil {
-			basePath := r.fs.Join(*tsConfigJSON.BaseURL, importPath)
-			if absolute, ok, diffCase := r.loadAsFileOrDirectory(basePath); ok {
-				return absolute, true, diffCase
-			}
+	// Try looking up the path relative to the base URL from "tsconfig.json"
+	if tsConfigJSON := r.tsConfigForDir(dirInfo); tsConfigJSON != nil && tsConfigJSON.BaseURL != nil {
+		basePath := r.fs.Join(*tsConfigJSON.BaseURL, importPath)
+		if absolute, ok, diffCase := r.loadAsFileOrDirectory(basePath); ok {
+			return absolute, true, diffCase
 		}
 	}
 
@@ -2305,8 +2491,8 @@ func (r resolverQuery) finalizeImportsExportsResult(
 			resolvedDirInfo := r.dirInfoCached(r.fs.Dir(absResolvedPath))
 			base := r.fs.Base(absResolvedPath)
 			extensionOrder := r.options.ExtensionOrder
-			if r.kind == ast.ImportAt || r.kind == ast.ImportAtConditional {
-				extensionOrder = r.atImportExtensionOrder
+			if r.kind.MustResolveToCSS() {
+				extensionOrder = r.cssExtensionOrder
 			}
 
 			if resolvedDirInfo == nil {
