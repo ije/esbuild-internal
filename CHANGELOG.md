@@ -1,5 +1,195 @@
 # Changelog
 
+## 0.19.4
+
+* Fix printing of JavaScript decorators in tricky cases ([#3396](https://github.com/evanw/esbuild/issues/3396))
+
+    This release fixes some bugs where esbuild's pretty-printing of JavaScript decorators could incorrectly produced code with a syntax error. The problem happened because esbuild sometimes substitutes identifiers for other expressions in the pretty-printer itself, but the decision about whether to wrap the expression or not didn't account for this. Here are some examples:
+
+    ```js
+    // Original code
+    import { constant } from './constants.js'
+    import { imported } from 'external'
+    import { undef } from './empty.js'
+    class Foo {
+      @constant()
+      @imported()
+      @undef()
+      foo
+    }
+
+    // Old output (with --bundle --format=cjs --packages=external --minify-syntax)
+    var import_external = require("external");
+    var Foo = class {
+      @123()
+      @(0, import_external.imported)()
+      @(void 0)()
+      foo;
+    };
+
+    // New output (with --bundle --format=cjs --packages=external --minify-syntax)
+    var import_external = require("external");
+    var Foo = class {
+      @(123())
+      @((0, import_external.imported)())
+      @((void 0)())
+      foo;
+    };
+    ```
+
+* Allow pre-release versions to be passed to `target` ([#3388](https://github.com/evanw/esbuild/issues/3388))
+
+    People want to be able to pass version numbers for unreleased versions of node (which have extra stuff after the version numbers) to esbuild's `target` setting and have esbuild do something reasonable with them. These version strings are of course not present in esbuild's internal feature compatibility table because an unreleased version has not been released yet (by definition). With this release, esbuild will now attempt to accept these version strings passed to `target` and do something reasonable with them.
+
+## 0.19.3
+
+* Fix `list-style-type` with the `local-css` loader ([#3325](https://github.com/evanw/esbuild/issues/3325))
+
+    The `local-css` loader incorrectly treated all identifiers provided to `list-style-type` as a custom local identifier. That included identifiers such as `none` which have special meaning in CSS, and which should not be treated as custom local identifiers. This release fixes this bug:
+
+    ```css
+    /* Original code */
+    ul { list-style-type: none }
+
+    /* Old output (with --loader=local-css) */
+    ul {
+      list-style-type: stdin_none;
+    }
+
+    /* New output (with --loader=local-css) */
+    ul {
+      list-style-type: none;
+    }
+    ```
+
+    Note that this bug only affected code using the `local-css` loader. It did not affect code using the `css` loader.
+
+* Avoid inserting temporary variables before `use strict` ([#3322](https://github.com/evanw/esbuild/issues/3322))
+
+    This release fixes a bug where esbuild could incorrectly insert automatically-generated temporary variables before `use strict` directives:
+
+    ```js
+    // Original code
+    function foo() {
+      'use strict'
+      a.b?.c()
+    }
+
+    // Old output (with --target=es6)
+    function foo() {
+      var _a;
+      "use strict";
+      (_a = a.b) == null ? void 0 : _a.c();
+    }
+
+    // New output (with --target=es6)
+    function foo() {
+      "use strict";
+      var _a;
+      (_a = a.b) == null ? void 0 : _a.c();
+    }
+    ```
+
+* Adjust TypeScript `enum` output to better approximate `tsc` ([#3329](https://github.com/evanw/esbuild/issues/3329))
+
+    TypeScript enum values can be either number literals or string literals. Numbers create a bidirectional mapping between the name and the value but strings only create a unidirectional mapping from the name to the value. When the enum value is neither a number literal nor a string literal, TypeScript and esbuild both default to treating it as a number:
+
+    ```ts
+    // Original TypeScript code
+    declare const foo: any
+    enum Foo {
+      NUMBER = 1,
+      STRING = 'a',
+      OTHER = foo,
+    }
+
+    // Compiled JavaScript code (from "tsc")
+    var Foo;
+    (function (Foo) {
+      Foo[Foo["NUMBER"] = 1] = "NUMBER";
+      Foo["STRING"] = "a";
+      Foo[Foo["OTHER"] = foo] = "OTHER";
+    })(Foo || (Foo = {}));
+    ```
+
+    However, TypeScript does constant folding slightly differently than esbuild. For example, it may consider template literals to be string literals in some cases:
+
+    ```ts
+    // Original TypeScript code
+    declare const foo = 'foo'
+    enum Foo {
+      PRESENT = `${foo}`,
+      MISSING = `${bar}`,
+    }
+
+    // Compiled JavaScript code (from "tsc")
+    var Foo;
+    (function (Foo) {
+      Foo["PRESENT"] = "foo";
+      Foo[Foo["MISSING"] = `${bar}`] = "MISSING";
+    })(Foo || (Foo = {}));
+    ```
+
+    The template literal initializer for `PRESENT` is treated as a string while the template literal initializer for `MISSING` is treated as a number. Previously esbuild treated both of these cases as a number but starting with this release, esbuild will now treat both of these cases as a string. This doesn't exactly match the behavior of `tsc` but in the case where the behavior diverges `tsc` reports a compile error, so this seems like acceptible behavior for esbuild. Note that handling these cases completely correctly would require esbuild to parse type declarations (see the `declare` keyword), which esbuild deliberately doesn't do.
+
+* Ignore case in CSS in more places ([#3316](https://github.com/evanw/esbuild/issues/3316))
+
+    This release makes esbuild's CSS support more case-agnostic, which better matches how browsers work. For example:
+
+    ```css
+    /* Original code */
+    @KeyFrames Foo { From { OpaCity: 0 } To { OpaCity: 1 } }
+    body { CoLoR: YeLLoW }
+
+    /* Old output (with --minify) */
+    @KeyFrames Foo{From {OpaCity: 0} To {OpaCity: 1}}body{CoLoR:YeLLoW}
+
+    /* New output (with --minify) */
+    @KeyFrames Foo{0%{OpaCity:0}To{OpaCity:1}}body{CoLoR:#ff0}
+    ```
+
+    Please never actually write code like this.
+
+* Improve the error message for `null` entries in `exports` ([#3377](https://github.com/evanw/esbuild/issues/3377))
+
+    Package authors can disable package export paths with the `exports` map in `package.json`. With this release, esbuild now has a clearer error message that points to the `null` token in `package.json` itself instead of to the surrounding context. Here is an example of the new error message:
+
+    ```
+    ✘ [ERROR] Could not resolve "msw/browser"
+
+        lib/msw-config.ts:2:28:
+          2 │ import { setupWorker } from 'msw/browser';
+            ╵                             ~~~~~~~~~~~~~
+
+      The path "./browser" cannot be imported from package "msw" because it was explicitly disabled by
+      the package author here:
+
+        node_modules/msw/package.json:17:14:
+          17 │       "node": null,
+             ╵               ~~~~
+
+      You can mark the path "msw/browser" as external to exclude it from the bundle, which will remove
+      this error and leave the unresolved path in the bundle.
+    ```
+
+* Parse and print the `with` keyword in `import` statements
+
+    JavaScript was going to have a feature called "import assertions" that adds an `assert` keyword to `import` statements. It looked like this:
+
+    ```js
+    import stuff from './stuff.json' assert { type: 'json' }
+    ```
+
+    The feature provided a way to assert that the imported file is of a certain type (but was not allowed to affect how the import is interpreted, even though that's how everyone expected it to behave). The feature was fully specified and then actually implemented and shipped in Chrome before the people behind the feature realized that they should allow it to affect how the import is interpreted after all. So import assertions are no longer going to be added to the language.
+
+    Instead, the [current proposal](https://github.com/tc39/proposal-import-attributes) is to add a feature called "import attributes" instead that adds a `with` keyword to import statements. It looks like this:
+
+    ```js
+    import stuff from './stuff.json' with { type: 'json' }
+    ```
+
+    This feature provides a way to affect how the import is interpreted. With this release, esbuild now has preliminary support for parsing and printing this new `with` keyword. The `with` keyword is not yet interpreted by esbuild, however, so bundling code with it will generate a build error. All this release does is allow you to use esbuild to process code containing it (such as removing types from TypeScript code). Note that this syntax is not yet a part of JavaScript and may be removed or altered in the future if the specification changes (which it already has once, as described above). If that happens, esbuild reserves the right to remove or alter its support for this syntax too.
+
 ## 0.19.2
 
 * Update how CSS nesting is parsed again

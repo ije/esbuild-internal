@@ -1640,6 +1640,34 @@ TestCSSAtLayerMergingWithImportConditions
 /* entry.css */
 
 ================================================================================
+TestCSSCaseInsensitivity
+---------- /image-AKINYSFH.png ----------
+...
+---------- /out.css ----------
+/* nested.css */
+@media list-of-media-queries {
+  @supports (supports-condition) {
+    @layer layer-name {
+      @KeyFrames Foo {
+        0% {
+          OPAcity: 0;
+        }
+        tO {
+          opaCITY: 1;
+        }
+      }
+      body {
+        BACKGROUND-color: red;
+        width: 50Px;
+        background-IMAGE: url(./image-AKINYSFH.png);
+      }
+    }
+  }
+}
+
+/* entry.css */
+
+================================================================================
 TestCSSEntryPoint
 ---------- /out.css ----------
 /* entry.css */
@@ -2482,14 +2510,7 @@ TestImportCSSFromJSLocalAtCounterStyle
 ---------- /out/entry.js ----------
 // list_style_type.css
 var list_style_type_default = {
-  local: "list_style_type_local",
-  INITIAL: "list_style_type_INITIAL",
-  decimal: "list_style_type_decimal",
-  disc: "list_style_type_disc",
-  SQUARE: "list_style_type_SQUARE",
-  circle: "list_style_type_circle",
-  "disclosure-OPEN": "list_style_type_disclosure-OPEN",
-  "DISCLOSURE-closed": "list_style_type_DISCLOSURE-closed"
+  local: "list_style_type_local"
 };
 
 // list_style.css
@@ -2514,25 +2535,34 @@ div {
   list-style-type: list_style_type_local;
 }
 div {
-  list-style-type: list_style_type_INITIAL;
+  list-style-type: none;
 }
 div {
-  list-style-type: list_style_type_decimal;
+  list-style-type: INITIAL;
 }
 div {
-  list-style-type: list_style_type_disc;
+  list-style-type: decimal;
 }
 div {
-  list-style-type: list_style_type_SQUARE;
+  list-style-type: disc;
 }
 div {
-  list-style-type: list_style_type_circle;
+  list-style-type: SQUARE;
 }
 div {
-  list-style-type: list_style_type_disclosure-OPEN;
+  list-style-type: circle;
 }
 div {
-  list-style-type: list_style_type_DISCLOSURE-closed;
+  list-style-type: disclosure-OPEN;
+}
+div {
+  list-style-type: DISCLOSURE-closed;
+}
+div {
+  list-style-type: LAO;
+}
+div {
+  list-style-type: "👍";
 }
 
 /* list_style.css */
@@ -2613,6 +2643,9 @@ div {
 }
 div {
   list-style: DISCLOSURE-closed;
+}
+div {
+  list-style: LAO;
 }
 
 ================================================================================

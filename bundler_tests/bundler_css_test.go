@@ -519,6 +519,7 @@ func TestImportCSSFromJSLocalAtCounterStyle(t *testing.T) {
 				div :local { list-style-type: local }
 
 				/* Must not accept invalid type values */
+				div :local { list-style-type: none }
 				div :local { list-style-type: INITIAL }
 				div :local { list-style-type: decimal }
 				div :local { list-style-type: disc }
@@ -526,6 +527,8 @@ func TestImportCSSFromJSLocalAtCounterStyle(t *testing.T) {
 				div :local { list-style-type: circle }
 				div :local { list-style-type: disclosure-OPEN }
 				div :local { list-style-type: DISCLOSURE-closed }
+				div :local { list-style-type: LAO }
+				div :local { list-style-type: "\1F44D" }
 			`,
 
 			"/list_style.css": `
@@ -564,6 +567,7 @@ func TestImportCSSFromJSLocalAtCounterStyle(t *testing.T) {
 				div :local { list-style: circle }
 				div :local { list-style: disclosure-OPEN }
 				div :local { list-style: DISCLOSURE-closed }
+				div :local { list-style: LAO }
 			`,
 		},
 		entryPaths: []string{"/entry.js"},
@@ -2082,9 +2086,9 @@ func TestCSSExternalQueryAndHashNoMatchIssue1822(t *testing.T) {
 			},
 		},
 		expectedScanLog: `entry.css: ERROR: Could not resolve "foo/bar.png?baz"
-NOTE: You can mark the path "foo/bar.png?baz" as external to exclude it from the bundle, which will remove this error.
+NOTE: You can mark the path "foo/bar.png?baz" as external to exclude it from the bundle, which will remove this error and leave the unresolved path in the bundle.
 entry.css: ERROR: Could not resolve "foo/bar.png#baz"
-NOTE: You can mark the path "foo/bar.png#baz" as external to exclude it from the bundle, which will remove this error.
+NOTE: You can mark the path "foo/bar.png#baz" as external to exclude it from the bundle, which will remove this error and leave the unresolved path in the bundle.
 `,
 	})
 }
@@ -2568,6 +2572,48 @@ func TestCSSAtLayerMergingWithImportConditions(t *testing.T) {
 		options: config.Options{
 			Mode:         config.ModeBundle,
 			AbsOutputDir: "/out",
+		},
+	})
+}
+
+func TestCSSCaseInsensitivity(t *testing.T) {
+	css_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.css": `
+				/* "@IMPORT" should be recognized as an import */
+				/* "LAYER(...)" should wrap with "@layer" */
+				/* "SUPPORTS(...)" should wrap with "@supports" */
+				@IMPORT Url("nested.css") LAYER(layer-name) SUPPORTS(supports-condition) list-of-media-queries;
+			`,
+			"/nested.css": `
+				/* "from" should be recognized and optimized to "0%" */
+				@KeyFrames Foo {
+					froM { OPAcity: 0 }
+					tO { opaCITY: 1 }
+				}
+
+				body {
+					/* "#FF0000" should be optimized to "red" because "BACKGROUND-color" should be recognized */
+					BACKGROUND-color: #FF0000;
+
+					/* This should be optimized to 50px */
+					width: CaLc(20Px + 30pX);
+
+					/* This URL token should be recognized and bundled */
+					background-IMAGE: Url(image.png);
+				}
+			`,
+			"/image.png": `...`,
+		},
+		entryPaths: []string{"/entry.css"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.css",
+			MinifySyntax:  true,
+			ExtensionToLoader: map[string]config.Loader{
+				".css": config.LoaderCSS,
+				".png": config.LoaderCopy,
+			},
 		},
 	})
 }
