@@ -1,5 +1,390 @@
 # Changelog
 
+## 0.19.11
+
+* Fix TypeScript-specific class transform edge case ([#3559](https://github.com/evanw/esbuild/issues/3559))
+
+    The previous release introduced an optimization that avoided transforming `super()` in the class constructor for TypeScript code compiled with `useDefineForClassFields` set to `false` if all class instance fields have no initializers. The rationale was that in this case, all class instance fields are omitted in the output so no changes to the constructor are needed. However, if all of this is the case _and_ there are `#private` instance fields with initializers, those private instance field initializers were still being moved into the constructor. This was problematic because they were being inserted before the call to `super()` (since `super()` is now no longer transformed in that case). This release introduces an additional optimization that avoids moving the private instance field initializers into the constructor in this edge case, which generates smaller code, matches the TypeScript compiler's output more closely, and avoids this bug:
+
+    ```ts
+    // Original code
+    class Foo extends Bar {
+      #private = 1;
+      public: any;
+      constructor() {
+        super();
+      }
+    }
+
+    // Old output (with esbuild v0.19.9)
+    class Foo extends Bar {
+      constructor() {
+        super();
+        this.#private = 1;
+      }
+      #private;
+    }
+
+    // Old output (with esbuild v0.19.10)
+    class Foo extends Bar {
+      constructor() {
+        this.#private = 1;
+        super();
+      }
+      #private;
+    }
+
+    // New output
+    class Foo extends Bar {
+      #private = 1;
+      constructor() {
+        super();
+      }
+    }
+    ```
+
+* Minifier: allow reording a primitive past a side-effect ([#3568](https://github.com/evanw/esbuild/issues/3568))
+
+    The minifier previously allowed reordering a side-effect past a primitive, but didn't handle the case of reordering a primitive past a side-effect. This additional case is now handled:
+
+    ```js
+    // Original code
+    function f() {
+      let x = false;
+      let y = x;
+      const boolean = y;
+      let frag = $.template(`<p contenteditable="${boolean}">hello world</p>`);
+      return frag;
+    }
+
+    // Old output (with --minify)
+    function f(){const e=!1;return $.template(`<p contenteditable="${e}">hello world</p>`)}
+
+    // New output (with --minify)
+    function f(){return $.template('<p contenteditable="false">hello world</p>')}
+    ```
+
+* Minifier: consider properties named using known `Symbol` instances to be side-effect free ([#3561](https://github.com/evanw/esbuild/issues/3561))
+
+    Many things in JavaScript can have side effects including property accesses and ToString operations, so using a symbol such as `Symbol.iterator` as a computed property name is not obviously side-effect free. This release adds a special case for known `Symbol` instances so that they are considered side-effect free when used as property names. For example, this class declaration will now be considered side-effect free:
+
+    ```js
+    class Foo {
+      *[Symbol.iterator]() {
+      }
+    }
+    ```
+
+* Provide the `stop()` API in node to exit esbuild's child process ([#3558](https://github.com/evanw/esbuild/issues/3558))
+
+    You can now call `stop()` in esbuild's node API to exit esbuild's child process to reclaim the resources used. It only makes sense to do this for a long-lived node process when you know you will no longer be making any more esbuild API calls. It is not necessary to call this to allow node to exit, and it's advantageous to not call this in between calls to esbuild's API as sharing a single long-lived esbuild child process is more efficient than re-creating a new esbuild child process for every API call. This API call used to exist but was removed in [version 0.9.0](https://github.com/evanw/esbuild/releases/v0.9.0). This release adds it back due to a user request.
+
+## 0.19.10
+
+* Fix glob imports in TypeScript files ([#3319](https://github.com/evanw/esbuild/issues/3319))
+
+    This release fixes a problem where bundling a TypeScript file containing a glob import could emit a call to a helper function that doesn't exist. The problem happened because esbuild's TypeScript transformation removes unused imports (which is required for correctness, as they may be type-only imports) and esbuild's glob import transformation wasn't correctly marking the imported helper function as used. This wasn't caught earlier because most of esbuild's glob import tests were written in JavaScript, not in TypeScript.
+
+* Fix `require()` glob imports with bundling disabled ([#3546](https://github.com/evanw/esbuild/issues/3546))
+
+    Previously `require()` calls containing glob imports were incorrectly transformed when bundling was disabled. All glob imports should only be transformed when bundling is enabled. This bug has been fixed.
+
+* Fix a panic when transforming optional chaining with `define` ([#3551](https://github.com/evanw/esbuild/issues/3551), [#3554](https://github.com/evanw/esbuild/pull/3554))
+
+    This release fixes a case where esbuild could crash with a panic, which was triggered by using `define` to replace an expression containing an optional chain. Here is an example:
+
+    ```js
+    // Original code
+    console.log(process?.env.SHELL)
+
+    // Old output (with --define:process.env={})
+    /* panic: Internal error (while parsing "<stdin>") */
+
+    // New output (with --define:process.env={})
+    var define_process_env_default = {};
+    console.log(define_process_env_default.SHELL);
+    ```
+
+    This fix was contributed by [@hi-ogawa](https://github.com/hi-ogawa).
+
+* Work around a bug in node's CommonJS export name detector ([#3544](https://github.com/evanw/esbuild/issues/3544))
+
+    The export names of a CommonJS module are dynamically-determined at run time because CommonJS exports are properties on a mutable object. But the export names of an ES module are statically-determined at module instantiation time by using `import` and `export` syntax and cannot be changed at run time.
+
+    When you import a CommonJS module into an ES module in node, node scans over the source code to attempt to detect the set of export names that the CommonJS module will end up using. That statically-determined set of names is used as the set of names that the ES module is allowed to import at module instantiation time. However, this scan appears to have bugs (or at least, can cause false positives) because it doesn't appear to do any scope analysis. Node will incorrectly consider the module to export something even if the assignment is done to a local variable instead of to the module-level `exports` object. For example:
+
+    ```js
+    // confuseNode.js
+    exports.confuseNode = function(exports) {
+      // If this local is called "exports", node incorrectly
+      // thinks this file has an export called "notAnExport".
+      exports.notAnExport = function() {
+      };
+    };
+    ```
+
+    You can see that node incorrectly thinks the file `confuseNode.js` has an export called `notAnExport` when that file is loaded in an ES module context:
+
+    ```console
+    $ node -e 'import("./confuseNode.js").then(console.log)'
+    [Module: null prototype] {
+      confuseNode: [Function (anonymous)],
+      default: { confuseNode: [Function (anonymous)] },
+      notAnExport: undefined
+    }
+    ```
+
+    To avoid this, esbuild will now rename local variables that use the names `exports` and `module` when generating CommonJS output for the `node` platform.
+
+* Fix the return value of esbuild's `super()` shim ([#3538](https://github.com/evanw/esbuild/issues/3538))
+
+    Some people write `constructor` methods that use the return value of `super()` instead of using `this`. This isn't too common because [TypeScript doesn't let you do that](https://github.com/microsoft/TypeScript/issues/37847) but it can come up when writing JavaScript. Previously esbuild's class lowering transform incorrectly transformed the return value of `super()` into `undefined`. With this release, the return value of `super()` will now be `this` instead:
+
+    ```js
+    // Original code
+    class Foo extends Object {
+      field
+      constructor() {
+        console.log(typeof super())
+      }
+    }
+    new Foo
+
+    // Old output (with --target=es6)
+    class Foo extends Object {
+      constructor() {
+        var __super = (...args) => {
+          super(...args);
+          __publicField(this, "field");
+        };
+        console.log(typeof __super());
+      }
+    }
+    new Foo();
+
+    // New output (with --target=es6)
+    class Foo extends Object {
+      constructor() {
+        var __super = (...args) => {
+          super(...args);
+          __publicField(this, "field");
+          return this;
+        };
+        console.log(typeof __super());
+      }
+    }
+    new Foo();
+    ```
+
+* Terminate the Go GC when esbuild's `stop()` API is called ([#3552](https://github.com/evanw/esbuild/issues/3552))
+
+    If you use esbuild with WebAssembly and pass the `worker: false` flag to `esbuild.initialize()`, then esbuild will run the WebAssembly module on the main thread. If you do this within a Deno test and that test calls `esbuild.stop()` to clean up esbuild's resources, Deno may complain that a `setTimeout()` call lasted past the end of the test. This happens when the Go is in the middle of a garbage collection pass and has scheduled additional ongoing garbage collection work. Normally calling `esbuild.stop()` will terminate the web worker that the WebAssembly module runs in, which will terminate the Go GC, but that doesn't happen if you disable the web worker with `worker: false`.
+
+    With this release, esbuild will now attempt to terminate the Go GC in this edge case by calling `clearTimeout()` on these pending timeouts.
+
+* Apply `/* @__NO_SIDE_EFFECTS__ */` on tagged template literals ([#3511](https://github.com/evanw/esbuild/issues/3511))
+
+    Tagged template literals that reference functions annotated with a `@__NO_SIDE_EFFECTS__` comment are now able to be removed via tree-shaking if the result is unused. This is a convention from [Rollup](https://github.com/rollup/rollup/pull/5024). Here is an example:
+
+    ```js
+    // Original code
+    const html = /* @__NO_SIDE_EFFECTS__ */ (a, ...b) => ({ a, b })
+    html`<a>remove</a>`
+    x = html`<b>keep</b>`
+
+    // Old output (with --tree-shaking=true)
+    const html = /* @__NO_SIDE_EFFECTS__ */ (a, ...b) => ({ a, b });
+    html`<a>remove</a>`;
+    x = html`<b>keep</b>`;
+
+    // New output (with --tree-shaking=true)
+    const html = /* @__NO_SIDE_EFFECTS__ */ (a, ...b) => ({ a, b });
+    x = html`<b>keep</b>`;
+    ```
+
+    Note that this feature currently only works within a single file, so it's not especially useful. This feature does not yet work across separate files. I still recommend using `@__PURE__` annotations instead of this feature, as they have wider tooling support. The drawback of course is that `@__PURE__` annotations need to be added at each call site, not at the declaration, and for non-call expressions such as template literals you need to wrap the expression in an IIFE (immediately-invoked function expression) to create a call expression to apply the `@__PURE__` annotation to.
+
+* Publish builds for IBM AIX PowerPC 64-bit ([#3549](https://github.com/evanw/esbuild/issues/3549))
+
+    This release publishes a binary executable to npm for IBM AIX PowerPC 64-bit, which means that in theory esbuild can now be installed in that environment with `npm install esbuild`. This hasn't actually been tested yet. If you have access to such a system, it would be helpful to confirm whether or not doing this actually works.
+
+## 0.19.9
+
+* Add support for transforming new CSS gradient syntax for older browsers
+
+    The specification called [CSS Images Module Level 4](https://www.w3.org/TR/css-images-4/) introduces new CSS gradient syntax for customizing how the browser interpolates colors in between color stops. You can now control the color space that the interpolation happens in as well as (for "polar" color spaces) control whether hue angle interpolation happens clockwise or counterclockwise. You can read more about this in [Mozilla's blog post about new CSS gradient features](https://developer.mozilla.org/en-US/blog/css-color-module-level-4/).
+
+    With this release, esbuild will now automatically transform this syntax for older browsers in the `target` list. For example, here's a gradient that should appear as a rainbow in a browser that supports this new syntax:
+
+    ```css
+    /* Original code */
+    .rainbow-gradient {
+      width: 100px;
+      height: 100px;
+      background: linear-gradient(in hsl longer hue, #7ff, #77f);
+    }
+
+    /* New output (with --target=chrome99) */
+    .rainbow-gradient {
+      width: 100px;
+      height: 100px;
+      background:
+        linear-gradient(
+          #77ffff,
+          #77ffaa 12.5%,
+          #77ff80 18.75%,
+          #84ff77 21.88%,
+          #99ff77 25%,
+          #eeff77 37.5%,
+          #fffb77 40.62%,
+          #ffe577 43.75%,
+          #ffbb77 50%,
+          #ff9077 56.25%,
+          #ff7b77 59.38%,
+          #ff7788 62.5%,
+          #ff77dd 75%,
+          #ff77f2 78.12%,
+          #f777ff 81.25%,
+          #cc77ff 87.5%,
+          #7777ff);
+    }
+    ```
+
+    You can now use this syntax in your CSS source code and esbuild will automatically convert it to an equivalent gradient for older browsers. In addition, esbuild will now also transform "double position" and "transition hint" syntax for older browsers as appropriate:
+
+    ```css
+    /* Original code */
+    .stripes {
+      width: 100px;
+      height: 100px;
+      background: linear-gradient(#e65 33%, #ff2 33% 67%, #99e 67%);
+    }
+    .glow {
+      width: 100px;
+      height: 100px;
+      background: radial-gradient(white 10%, 20%, black);
+    }
+
+    /* New output (with --target=chrome33) */
+    .stripes {
+      width: 100px;
+      height: 100px;
+      background:
+        linear-gradient(
+          #e65 33%,
+          #ff2 33%,
+          #ff2 67%,
+          #99e 67%);
+    }
+    .glow {
+      width: 100px;
+      height: 100px;
+      background:
+        radial-gradient(
+          #ffffff 10%,
+          #aaaaaa 12.81%,
+          #959595 15.62%,
+          #7b7b7b 21.25%,
+          #5a5a5a 32.5%,
+          #444444 43.75%,
+          #323232 55%,
+          #161616 77.5%,
+          #000000);
+    }
+    ```
+
+    You can see visual examples of these new syntax features by looking at [esbuild's gradient transformation tests](https://esbuild.github.io/gradient-tests/).
+
+    If necessary, esbuild will construct a new gradient that approximates the original gradient by recursively splitting the interval in between color stops until the approximation error is within a small threshold. That is why the above output CSS contains many more color stops than the input CSS.
+
+    Note that esbuild deliberately _replaces_ the original gradient with the approximation instead of inserting the approximation before the original gradient as a fallback. The latest version of Firefox has multiple gradient rendering bugs (including incorrect interpolation of partially-transparent colors and interpolating non-sRGB colors using the incorrect color space). If esbuild didn't replace the original gradient, then Firefox would use the original gradient instead of the fallback the appearance would be incorrect in Firefox. In other words, the latest version of Firefox supports modern gradient syntax but interprets it incorrectly.
+
+* Add support for `color()`, `lab()`, `lch()`, `oklab()`, `oklch()`, and `hwb()` in CSS
+
+    CSS has recently added lots of new ways of specifying colors. You can read more about this in [Chrome's blog post about CSS color spaces](https://developer.chrome.com/docs/css-ui/high-definition-css-color-guide).
+
+    This release adds support for minifying colors that use the `color()`, `lab()`, `lch()`, `oklab()`, `oklch()`, or `hwb()` syntax and/or transforming these colors for browsers that don't support it yet:
+
+    ```css
+    /* Original code */
+    div {
+      color: hwb(90deg 20% 40%);
+      background: color(display-p3 1 0 0);
+    }
+
+    /* New output (with --target=chrome99) */
+    div {
+      color: #669933;
+      background: #ff0f0e;
+      background: color(display-p3 1 0 0);
+    }
+    ```
+
+    As you can see, colors outside of the sRGB color space such as `color(display-p3 1 0 0)` are mapped back into the sRGB gamut and inserted as a fallback for browsers that don't support the new color syntax.
+
+* Allow empty type parameter lists in certain cases ([#3512](https://github.com/evanw/esbuild/issues/3512))
+
+    TypeScript allows interface declarations and type aliases to have empty type parameter lists. Previously esbuild didn't handle this edge case but with this release, esbuild will now parse this syntax:
+
+    ```ts
+    interface Foo<> {}
+    type Bar<> = {}
+    ```
+
+    This fix was contributed by [@magic-akari](https://github.com/magic-akari).
+
+## 0.19.8
+
+* Add a treemap chart to esbuild's bundle analyzer ([#2848](https://github.com/evanw/esbuild/issues/2848))
+
+    The bundler analyzer on esbuild's website (https://esbuild.github.io/analyze/) now has a treemap chart type in addition to the two existing chart types (sunburst and flame). This should be more familiar for people coming from other similar tools, as well as make better use of large screens.
+
+* Allow decorators after the `export` keyword ([#104](https://github.com/evanw/esbuild/issues/104))
+
+    Previously esbuild's decorator parser followed the original behavior of TypeScript's experimental decorators feature, which only allowed decorators to come before the `export` keyword. However, the upcoming JavaScript decorators feature also allows decorators to come after the `export` keyword. And with TypeScript 5.0, TypeScript now also allows experimental decorators to come after the `export` keyword too. So esbuild now allows this as well:
+
+    ```js
+    // This old syntax has always been permitted:
+    @decorator export class Foo {}
+    @decorator export default class Foo {}
+
+    // This new syntax is now permitted too:
+    export @decorator class Foo {}
+    export default @decorator class Foo {}
+    ```
+
+    In addition, esbuild's decorator parser has been rewritten to fix several subtle and likely unimportant edge cases with esbuild's parsing of exports and decorators in TypeScript (e.g. TypeScript apparently does automatic semicolon insertion after `interface` and `export interface` but not after `export default interface`).
+
+* Pretty-print decorators using the same whitespace as the original
+
+    When printing code containing decorators, esbuild will now try to respect whether the original code contained newlines after the decorator or not. This can make generated code containing many decorators much more compact to read:
+
+    ```js
+    // Original code
+    class Foo {
+      @a @b @c abc
+      @x @y @z xyz
+    }
+
+    // Old output
+    class Foo {
+      @a
+      @b
+      @c
+      abc;
+      @x
+      @y
+      @z
+      xyz;
+    }
+
+    // New output
+    class Foo {
+      @a @b @c abc;
+      @x @y @z xyz;
+    }
+    ```
+
 ## 0.19.7
 
 * Add support for bundling code that uses import attributes ([#3384](https://github.com/evanw/esbuild/issues/3384))
@@ -64,8 +449,7 @@
     })
     ```
 
-    > [!Warning]
-    > It's possible that the second iteration of this feature may change significantly again even though it's already shipping in real JavaScript VMs (since it has already happened once before). In that case, esbuild may end up adjusting its implementation to match the eventual standard behavior. So keep in mind that by using this, you are using an unstable upcoming JavaScript feature that may undergo breaking changes in the future.
+    Warning: It's possible that the second iteration of this feature may change significantly again even though it's already shipping in real JavaScript VMs (since it has already happened once before). In that case, esbuild may end up adjusting its implementation to match the eventual standard behavior. So keep in mind that by using this, you are using an unstable upcoming JavaScript feature that may undergo breaking changes in the future.
 
 * Adjust TypeScript experimental decorator behavior ([#3230](https://github.com/evanw/esbuild/issues/3230), [#3326](https://github.com/evanw/esbuild/issues/3326), [#3394](https://github.com/evanw/esbuild/issues/3394))
 

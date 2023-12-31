@@ -184,6 +184,17 @@ func MaybeSimplifyEqualityComparison(loc logger.Loc, e *EBinary, unsupportedFeat
 	return Expr{}, false
 }
 
+func IsSymbolInstance(data E) bool {
+	switch e := data.(type) {
+	case *EDot:
+		return e.IsSymbolInstance
+
+	case *EIndex:
+		return e.IsSymbolInstance
+	}
+	return false
+}
+
 func IsPrimitiveLiteral(data E) bool {
 	switch e := data.(type) {
 	case *EAnnotation:
@@ -574,6 +585,16 @@ func (ctx HelperContext) SimplifyUnusedExpr(expr Expr, unsupportedFeatures compa
 			}
 			if template != nil {
 				comma = JoinWithComma(comma, Expr{Loc: templateLoc, Data: template})
+			}
+			return comma
+		} else if e.CanBeUnwrappedIfUnused {
+			// If the function call was annotated as being able to be removed if the
+			// result is unused, then we can remove it and just keep the arguments.
+			// Note that there are no implicit "ToString" operations for tagged
+			// template literals.
+			var comma Expr
+			for _, part := range e.Parts {
+				comma = JoinWithComma(comma, ctx.SimplifyUnusedExpr(part.Value, unsupportedFeatures))
 			}
 			return comma
 		}
@@ -1686,7 +1707,7 @@ func FoldStringAddition(left Expr, right Expr, kind StringAdditionKind) Expr {
 //
 // This function intentionally avoids mutating the input AST so it can be
 // called after the AST has been frozen (i.e. after parsing ends).
-func InlineStringsAndNumbersIntoTemplate(loc logger.Loc, e *ETemplate) Expr {
+func InlinePrimitivesIntoTemplate(loc logger.Loc, e *ETemplate) Expr {
 	// Can't inline strings if there's a custom template tag
 	if e.TagOrNil.Data != nil {
 		return Expr{Loc: loc, Data: e}
@@ -1699,10 +1720,8 @@ func InlineStringsAndNumbersIntoTemplate(loc logger.Loc, e *ETemplate) Expr {
 		if value, ok := part.Value.Data.(*EInlinedEnum); ok {
 			part.Value = value.Value
 		}
-		if value, ok := part.Value.Data.(*ENumber); ok {
-			if str, ok := TryToStringOnNumberSafely(value.Value, 10); ok {
-				part.Value.Data = &EString{Value: helpers.StringToUTF16(str)}
-			}
+		if str, ok := ToStringWithoutSideEffects(part.Value.Data); ok {
+			part.Value.Data = &EString{Value: helpers.StringToUTF16(str)}
 		}
 		if str, ok := part.Value.Data.(*EString); ok {
 			if len(parts) == 0 {
@@ -2165,7 +2184,7 @@ func (ctx HelperContext) ClassCanBeRemovedIfUnused(class Class) bool {
 			return false
 		}
 
-		if property.Flags.Has(PropertyIsComputed) && !IsPrimitiveLiteral(property.Key.Data) {
+		if property.Flags.Has(PropertyIsComputed) && !IsPrimitiveLiteral(property.Key.Data) && !IsSymbolInstance(property.Key.Data) {
 			return false
 		}
 
@@ -2319,7 +2338,10 @@ func (ctx HelperContext) ExprCanBeRemovedIfUnused(expr Expr) bool {
 	case *EObject:
 		for _, property := range e.Properties {
 			// The key must still be evaluated if it's computed or a spread
-			if property.Kind == PropertySpread || (property.Flags.Has(PropertyIsComputed) && !IsPrimitiveLiteral(property.Key.Data)) {
+			if property.Kind == PropertySpread {
+				return false
+			}
+			if property.Flags.Has(PropertyIsComputed) && !IsPrimitiveLiteral(property.Key.Data) && !IsSymbolInstance(property.Key.Data) {
 				return false
 			}
 			if property.ValueOrNil.Data != nil && !ctx.ExprCanBeRemovedIfUnused(property.ValueOrNil) {
@@ -2413,7 +2435,7 @@ func (ctx HelperContext) ExprCanBeRemovedIfUnused(expr Expr) bool {
 		// A template can be removed if it has no tag and every value has no side
 		// effects and results in some kind of primitive, since all primitives
 		// have a "ToString" operation with no side effects.
-		if e.TagOrNil.Data == nil {
+		if e.TagOrNil.Data == nil || e.CanBeUnwrappedIfUnused {
 			for _, part := range e.Parts {
 				if !ctx.ExprCanBeRemovedIfUnused(part.Value) || KnownPrimitiveType(part.Value.Data) == PrimitiveUnknown {
 					return false

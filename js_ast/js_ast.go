@@ -242,8 +242,9 @@ var OpTable = []OpTableEntry{
 }
 
 type Decorator struct {
-	Value Expr
-	AtLoc logger.Loc
+	Value            Expr
+	AtLoc            logger.Loc
+	OmitNewlineAfter bool
 }
 
 type PropertyKind uint8
@@ -548,6 +549,7 @@ var EUndefinedShared = &EUndefined{}
 var SDebuggerShared = &SDebugger{}
 var SEmptyShared = &SEmpty{}
 var STypeScriptShared = &STypeScript{}
+var STypeScriptSharedWasDeclareClass = &STypeScript{WasDeclareClass: true}
 
 type ENew struct {
 	Target Expr
@@ -622,12 +624,17 @@ type EDot struct {
 	// unwrapped if the resulting value is unused. Unwrapping means discarding
 	// the call target but keeping any arguments with side effects.
 	CallCanBeUnwrappedIfUnused bool
+
+	// Symbol values are known to not have side effects when used as property
+	// names in class declarations and object literals.
+	IsSymbolInstance bool
 }
 
 func (a *EDot) HasSameFlagsAs(b *EDot) bool {
 	return a.OptionalChain == b.OptionalChain &&
 		a.CanBeRemovedIfUnused == b.CanBeRemovedIfUnused &&
-		a.CallCanBeUnwrappedIfUnused == b.CallCanBeUnwrappedIfUnused
+		a.CallCanBeUnwrappedIfUnused == b.CallCanBeUnwrappedIfUnused &&
+		a.IsSymbolInstance == b.IsSymbolInstance
 }
 
 type EIndex struct {
@@ -644,12 +651,17 @@ type EIndex struct {
 	// unwrapped if the resulting value is unused. Unwrapping means discarding
 	// the call target but keeping any arguments with side effects.
 	CallCanBeUnwrappedIfUnused bool
+
+	// Symbol values are known to not have side effects when used as property
+	// names in class declarations and object literals.
+	IsSymbolInstance bool
 }
 
 func (a *EIndex) HasSameFlagsAs(b *EIndex) bool {
 	return a.OptionalChain == b.OptionalChain &&
 		a.CanBeRemovedIfUnused == b.CanBeRemovedIfUnused &&
-		a.CallCanBeUnwrappedIfUnused == b.CallCanBeUnwrappedIfUnused
+		a.CallCanBeUnwrappedIfUnused == b.CallCanBeUnwrappedIfUnused &&
+		a.IsSymbolInstance == b.IsSymbolInstance
 }
 
 type EArrow struct {
@@ -797,6 +809,13 @@ type ETemplate struct {
 	HeadLoc        logger.Loc
 	LegacyOctalLoc logger.Loc
 
+	// True if this is a tagged template literal with a comment that indicates
+	// this function call can be removed if the result is unused. Note that the
+	// arguments are not considered to be part of the call. If the call itself
+	// is removed due to this annotation, the arguments must remain if they have
+	// side effects (including the string conversions).
+	CanBeUnwrappedIfUnused bool
+
 	// If the tag is present, it is expected to be a function and is called. If
 	// the tag is a syntactic property access, then the value for "this" in the
 	// function call is the object whose property was accessed (e.g. in "a.b``"
@@ -918,7 +937,9 @@ type SBlock struct {
 type SEmpty struct{}
 
 // This is a stand-in for a TypeScript type declaration
-type STypeScript struct{}
+type STypeScript struct {
+	WasDeclareClass bool
+}
 
 type SComment struct {
 	Text           string

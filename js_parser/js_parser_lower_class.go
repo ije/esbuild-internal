@@ -562,16 +562,19 @@ func (p *parser) computeClassLoweringInfo(class *js_ast.Class) (result classLowe
 				result.lowerAllStaticFields = true
 			}
 		} else {
-			// Instance fields must be lowered if the target doesn't support them
-			if p.options.unsupportedJSFeatures.Has(compat.ClassField) {
-				result.lowerAllInstanceFields = true
-			}
-
-			// Convert instance fields to assignment statements if the TypeScript
-			// setting for this is enabled. I don't think this matters for private
-			// fields because there's no way for this to call a setter in the base
-			// class, so this isn't done for private fields.
 			if p.options.ts.Parse && !class.UseDefineForClassFields {
+				// Convert instance fields to assignment statements if the TypeScript
+				// setting for this is enabled. I don't think this matters for private
+				// fields because there's no way for this to call a setter in the base
+				// class, so this isn't done for private fields.
+				if prop.InitializerOrNil.Data != nil {
+					// We can skip lowering all instance fields if all instance fields
+					// disappear completely when lowered. This happens when
+					// "useDefineForClassFields" is false and there is no initializer.
+					result.lowerAllInstanceFields = true
+				}
+			} else if p.options.unsupportedJSFeatures.Has(compat.ClassField) {
+				// Instance fields must be lowered if the target doesn't support them
 				result.lowerAllInstanceFields = true
 			}
 		}
@@ -1045,6 +1048,15 @@ func (p *parser) lowerClass(stmt js_ast.Stmt, expr js_ast.Expr, result visitClas
 		if !prop.Flags.Has(js_ast.PropertyIsMethod) {
 			if prop.Flags.Has(js_ast.PropertyIsStatic) {
 				mustLowerField = classLoweringInfo.lowerAllStaticFields
+			} else if prop.Kind == js_ast.PropertyNormal && p.options.ts.Parse && !class.UseDefineForClassFields && private == nil {
+				// Lower non-private instance fields (not accessors) if TypeScript's
+				// "useDefineForClassFields" setting is disabled. When all such fields
+				// have no initializers, we avoid setting the "lowerAllInstanceFields"
+				// flag as an optimization because we can just remove all class field
+				// declarations in that case without messing with the constructor. But
+				// we must set the "mustLowerField" flag here to cause this class field
+				// declaration to still be removed.
+				mustLowerField = true
 			} else {
 				mustLowerField = classLoweringInfo.lowerAllInstanceFields
 			}
@@ -1784,17 +1796,28 @@ func (p *parser) insertStmtsAfterSuperCall(body *js_ast.FnBody, stmtsToInsert []
 	//   var __super = (...args) => {
 	//     super(...args);
 	//     ...stmtsToInsert...
+	//     return this;
 	//   };
 	//
 	argsRef := p.newSymbol(ast.SymbolOther, "args")
 	p.currentScope.Generated = append(p.currentScope.Generated, argsRef)
-	stmtsToInsert = append([]js_ast.Stmt{{Loc: body.Loc, Data: &js_ast.SExpr{Value: js_ast.Expr{Loc: body.Loc, Data: &js_ast.ECall{
+	p.recordUsage(argsRef)
+	superCall := js_ast.Expr{Loc: body.Loc, Data: &js_ast.ECall{
 		Target: js_ast.Expr{Loc: body.Loc, Data: js_ast.ESuperShared},
 		Args:   []js_ast.Expr{{Loc: body.Loc, Data: &js_ast.ESpread{Value: js_ast.Expr{Loc: body.Loc, Data: &js_ast.EIdentifier{Ref: argsRef}}}}},
-	}}}}}, stmtsToInsert...)
+	}}
+	stmtsToInsert = append(append(
+		[]js_ast.Stmt{{Loc: body.Loc, Data: &js_ast.SExpr{Value: superCall}}},
+		stmtsToInsert...),
+		js_ast.Stmt{Loc: body.Loc, Data: &js_ast.SReturn{ValueOrNil: js_ast.Expr{Loc: body.Loc, Data: js_ast.EThisShared}}},
+	)
+	if p.options.minifySyntax {
+		stmtsToInsert = p.mangleStmts(stmtsToInsert, stmtsFnBody)
+	}
 	body.Block.Stmts = append([]js_ast.Stmt{{Loc: body.Loc, Data: &js_ast.SLocal{Decls: []js_ast.Decl{{
 		Binding: js_ast.Binding{Loc: body.Loc, Data: &js_ast.BIdentifier{Ref: superCtorRef}}, ValueOrNil: js_ast.Expr{Loc: body.Loc, Data: &js_ast.EArrow{
 			HasRestArg: true,
+			PreferExpr: true,
 			Args:       []js_ast.Arg{{Binding: js_ast.Binding{Loc: body.Loc, Data: &js_ast.BIdentifier{Ref: argsRef}}}},
 			Body:       js_ast.FnBody{Loc: body.Loc, Block: js_ast.SBlock{Stmts: stmtsToInsert}},
 		}},

@@ -1806,7 +1806,7 @@ func TestSuperCall(t *testing.T) {
 	expectPrintedMangleTarget(t, 2015, "class A extends B { x = 1; constructor() { if (true) super(1); else super(2); } }",
 		"class A extends B {\n  constructor() {\n    super(1);\n    __publicField(this, \"x\", 1);\n  }\n}\n")
 	expectPrintedMangleTarget(t, 2015, "class A extends B { x = 1; constructor() { if (foo) super(1); else super(2); } }",
-		"class A extends B {\n  constructor() {\n    var __super = (...args) => {\n      super(...args);\n      __publicField(this, \"x\", 1);\n    };\n    foo ? __super(1) : __super(2);\n  }\n}\n")
+		"class A extends B {\n  constructor() {\n    var __super = (...args) => (super(...args), __publicField(this, \"x\", 1), this);\n    foo ? __super(1) : __super(2);\n  }\n}\n")
 }
 
 func TestSuperProp(t *testing.T) {
@@ -2000,46 +2000,43 @@ func TestAutoAccessors(t *testing.T) {
 }
 
 func TestDecorators(t *testing.T) {
-	expectPrinted(t, "@x @y class Foo {}", "@x\n@y\nclass Foo {\n}\n")
-	expectPrinted(t, "@x @y export class Foo {}", "@x\n@y\nexport class Foo {\n}\n")
-	expectPrinted(t, "@x @y export default class Foo {}", "@x\n@y\nexport default class Foo {\n}\n")
+	expectPrinted(t, "@x @y class Foo {}", "@x @y class Foo {\n}\n")
+	expectPrinted(t, "@x @y export class Foo {}", "@x @y export class Foo {\n}\n")
+	expectPrinted(t, "@x @y export default class Foo {}", "@x @y export default class Foo {\n}\n")
 	expectPrinted(t, "_ = @x @y class {}", "_ = @x @y class {\n};\n")
 
-	expectPrinted(t, "class Foo { @x y }", "class Foo {\n  @x\n  y;\n}\n")
-	expectPrinted(t, "class Foo { @x y() {} }", "class Foo {\n  @x\n  y() {\n  }\n}\n")
-	expectPrinted(t, "class Foo { @x static y }", "class Foo {\n  @x\n  static y;\n}\n")
-	expectPrinted(t, "class Foo { @x static y() {} }", "class Foo {\n  @x\n  static y() {\n  }\n}\n")
-	expectPrinted(t, "class Foo { @x accessor y }", "class Foo {\n  @x\n  accessor y;\n}\n")
+	expectPrinted(t, "class Foo { @x y }", "class Foo {\n  @x y;\n}\n")
+	expectPrinted(t, "class Foo { @x y() {} }", "class Foo {\n  @x y() {\n  }\n}\n")
+	expectPrinted(t, "class Foo { @x static y }", "class Foo {\n  @x static y;\n}\n")
+	expectPrinted(t, "class Foo { @x static y() {} }", "class Foo {\n  @x static y() {\n  }\n}\n")
+	expectPrinted(t, "class Foo { @x accessor y }", "class Foo {\n  @x accessor y;\n}\n")
 
-	expectPrinted(t, "class Foo { @x #y }", "class Foo {\n  @x\n  #y;\n}\n")
-	expectPrinted(t, "class Foo { @x #y() {} }", "class Foo {\n  @x\n  #y() {\n  }\n}\n")
-	expectPrinted(t, "class Foo { @x static #y }", "class Foo {\n  @x\n  static #y;\n}\n")
-	expectPrinted(t, "class Foo { @x static #y() {} }", "class Foo {\n  @x\n  static #y() {\n  }\n}\n")
-	expectPrinted(t, "class Foo { @x accessor #y }", "class Foo {\n  @x\n  accessor #y;\n}\n")
+	expectPrinted(t, "class Foo { @x #y }", "class Foo {\n  @x #y;\n}\n")
+	expectPrinted(t, "class Foo { @x #y() {} }", "class Foo {\n  @x #y() {\n  }\n}\n")
+	expectPrinted(t, "class Foo { @x static #y }", "class Foo {\n  @x static #y;\n}\n")
+	expectPrinted(t, "class Foo { @x static #y() {} }", "class Foo {\n  @x static #y() {\n  }\n}\n")
+	expectPrinted(t, "class Foo { @x accessor #y }", "class Foo {\n  @x accessor #y;\n}\n")
 
 	expectParseError(t, "class Foo { x(@y z) {} }", "<stdin>: ERROR: Parameter decorators are not allowed in JavaScript\n")
 	expectParseError(t, "class Foo { @x static {} }", "<stdin>: ERROR: Expected \";\" but found \"{\"\n")
 
 	expectPrinted(t, "@\na\n(\n)\n@\n(\nb\n)\nclass\nFoo\n{\n}\n", "@a()\n@b\nclass Foo {\n}\n")
-	expectPrinted(t, "@(a, b) class Foo {}\n", "@(a, b)\nclass Foo {\n}\n")
-	expectPrinted(t, "@x() class Foo {}", "@x()\nclass Foo {\n}\n")
-	expectPrinted(t, "@x.y() class Foo {}", "@x.y()\nclass Foo {\n}\n")
-	expectPrinted(t, "@(() => {}) class Foo {}", "@(() => {\n})\nclass Foo {\n}\n")
+	expectPrinted(t, "@(a, b) class Foo {}", "@(a, b) class Foo {\n}\n")
+	expectPrinted(t, "@x() class Foo {}", "@x() class Foo {\n}\n")
+	expectPrinted(t, "@x.y() class Foo {}", "@x.y() class Foo {\n}\n")
+	expectPrinted(t, "@(() => {}) class Foo {}", "@(() => {\n}) class Foo {\n}\n")
 	expectPrinted(t, "class Foo { #x = @y.#x.y.#x class {} }", "class Foo {\n  #x = @y.#x.y.#x class {\n  };\n}\n")
 	expectParseError(t, "@123 class Foo {}", "<stdin>: ERROR: Expected identifier but found \"123\"\n")
-	expectParseError(t, "@x[y] class Foo {}",
-		"<stdin>: ERROR: Expected \"class\" after decorator but found \"[\"\n<stdin>: NOTE: The preceding decorator is here:\n"+
-			"NOTE: Decorators can only be used with class declarations.\n<stdin>: ERROR: Expected \";\" but found \"class\"\n")
+	expectParseError(t, "@x[y] class Foo {}", "<stdin>: ERROR: Expected \";\" but found \"class\"\n")
 	expectParseError(t, "@x?.() class Foo {}", "<stdin>: ERROR: Expected \".\" but found \"?.\"\n")
 	expectParseError(t, "@x?.y() class Foo {}", "<stdin>: ERROR: Expected \".\" but found \"?.\"\n")
 	expectParseError(t, "@x?.[y]() class Foo {}", "<stdin>: ERROR: Expected \".\" but found \"?.\"\n")
 	expectParseError(t, "@new Function() class Foo {}", "<stdin>: ERROR: Expected identifier but found \"new\"\n")
 	expectParseError(t, "@() => {} class Foo {}", "<stdin>: ERROR: Unexpected \")\"\n")
+	expectParseError(t, "x = @y function() {}", "<stdin>: ERROR: Expected \"class\" but found \"function\"\n")
 
 	// See: https://github.com/microsoft/TypeScript/issues/55336
-	expectParseError(t, "@x().y() class Foo {}",
-		"<stdin>: ERROR: Expected \"class\" after decorator but found \".\"\n"+
-			"<stdin>: NOTE: The preceding decorator is here:\nNOTE: Decorators can only be used with class declarations.\n")
+	expectParseError(t, "@x().y() class Foo {}", "<stdin>: ERROR: Unexpected \".\"\n")
 
 	errorText := "<stdin>: ERROR: Transforming JavaScript decorators to the configured target environment is not supported yet\n"
 	expectParseErrorWithUnsupportedFeatures(t, compat.Decorators, "@dec class Foo {}", errorText)
@@ -2049,6 +2046,24 @@ func TestDecorators(t *testing.T) {
 	expectParseErrorWithUnsupportedFeatures(t, compat.Decorators, "class Foo { @dec static x }", errorText)
 	expectParseErrorWithUnsupportedFeatures(t, compat.Decorators, "class Foo { @dec static x() {} }", errorText)
 	expectParseErrorWithUnsupportedFeatures(t, compat.Decorators, "class Foo { @dec static accessor x }", errorText)
+
+	// Check ASI for "abstract"
+	expectParseError(t, "@x abstract class Foo {}", "<stdin>: ERROR: Expected \";\" but found \"class\"\n")
+	expectParseError(t, "@x abstract\nclass Foo {}", "<stdin>: ERROR: Decorators are not valid here\n")
+
+	// Check decorator locations in relation to the "export" keyword
+	expectPrinted(t, "@x export class Foo {}", "@x export class Foo {\n}\n")
+	expectPrinted(t, "export @x class Foo {}", "@x export class Foo {\n}\n")
+	expectPrinted(t, "@x export default class {}", "@x export default class {\n}\n")
+	expectPrinted(t, "export default @x class {}", "@x export default class {\n}\n")
+	expectPrinted(t, "@x export default class Foo {}", "@x export default class Foo {\n}\n")
+	expectPrinted(t, "export default @x class Foo {}", "@x export default class Foo {\n}\n")
+	expectPrinted(t, "export default (@x class {})", "export default (@x class {\n});\n")
+	expectPrinted(t, "export default (@x class Foo {})", "export default (@x class Foo {\n});\n")
+	expectParseError(t, "export @x default class {}", "<stdin>: ERROR: Unexpected \"default\"\n")
+	expectParseError(t, "@x export @y class Foo {}", "<stdin>: ERROR: Decorators are not valid here\n")
+	expectParseError(t, "@x export default abstract", "<stdin>: ERROR: Decorators are not valid here\n")
+	expectParseError(t, "@x export @y default class {}", "<stdin>: ERROR: Decorators are not valid here\n<stdin>: ERROR: Unexpected \"default\"\n")
 }
 
 func TestGenerator(t *testing.T) {
@@ -2943,6 +2958,14 @@ func TestExport(t *testing.T) {
 	expectParseError(t, "export let", "<stdin>: ERROR: Expected identifier but found end of file\n")
 	expectParseError(t, "export const", "<stdin>: ERROR: Expected identifier but found end of file\n")
 
+	// Do not parse TypeScript export syntax in JavaScript
+	expectParseError(t, "export enum Foo {}", "<stdin>: ERROR: Unexpected \"enum\"\n")
+	expectParseError(t, "export interface Foo {}", "<stdin>: ERROR: Unexpected \"interface\"\n")
+	expectParseError(t, "export namespace Foo {}", "<stdin>: ERROR: Unexpected \"namespace\"\n")
+	expectParseError(t, "export abstract class Foo {}", "<stdin>: ERROR: Unexpected \"abstract\"\n")
+	expectParseError(t, "export declare class Foo {}", "<stdin>: ERROR: Unexpected \"declare\"\n")
+	expectParseError(t, "export declare function foo() {}", "<stdin>: ERROR: Unexpected \"declare\"\n")
+
 	// String export alias with "export {}"
 	expectPrinted(t, "let x; export {x as ''}", "let x;\nexport { x as \"\" };\n")
 	expectPrinted(t, "let x; export {x as '🍕'}", "let x;\nexport { x as \"🍕\" };\n")
@@ -3058,6 +3081,10 @@ func TestExportDefault(t *testing.T) {
 	expectPrinted(t, "export default async function* foo() {} - after", "export default async function* foo() {\n}\n-after;\n")
 	expectPrinted(t, "export default class {} - after", "export default class {\n}\n-after;\n")
 	expectPrinted(t, "export default class Foo {} - after", "export default class Foo {\n}\n-after;\n")
+
+	// Check ASI for "abstract"
+	expectPrinted(t, "export default abstract\nclass Foo {}", "export default abstract;\nclass Foo {\n}\n")
+	expectParseError(t, "export default abstract class {}", "<stdin>: ERROR: Expected \";\" but found \"class\"\n")
 }
 
 func TestExportClause(t *testing.T) {
@@ -4947,15 +4974,23 @@ func TestMangleInlineLocals(t *testing.T) {
 	check("let x = 1; return void x", "let x = 1;")
 	check("let x = 1; return typeof x", "return typeof 1;")
 
+	// Can substitute into template literals
+	check("let x = 1; return `<${x}>`", "return `<1>`;")
+	check("let x = 1n; return `<${x}>`", "return `<1>`;")
+	check("let x = null; return `<${x}>`", "return `<null>`;")
+	check("let x = undefined; return `<${x}>`", "return `<undefined>`;")
+	check("let x = false; return `<${x}>`", "return `<false>`;")
+	check("let x = true; return `<${x}>`", "return `<true>`;")
+
 	// Check substituting a side-effect free value into normal binary operators
 	check("let x = 1; return x + 2", "return 1 + 2;")
 	check("let x = 1; return 2 + x", "return 2 + 1;")
 	check("let x = 1; return x + arg0", "return 1 + arg0;")
 	check("let x = 1; return arg0 + x", "return arg0 + 1;")
 	check("let x = 1; return x + fn()", "return 1 + fn();")
-	check("let x = 1; return fn() + x", "let x = 1;\nreturn fn() + x;")
+	check("let x = 1; return fn() + x", "return fn() + 1;")
 	check("let x = 1; return x + undef", "return 1 + undef;")
-	check("let x = 1; return undef + x", "let x = 1;\nreturn undef + x;")
+	check("let x = 1; return undef + x", "return undef + 1;")
 
 	// Check substituting a value with side-effects into normal binary operators
 	check("let x = fn(); return x + 2", "return fn() + 2;")
@@ -5477,11 +5512,14 @@ func TestJSX(t *testing.T) {
 
 	expectParseErrorJSX(t, "<a b=true/>", "<stdin>: ERROR: Expected \"{\" but found \"true\"\n")
 	expectParseErrorJSX(t, "</a>", "<stdin>: ERROR: Expected identifier but found \"/\"\n")
-	expectParseErrorJSX(t, "<></b>", "<stdin>: ERROR: Expected closing \"b\" tag to match opening \"\" tag\n<stdin>: NOTE: The opening \"\" tag is here:\n")
-	expectParseErrorJSX(t, "<a></>", "<stdin>: ERROR: Expected closing \"\" tag to match opening \"a\" tag\n<stdin>: NOTE: The opening \"a\" tag is here:\n")
-	expectParseErrorJSX(t, "<a></b>", "<stdin>: ERROR: Expected closing \"b\" tag to match opening \"a\" tag\n<stdin>: NOTE: The opening \"a\" tag is here:\n")
+	expectParseErrorJSX(t, "<></b>",
+		"<stdin>: ERROR: Unexpected closing \"b\" tag does not match opening fragment tag\n<stdin>: NOTE: The opening fragment tag is here:\n")
+	expectParseErrorJSX(t, "<a></>",
+		"<stdin>: ERROR: Unexpected closing fragment tag does not match opening \"a\" tag\n<stdin>: NOTE: The opening \"a\" tag is here:\n")
+	expectParseErrorJSX(t, "<a></b>",
+		"<stdin>: ERROR: Unexpected closing \"b\" tag does not match opening \"a\" tag\n<stdin>: NOTE: The opening \"a\" tag is here:\n")
 	expectParseErrorJSX(t, "<\na\n.\nb\n>\n<\n/\nc\n.\nd\n>",
-		"<stdin>: ERROR: Expected closing \"c.d\" tag to match opening \"a.b\" tag\n<stdin>: NOTE: The opening \"a.b\" tag is here:\n")
+		"<stdin>: ERROR: Unexpected closing \"c.d\" tag does not match opening \"a.b\" tag\n<stdin>: NOTE: The opening \"a.b\" tag is here:\n")
 	expectParseErrorJSX(t, "<a-b.c>", "<stdin>: ERROR: Expected \">\" but found \".\"\n")
 	expectParseErrorJSX(t, "<a.b-c>", "<stdin>: ERROR: Unexpected \"-\"\n")
 

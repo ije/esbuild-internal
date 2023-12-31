@@ -1222,6 +1222,31 @@ func TestRemoveUnusedPureCommentCalls(t *testing.T) {
 	})
 }
 
+func TestRemoveUnusedNoSideEffectsTaggedTemplates(t *testing.T) {
+	dce_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				// @__NO_SIDE_EFFECTS__
+				function foo() {}
+
+				foo` + "`remove`" + `;
+				foo` + "`remove${null}`" + `;
+				foo` + "`remove${123}`" + `;
+
+				use(foo` + "`keep`" + `);
+				foo` + "`remove this part ${keep} and this ${alsoKeep}`" + `;
+				` + "`remove this part ${keep} and this ${alsoKeep}`" + `;
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+			MinifySyntax:  true,
+		},
+	})
+}
+
 func TestTreeShakingReactElements(t *testing.T) {
 	dce_suite.expectBundled(t, bundled{
 		files: map[string]string{
@@ -1248,8 +1273,8 @@ func TestTreeShakingReactElements(t *testing.T) {
 
 func TestDisableTreeShaking(t *testing.T) {
 	defines := config.ProcessDefines(map[string]config.DefineData{
-		"pure":    {CallCanBeUnwrappedIfUnused: true},
-		"some.fn": {CallCanBeUnwrappedIfUnused: true},
+		"pure":    {Flags: config.CallCanBeUnwrappedIfUnused},
+		"some.fn": {Flags: config.CallCanBeUnwrappedIfUnused},
 	})
 	dce_suite.expectBundled(t, bundled{
 		files: map[string]string{
@@ -4567,6 +4592,39 @@ func TestDropLabelTreeShakingBugIssue3311(t *testing.T) {
 			AbsOutputFile: "/out.js",
 			DropLabels:    []string{"DROP"},
 			OutputFormat:  config.FormatESModule,
+		},
+	})
+}
+
+func TestDCEOfSymbolInstances(t *testing.T) {
+	dce_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/class.js": `
+				class Remove1 {}
+				class Remove2 { *[Symbol.iterator]() {} }
+				class Remove3 { *[Symbol['iterator']]() {} }
+
+				class Keep1 { *[Symbol.iterator]() {} [keep] }
+				class Keep2 { [keep]; *[Symbol.iterator]() {} }
+				class Keep3 { *[Symbol.wtf]() {} }
+			`,
+			"/object.js": `
+				let remove1 = {}
+				let remove2 = { *[Symbol.iterator]() {} }
+				let remove3 = { *[Symbol['iterator']]() {} }
+
+				let keep1 = { *[Symbol.iterator]() {}, [keep]: null }
+				let keep2 = { [keep]: null, *[Symbol.iterator]() {} }
+				let keep3 = { *[Symbol.wtf]() {} }
+			`,
+		},
+		entryPaths: []string{
+			"/class.js",
+			"/object.js",
+		},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
 		},
 	})
 }

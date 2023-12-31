@@ -928,41 +928,29 @@ _ = class {
   #bar;
   classes = [
     class {
-      @import_somewhere.imported
-      @((0, import_somewhere.imported)())
-      imported;
+      @import_somewhere.imported @((0, import_somewhere.imported)()) imported;
     },
     class {
-      @unbound
-      @unbound()
-      unbound;
+      @unbound @unbound() unbound;
     },
     class {
-      @(123)
-      @(123())
-      constant;
+      @(123) @(123()) constant;
     },
     class {
-      @(void 0)
-      @((void 0)())
-      undef;
+      @(void 0) @((void 0)()) undef;
     },
     class {
-      @(element[access])
-      indexed;
+      @(element[access]) indexed;
     },
     class {
-      @foo.#bar
-      private;
+      @foo.#bar private;
     },
     class {
-      @(foo["ヿ"])
-      unicode;
+      @(foo["ヿ"]) unicode;
     },
     class {
       @(() => {
-      })
-      arrow;
+      }) arrow;
     }
   ];
 };
@@ -976,41 +964,29 @@ _ = class {
   #bar;
   classes = [
     class {
-      @imported
-      @imported()
-      imported;
+      @imported @imported() imported;
     },
     class {
-      @unbound
-      @unbound()
-      unbound;
+      @unbound @unbound() unbound;
     },
     class {
-      @(123)
-      @(123())
-      constant;
+      @(123) @(123()) constant;
     },
     class {
-      @(void 0)
-      @((void 0)())
-      undef;
+      @(void 0) @((void 0)()) undef;
     },
     class {
-      @(element[access])
-      indexed;
+      @(element[access]) indexed;
     },
     class {
-      @foo.#bar
-      private;
+      @foo.#bar private;
     },
     class {
-      @(foo["ヿ"])
-      unicode;
+      @(foo["ヿ"]) unicode;
     },
     class {
       @(() => {
-      })
-      arrow;
+      }) arrow;
     }
   ];
 };
@@ -1104,6 +1080,42 @@ console.log([
   a == null ? void 0 : a[b][c],
   (_a = a[b]) == null ? void 0 : _a[c]
 ]);
+
+================================================================================
+TestDefineOptionalChainPanicIssue3551
+---------- /out/id-define.js ----------
+// id-define.js
+1?.y.z;
+(1?.y).z;
+1?.y["z"];
+(1?.y)["z"];
+1?.y();
+(1?.y)();
+1?.y.z();
+(1?.y).z();
+1?.y["z"]();
+(1?.y)["z"]();
+delete 1?.y.z;
+delete (1?.y).z;
+delete 1?.y["z"];
+delete (1?.y)["z"];
+
+---------- /out/dot-define.js ----------
+// dot-define.js
+1 .c;
+1 .c;
+1["c"];
+1["c"];
+1();
+1();
+1 .c();
+1 .c();
+1["c"]();
+1["c"]();
+delete 1 .c;
+delete 1 .c;
+delete 1["c"];
+delete 1["c"];
 
 ================================================================================
 TestDefineThis
@@ -5143,6 +5155,24 @@ module.exports = foo;
 
 ---------- /out/no-warnings-here.js ----------
 console.log(module, exports);
+
+================================================================================
+TestNodeAnnotationFalsePositiveIssue3544
+---------- /out.js ----------
+// entry.mjs
+var entry_exports = {};
+__export(entry_exports, {
+  confuseNode: () => confuseNode
+});
+module.exports = __toCommonJS(entry_exports);
+function confuseNode(exports2) {
+  exports2.notAnExport = function() {
+  };
+}
+// Annotate the CommonJS export names for ESM import in node:
+0 && (module.exports = {
+  confuseNode
+});
 
 ================================================================================
 TestNodeModules
