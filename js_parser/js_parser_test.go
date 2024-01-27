@@ -3679,6 +3679,8 @@ func TestMangleCharCodeAt(t *testing.T) {
 	expectPrintedMangle(t, "a = '🧀'.charCodeAt(2)", "a = NaN;\n")
 
 	expectPrintedMangle(t, "a = 'xy'.charCodeAt(NaN)", "a = \"xy\".charCodeAt(NaN);\n")
+	expectPrintedMangle(t, "a = 'xy'.charCodeAt(-Infinity)", "a = \"xy\".charCodeAt(-Infinity);\n")
+	expectPrintedMangle(t, "a = 'xy'.charCodeAt(Infinity)", "a = \"xy\".charCodeAt(Infinity);\n")
 	expectPrintedMangle(t, "a = 'xy'.charCodeAt(0.5)", "a = \"xy\".charCodeAt(0.5);\n")
 	expectPrintedMangle(t, "a = 'xy'.charCodeAt(1e99)", "a = \"xy\".charCodeAt(1e99);\n")
 	expectPrintedMangle(t, "a = 'xy'.charCodeAt('1')", "a = \"xy\".charCodeAt(\"1\");\n")
@@ -3697,6 +3699,7 @@ func TestMangleFromCharCode(t *testing.T) {
 	expectPrintedMangle(t, "a = String.fromCharCode(0x10078, 0x10079)", "a = \"xy\";\n")
 	expectPrintedMangle(t, "a = String.fromCharCode(0x1_0000_FFFF)", "a = \"\uFFFF\";\n")
 	expectPrintedMangle(t, "a = String.fromCharCode(NaN)", "a = \"\\0\";\n")
+	expectPrintedMangle(t, "a = String.fromCharCode(-Infinity)", "a = \"\\0\";\n")
 	expectPrintedMangle(t, "a = String.fromCharCode(Infinity)", "a = \"\\0\";\n")
 	expectPrintedMangle(t, "a = String.fromCharCode(null)", "a = \"\\0\";\n")
 	expectPrintedMangle(t, "a = String.fromCharCode(undefined)", "a = \"\\0\";\n")
@@ -5578,6 +5581,21 @@ func TestJSX(t *testing.T) {
 		expectParseErrorJSX(t, "<x"+colon+"y"+colon+"/>", "<stdin>: ERROR: Expected \">\" but found \":\"\n")
 		expectParseErrorJSX(t, "<x"+colon+"0y/>", "<stdin>: ERROR: Expected identifier after \"x:\" in namespaced JSX name\n")
 	}
+
+	// JSX elements as JSX attribute values
+	expectPrintedJSX(t, "<a b=<c/>/>", "/* @__PURE__ */ React.createElement(\"a\", { b: /* @__PURE__ */ React.createElement(\"c\", null) });\n")
+	expectPrintedJSX(t, "<a b=<></>/>", "/* @__PURE__ */ React.createElement(\"a\", { b: /* @__PURE__ */ React.createElement(React.Fragment, null) });\n")
+	expectParseErrorJSX(t, "<a b=</a>/>", "<stdin>: ERROR: Expected identifier but found \"/\"\n")
+	expectParseErrorJSX(t, "<a b=<>/>",
+		"<stdin>: WARNING: The character \">\" is not valid inside a JSX element\nNOTE: Did you mean to escape it as \"{'>'}\" instead?\n"+
+			"<stdin>: ERROR: Unexpected end of file before a closing fragment tag\n<stdin>: NOTE: The opening fragment tag is here:\n")
+	expectParseErrorJSX(t, "<a b=<c>></a>",
+		"<stdin>: WARNING: The character \">\" is not valid inside a JSX element\nNOTE: Did you mean to escape it as \"{'>'}\" instead?\n"+
+			"<stdin>: ERROR: Unexpected closing \"a\" tag does not match opening \"c\" tag\n<stdin>: NOTE: The opening \"c\" tag is here:\n"+
+			"<stdin>: ERROR: Expected \">\" but found end of file\n")
+	expectParseErrorJSX(t, "<a b=<c>/>",
+		"<stdin>: WARNING: The character \">\" is not valid inside a JSX element\nNOTE: Did you mean to escape it as \"{'>'}\" instead?\n"+
+			"<stdin>: ERROR: Unexpected end of file before a closing \"c\" tag\n<stdin>: NOTE: The opening \"c\" tag is here:\n")
 }
 
 func TestJSXSingleLine(t *testing.T) {
