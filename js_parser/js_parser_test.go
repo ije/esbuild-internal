@@ -2028,15 +2028,19 @@ func TestDecorators(t *testing.T) {
 	expectPrinted(t, "class Foo { #x = @y.#x.y.#x class {} }", "class Foo {\n  #x = @y.#x.y.#x class {\n  };\n}\n")
 	expectParseError(t, "@123 class Foo {}", "<stdin>: ERROR: Expected identifier but found \"123\"\n")
 	expectParseError(t, "@x[y] class Foo {}", "<stdin>: ERROR: Expected \";\" but found \"class\"\n")
-	expectParseError(t, "@x?.() class Foo {}", "<stdin>: ERROR: Expected \".\" but found \"?.\"\n")
-	expectParseError(t, "@x?.y() class Foo {}", "<stdin>: ERROR: Expected \".\" but found \"?.\"\n")
-	expectParseError(t, "@x?.[y]() class Foo {}", "<stdin>: ERROR: Expected \".\" but found \"?.\"\n")
+	expectParseError(t, "@x?.() class Foo {}", "<stdin>: ERROR: Expected identifier but found \"(\"\n")
+	expectParseError(t, "@x?.y() class Foo {}",
+		"<stdin>: ERROR: JavaScript decorator syntax does not allow \"?.\" here\n"+
+			"<stdin>: NOTE: Wrap this decorator in parentheses to allow arbitrary expressions:\n")
+	expectParseError(t, "@x?.[y]() class Foo {}", "<stdin>: ERROR: Expected identifier but found \"[\"\n")
 	expectParseError(t, "@new Function() class Foo {}", "<stdin>: ERROR: Expected identifier but found \"new\"\n")
 	expectParseError(t, "@() => {} class Foo {}", "<stdin>: ERROR: Unexpected \")\"\n")
 	expectParseError(t, "x = @y function() {}", "<stdin>: ERROR: Expected \"class\" but found \"function\"\n")
 
 	// See: https://github.com/microsoft/TypeScript/issues/55336
-	expectParseError(t, "@x().y() class Foo {}", "<stdin>: ERROR: Unexpected \".\"\n")
+	expectParseError(t, "@x().y() class Foo {}",
+		"<stdin>: ERROR: JavaScript decorator syntax does not allow \".\" after a call expression\n"+
+			"<stdin>: NOTE: Wrap this decorator in parentheses to allow arbitrary expressions:\n")
 
 	errorText := "<stdin>: ERROR: Transforming JavaScript decorators to the configured target environment is not supported yet\n"
 	expectParseErrorWithUnsupportedFeatures(t, compat.Decorators, "@dec class Foo {}", errorText)
@@ -2064,6 +2068,9 @@ func TestDecorators(t *testing.T) {
 	expectParseError(t, "@x export @y class Foo {}", "<stdin>: ERROR: Decorators are not valid here\n")
 	expectParseError(t, "@x export default abstract", "<stdin>: ERROR: Decorators are not valid here\n")
 	expectParseError(t, "@x export @y default class {}", "<stdin>: ERROR: Decorators are not valid here\n<stdin>: ERROR: Unexpected \"default\"\n")
+
+	// Disallow TypeScript syntax in JavaScript
+	expectParseError(t, "@x!.y!.z class Foo {}", "<stdin>: ERROR: Unexpected \"!\"\n")
 }
 
 func TestGenerator(t *testing.T) {
@@ -4653,14 +4660,30 @@ func TestMangleBinaryConstantFolding(t *testing.T) {
 	expectPrintedNormalAndMangle(t, "x = -123 / 0", "x = -123 / 0;\n", "x = -Infinity;\n")
 	expectPrintedNormalAndMangle(t, "x = -123 / -0", "x = -123 / -0;\n", "x = Infinity;\n")
 
-	expectPrintedNormalAndMangle(t, "x = 3 < 6", "x = 3 < 6;\n", "x = 3 < 6;\n")
-	expectPrintedNormalAndMangle(t, "x = 3 > 6", "x = 3 > 6;\n", "x = 3 > 6;\n")
-	expectPrintedNormalAndMangle(t, "x = 3 <= 6", "x = 3 <= 6;\n", "x = 3 <= 6;\n")
-	expectPrintedNormalAndMangle(t, "x = 3 >= 6", "x = 3 >= 6;\n", "x = 3 >= 6;\n")
+	expectPrintedNormalAndMangle(t, "x = 3 < 6", "x = 3 < 6;\n", "x = true;\n")
+	expectPrintedNormalAndMangle(t, "x = 3 > 6", "x = 3 > 6;\n", "x = false;\n")
+	expectPrintedNormalAndMangle(t, "x = 3 <= 6", "x = 3 <= 6;\n", "x = true;\n")
+	expectPrintedNormalAndMangle(t, "x = 3 >= 6", "x = 3 >= 6;\n", "x = false;\n")
 	expectPrintedNormalAndMangle(t, "x = 3 == 6", "x = false;\n", "x = false;\n")
 	expectPrintedNormalAndMangle(t, "x = 3 != 6", "x = true;\n", "x = true;\n")
 	expectPrintedNormalAndMangle(t, "x = 3 === 6", "x = false;\n", "x = false;\n")
 	expectPrintedNormalAndMangle(t, "x = 3 !== 6", "x = true;\n", "x = true;\n")
+
+	expectPrintedNormalAndMangle(t, "x = 'a' < 'b'", "x = \"a\" < \"b\";\n", "x = true;\n")
+	expectPrintedNormalAndMangle(t, "x = 'a' > 'b'", "x = \"a\" > \"b\";\n", "x = false;\n")
+	expectPrintedNormalAndMangle(t, "x = 'a' <= 'b'", "x = \"a\" <= \"b\";\n", "x = true;\n")
+	expectPrintedNormalAndMangle(t, "x = 'a' >= 'b'", "x = \"a\" >= \"b\";\n", "x = false;\n")
+
+	expectPrintedNormalAndMangle(t, "x = 'ab' < 'abc'", "x = \"ab\" < \"abc\";\n", "x = true;\n")
+	expectPrintedNormalAndMangle(t, "x = 'ab' > 'abc'", "x = \"ab\" > \"abc\";\n", "x = false;\n")
+	expectPrintedNormalAndMangle(t, "x = 'ab' <= 'abc'", "x = \"ab\" <= \"abc\";\n", "x = true;\n")
+	expectPrintedNormalAndMangle(t, "x = 'ab' >= 'abc'", "x = \"ab\" >= \"abc\";\n", "x = false;\n")
+
+	// This checks for comparing by code point vs. by code unit
+	expectPrintedNormalAndMangle(t, "x = '𐙩' < 'ﬡ'", "x = \"𐙩\" < \"ﬡ\";\n", "x = true;\n")
+	expectPrintedNormalAndMangle(t, "x = '𐙩' > 'ﬡ'", "x = \"𐙩\" > \"ﬡ\";\n", "x = false;\n")
+	expectPrintedNormalAndMangle(t, "x = '𐙩' <= 'ﬡ'", "x = \"𐙩\" <= \"ﬡ\";\n", "x = true;\n")
+	expectPrintedNormalAndMangle(t, "x = '𐙩' >= 'ﬡ'", "x = \"𐙩\" >= \"ﬡ\";\n", "x = false;\n")
 
 	expectPrintedNormalAndMangle(t, "x = 3 in 6", "x = 3 in 6;\n", "x = 3 in 6;\n")
 	expectPrintedNormalAndMangle(t, "x = 3 instanceof 6", "x = 3 instanceof 6;\n", "x = 3 instanceof 6;\n")
@@ -5216,6 +5239,7 @@ func TestTrimCodeInDeadControlFlow(t *testing.T) {
 	expectPrintedMangle(t, "b: while (1) if (0) a(); else { continue b }", "b:\n  for (; ; )\n    continue b;\n")
 	expectPrintedMangle(t, "if (1) a(); else { class b {} }", "a();\n")
 	expectPrintedMangle(t, "if (1) a(); else { debugger }", "a();\n")
+	expectPrintedMangle(t, "if (1) a(); else { switch (1) { case 1: b() } }", "a();\n")
 
 	expectPrintedMangle(t, "if (0) {let a = 1} else a()", "a();\n")
 	expectPrintedMangle(t, "if (1) {let a = 1} else a()", "{\n  let a = 1;\n}\n")
@@ -5225,9 +5249,12 @@ func TestTrimCodeInDeadControlFlow(t *testing.T) {
 	expectPrintedMangle(t, "if (1) a(); else { var a = b }", "if (1)\n  a();\nelse\n  var a;\n")
 	expectPrintedMangle(t, "if (1) a(); else { var [a] = b }", "if (1)\n  a();\nelse\n  var a;\n")
 	expectPrintedMangle(t, "if (1) a(); else { var {x: a} = b }", "if (1)\n  a();\nelse\n  var a;\n")
+	expectPrintedMangle(t, "if (1) a(); else { var [] = b }", "a();\n")
+	expectPrintedMangle(t, "if (1) a(); else { var {} = b }", "a();\n")
 	expectPrintedMangle(t, "if (1) a(); else { function a() {} }", "if (1)\n  a();\nelse\n  var a;\n")
 	expectPrintedMangle(t, "if (1) a(); else { for(;;){var a} }", "if (1)\n  a();\nelse\n  for (; ; )\n    var a;\n")
 	expectPrintedMangle(t, "if (1) { a(); b() } else { var a; var b; }", "if (1)\n  a(), b();\nelse\n  var a, b;\n")
+	expectPrintedMangle(t, "if (1) a(); else { switch (1) { case 1: case 2: var a } }", "if (1)\n  a();\nelse\n  var a;\n")
 }
 
 func TestPreservedComments(t *testing.T) {

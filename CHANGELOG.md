@@ -1,5 +1,204 @@
 # Changelog
 
+## 0.20.2
+
+* Support TypeScript experimental decorators on `abstract` class fields ([#3684](https://github.com/evanw/esbuild/issues/3684))
+
+    With this release, you can now use TypeScript experimental decorators on `abstract` class fields. This was silently compiled incorrectly in esbuild 0.19.7 and below, and was an error from esbuild 0.19.8 to esbuild 0.20.1. Code such as the following should now work correctly:
+
+    ```ts
+    // Original code
+    const log = (x: any, y: string) => console.log(y)
+    abstract class Foo { @log abstract foo: string }
+    new class extends Foo { foo = '' }
+
+    // Old output (with --loader=ts --tsconfig-raw={\"compilerOptions\":{\"experimentalDecorators\":true}})
+    const log = (x, y) => console.log(y);
+    class Foo {
+    }
+    new class extends Foo {
+      foo = "";
+    }();
+
+    // New output (with --loader=ts --tsconfig-raw={\"compilerOptions\":{\"experimentalDecorators\":true}})
+    const log = (x, y) => console.log(y);
+    class Foo {
+    }
+    __decorateClass([
+      log
+    ], Foo.prototype, "foo", 2);
+    new class extends Foo {
+      foo = "";
+    }();
+    ```
+
+* JSON loader now preserves `__proto__` properties ([#3700](https://github.com/evanw/esbuild/issues/3700))
+
+    Copying JSON source code into a JavaScript file will change its meaning if a JSON object contains the `__proto__` key. A literal `__proto__` property in a JavaScript object literal sets the prototype of the object instead of adding a property named `__proto__`, while a literal `__proto__` property in a JSON object literal just adds a property named `__proto__`. With this release, esbuild will now work around this problem by converting JSON to JavaScript with a computed property key in this case:
+
+    ```js
+    // Original code
+    import data from 'data:application/json,{"__proto__":{"fail":true}}'
+    if (Object.getPrototypeOf(data)?.fail) throw 'fail'
+
+    // Old output (with --bundle)
+    (() => {
+      // <data:application/json,{"__proto__":{"fail":true}}>
+      var json_proto_fail_true_default = { __proto__: { fail: true } };
+
+      // entry.js
+      if (Object.getPrototypeOf(json_proto_fail_true_default)?.fail)
+        throw "fail";
+    })();
+
+    // New output (with --bundle)
+    (() => {
+      // <data:application/json,{"__proto__":{"fail":true}}>
+      var json_proto_fail_true_default = { ["__proto__"]: { fail: true } };
+
+      // example.mjs
+      if (Object.getPrototypeOf(json_proto_fail_true_default)?.fail)
+        throw "fail";
+    })();
+    ```
+
+* Improve dead code removal of `switch` statements ([#3659](https://github.com/evanw/esbuild/issues/3659))
+
+    With this release, esbuild will now remove `switch` statements in branches when minifying if they are known to never be evaluated:
+
+    ```js
+    // Original code
+    if (true) foo(); else switch (bar) { case 1: baz(); break }
+
+    // Old output (with --minify)
+    if(1)foo();else switch(bar){case 1:}
+
+    // New output (with --minify)
+    foo();
+    ```
+
+* Empty enums should behave like an object literal ([#3657](https://github.com/evanw/esbuild/issues/3657))
+
+    TypeScript allows you to create an empty enum and add properties to it at run time. While people usually use an empty object literal for this instead of a TypeScript enum, esbuild's enum transform didn't anticipate this use case and generated `undefined` instead of `{}` for an empty enum. With this release, you can now use an empty enum to generate an empty object literal.
+
+    ```ts
+    // Original code
+    enum Foo {}
+
+    // Old output (with --loader=ts)
+    var Foo = /* @__PURE__ */ ((Foo2) => {
+    })(Foo || {});
+
+    // New output (with --loader=ts)
+    var Foo = /* @__PURE__ */ ((Foo2) => {
+      return Foo2;
+    })(Foo || {});
+    ```
+
+* Handle Yarn Plug'n'Play edge case with `tsconfig.json` ([#3698](https://github.com/evanw/esbuild/issues/3698))
+
+    Previously a `tsconfig.json` file that `extends` another file in a package with an `exports` map failed to work when Yarn's Plug'n'Play resolution was active. This edge case should work now starting with this release.
+
+* Work around issues with Deno 1.31+ ([#3682](https://github.com/evanw/esbuild/issues/3682))
+
+    Version 0.20.0 of esbuild changed how the esbuild child process is run in esbuild's API for Deno. Previously it used `Deno.run` but that API is being removed in favor of `Deno.Command`. As part of this change, esbuild is now calling the new `unref` function on esbuild's long-lived child process, which is supposed to allow Deno to exit when your code has finished running even though the child process is still around (previously you had to explicitly call esbuild's `stop()` function to terminate the child process for Deno to be able to exit).
+
+    However, this introduced a problem for Deno's testing API which now fails some tests that use esbuild with `error: Promise resolution is still pending but the event loop has already resolved`. It's unclear to me why this is happening. The call to `unref` was recommended by someone on the Deno core team, and calling Node's equivalent `unref` API has been working fine for esbuild in Node for a long time. It could be that I'm using it incorrectly, or that there's some reference counting and/or garbage collection bug in Deno's internals, or that Deno's `unref` just works differently than Node's `unref`. In any case, it's not good for Deno tests that use esbuild to be failing.
+
+    In this release, I am removing the call to `unref` to fix this issue. This means that you will now have to call esbuild's `stop()` function to allow Deno to exit, just like you did before esbuild version 0.20.0 when this regression was introduced.
+
+    Note: This regression wasn't caught earlier because Deno doesn't seem to fail tests that have outstanding `setTimeout` calls, which esbuild's test harness was using to enforce a maximum test runtime. Adding a `setTimeout` was allowing esbuild's Deno tests to succeed. So this regression doesn't necessarily apply to all people using tests in Deno.
+
+## 0.20.1
+
+* Fix a bug with the CSS nesting transform ([#3648](https://github.com/evanw/esbuild/issues/3648))
+
+    This release fixes a bug with the CSS nesting transform for older browsers where the generated CSS could be incorrect if a selector list contained a pseudo element followed by another selector. The bug was caused by incorrectly mutating the parent rule's selector list when filtering out pseudo elements for the child rules:
+
+    ```css
+    /* Original code */
+    .foo {
+      &:after,
+      & .bar {
+        color: red;
+      }
+    }
+
+    /* Old output (with --supported:nesting=false) */
+    .foo .bar,
+    .foo .bar {
+      color: red;
+    }
+
+    /* New output (with --supported:nesting=false) */
+    .foo:after,
+    .foo .bar {
+      color: red;
+    }
+    ```
+
+* Constant folding for JavaScript inequality operators ([#3645](https://github.com/evanw/esbuild/issues/3645))
+
+    This release introduces constant folding for the `< > <= >=` operators. The minifier will now replace these operators with `true` or `false` when both sides are compile-time numeric or string constants:
+
+    ```js
+    // Original code
+    console.log(1 < 2, '🍕' > '🧀')
+
+    // Old output (with --minify)
+    console.log(1<2,"🍕">"🧀");
+
+    // New output (with --minify)
+    console.log(!0,!1);
+    ```
+
+* Better handling of `__proto__` edge cases ([#3651](https://github.com/evanw/esbuild/pull/3651))
+
+    JavaScript object literal syntax contains a special case where a non-computed property with a key of `__proto__` sets the prototype of the object. This does not apply to computed properties or to properties that use the shorthand property syntax introduced in ES6. Previously esbuild didn't correctly preserve the "sets the prototype" status of properties inside an object literal, meaning a property that sets the prototype could accidentally be transformed into one that doesn't and vice versa. This has now been fixed:
+
+    ```js
+    // Original code
+    function foo(__proto__) {
+      return { __proto__: __proto__ } // Note: sets the prototype
+    }
+    function bar(__proto__, proto) {
+      {
+        let __proto__ = proto
+        return { __proto__ } // Note: doesn't set the prototype
+      }
+    }
+
+    // Old output
+    function foo(__proto__) {
+      return { __proto__ }; // Note: no longer sets the prototype (WRONG)
+    }
+    function bar(__proto__, proto) {
+      {
+        let __proto__2 = proto;
+        return { __proto__: __proto__2 }; // Note: now sets the prototype (WRONG)
+      }
+    }
+
+    // New output
+    function foo(__proto__) {
+      return { __proto__: __proto__ }; // Note: sets the prototype (correct)
+    }
+    function bar(__proto__, proto) {
+      {
+        let __proto__2 = proto;
+        return { ["__proto__"]: __proto__2 }; // Note: doesn't set the prototype (correct)
+      }
+    }
+    ```
+
+* Fix cross-platform non-determinism with CSS color space transformations ([#3650](https://github.com/evanw/esbuild/issues/3650))
+
+    The Go compiler takes advantage of "fused multiply and add" (FMA) instructions on certain processors which do the operation `x*y + z` without intermediate rounding. This causes esbuild's CSS color space math to differ on different processors (currently `ppc64le` and `s390x`), which breaks esbuild's guarantee of deterministic output. To avoid this, esbuild's color space math now inserts a `float64()` cast around every single math operation. This tells the Go compiler not to use the FMA optimization.
+
+* Fix a crash when resolving a path from a directory that doesn't exist ([#3634](https://github.com/evanw/esbuild/issues/3634))
+
+    This release fixes a regression where esbuild could crash when resolving an absolute path if the source directory for the path resolution operation doesn't exist. While this situation doesn't normally come up, it could come up when running esbuild concurrently with another operation that mutates the file system as esbuild is doing a build (such as using `git` to switch branches). The underlying problem was a regression that was introduced in version 0.18.0.
+
 ## 0.20.0
 
 **This release deliberately contains backwards-incompatible changes.** To avoid automatically picking up releases like this, you should either be pinning the exact version of `esbuild` in your `package.json` file (recommended) or be using a version range syntax that only accepts patch upgrades such as `^0.19.0` or `~0.19.0`. See npm's documentation about [semver](https://docs.npmjs.com/cli/v6/using-npm/semver/) for more information.
