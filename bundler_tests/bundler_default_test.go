@@ -5496,6 +5496,74 @@ NOTE: The expression "b['c']" has been configured to be replaced with a constant
 	})
 }
 
+func TestKeepNamesAllForms(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/keep.js": `
+				// Initializers
+				function fn() {}
+				function foo(fn = function() {}) {}
+				var fn = function() {};
+				var obj = { "f n": function() {} };
+				class Foo0 { "f n" = function() {} }
+				class Foo1 { static "f n" = function() {} }
+				class Foo2 { accessor "f n" = function() {} }
+				class Foo3 { static accessor "f n" = function() {} }
+				class Foo4 { #fn = function() {} }
+				class Foo5 { static #fn = function() {} }
+				class Foo6 { accessor #fn = function() {} }
+				class Foo7 { static accessor #fn = function() {} }
+
+				// Assignments
+				fn = function() {};
+				fn ||= function() {};
+				fn &&= function() {};
+				fn ??= function() {};
+
+				// Destructuring
+				var [fn = function() {}] = [];
+				var { fn = function() {} } = {};
+				for (var [fn = function() {}] = []; ; ) ;
+				for (var { fn = function() {} } = {}; ; ) ;
+				for (var [fn = function() {}] in obj) ;
+				for (var { fn = function() {} } in obj) ;
+				for (var [fn = function() {}] of obj) ;
+				for (var { fn = function() {} } of obj) ;
+				function foo([fn = function() {}]) {}
+				function foo({ fn = function() {} }) {}
+				[fn = function() {}] = [];
+				({ fn = function() {} } = {});
+			`,
+			"/do-not-keep.js": `
+				// Methods
+				class Foo0 { fn() {} }
+				class Foo1 { get fn() {} }
+				class Foo2 { set fn(_) {} }
+				class Foo3 { static fn() {} }
+				class Foo4 { static get fn() {} }
+				class Foo5 { static set fn(_) {} }
+
+				// Private methods
+				class Bar0 { #fn() {} }
+				class Bar1 { get #fn() {} }
+				class Bar2 { set #fn(_) {} }
+				class Bar3 { static #fn() {} }
+				class Bar4 { static get #fn() {} }
+				class Bar5 { static set #fn(_) {} }
+			`,
+		},
+		entryPaths: []string{
+			"/keep.js",
+			"/do-not-keep.js",
+		},
+		options: config.Options{
+			Mode:         config.ModePassThrough,
+			AbsOutputDir: "/out",
+			KeepNames:    true,
+		},
+	})
+}
+
 func TestKeepNamesTreeShaking(t *testing.T) {
 	default_suite.expectBundled(t, bundled{
 		files: map[string]string{
