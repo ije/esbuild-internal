@@ -1,5 +1,150 @@
 # Changelog
 
+## 0.21.4
+
+* Update support for import assertions and import attributes in node ([#3778](https://github.com/evanw/esbuild/issues/3778))
+
+    Import assertions (the `assert` keyword) have been removed from node starting in v22.0.0. So esbuild will now strip them and generate a warning with `--target=node22` or above:
+
+    ```
+    ▲ [WARNING] The "assert" keyword is not supported in the configured target environment ("node22") [assert-to-with]
+
+        example.mjs:1:40:
+          1 │ import json from "esbuild/package.json" assert { type: "json" }
+            │                                         ~~~~~~
+            ╵                                         with
+
+      Did you mean to use "with" instead of "assert"?
+    ```
+
+    Import attributes (the `with` keyword) have been backported to node 18 starting in v18.20.0. So esbuild will no longer strip them with `--target=node18.N` if `N` is 20 or greater.
+
+* Fix `for await` transform when a label is present
+
+    This release fixes a bug where the `for await` transform, which wraps the loop in a `try` statement, previously failed to also move the loop's label into the `try` statement. This bug only affects code that uses both of these features in combination. Here's an example of some affected code:
+
+    ```js
+    // Original code
+    async function test() {
+      outer: for await (const x of [Promise.resolve([0, 1])]) {
+        for (const y of x) if (y) break outer
+        throw 'fail'
+      }
+    }
+
+    // Old output (with --target=es6)
+    function test() {
+      return __async(this, null, function* () {
+        outer: try {
+          for (var iter = __forAwait([Promise.resolve([0, 1])]), more, temp, error; more = !(temp = yield iter.next()).done; more = false) {
+            const x = temp.value;
+            for (const y of x) if (y) break outer;
+            throw "fail";
+          }
+        } catch (temp) {
+          error = [temp];
+        } finally {
+          try {
+            more && (temp = iter.return) && (yield temp.call(iter));
+          } finally {
+            if (error)
+              throw error[0];
+          }
+        }
+      });
+    }
+
+    // New output (with --target=es6)
+    function test() {
+      return __async(this, null, function* () {
+        try {
+          outer: for (var iter = __forAwait([Promise.resolve([0, 1])]), more, temp, error; more = !(temp = yield iter.next()).done; more = false) {
+            const x = temp.value;
+            for (const y of x) if (y) break outer;
+            throw "fail";
+          }
+        } catch (temp) {
+          error = [temp];
+        } finally {
+          try {
+            more && (temp = iter.return) && (yield temp.call(iter));
+          } finally {
+            if (error)
+              throw error[0];
+          }
+        }
+      });
+    }
+    ```
+
+* Do additional constant folding after cross-module enum inlining ([#3416](https://github.com/evanw/esbuild/issues/3416), [#3425](https://github.com/evanw/esbuild/issues/3425))
+
+    This release adds a few more cases where esbuild does constant folding after cross-module enum inlining.
+
+    ```ts
+    // Original code: enum.ts
+    export enum Platform {
+      WINDOWS = 'windows',
+      MACOS = 'macos',
+      LINUX = 'linux',
+    }
+
+    // Original code: main.ts
+    import { Platform } from './enum';
+    declare const PLATFORM: string;
+    export function logPlatform() {
+      if (PLATFORM == Platform.WINDOWS) console.log('Windows');
+      else if (PLATFORM == Platform.MACOS) console.log('macOS');
+      else if (PLATFORM == Platform.LINUX) console.log('Linux');
+      else console.log('Other');
+    }
+
+    // Old output (with --bundle '--define:PLATFORM="macos"' --minify --format=esm)
+    function n(){"windows"=="macos"?console.log("Windows"):"macos"=="macos"?console.log("macOS"):"linux"=="macos"?console.log("Linux"):console.log("Other")}export{n as logPlatform};
+
+    // New output (with --bundle '--define:PLATFORM="macos"' --minify --format=esm)
+    function n(){console.log("macOS")}export{n as logPlatform};
+    ```
+
+* Pass import attributes to on-resolve plugins ([#3384](https://github.com/evanw/esbuild/issues/3384), [#3639](https://github.com/evanw/esbuild/issues/3639), [#3646](https://github.com/evanw/esbuild/issues/3646))
+
+    With this release, on-resolve plugins will now have access to the import attributes on the import via the `with` property of the arguments object. This mirrors the `with` property of the arguments object that's already passed to on-load plugins. In addition, you can now pass `with` to the `resolve()` API call which will then forward that value on to all relevant plugins. Here's an example of a plugin that can now be written:
+
+    ```js
+    const examplePlugin = {
+      name: 'Example plugin',
+      setup(build) {
+        build.onResolve({ filter: /.*/ }, args => {
+          if (args.with.type === 'external')
+            return { external: true }
+        })
+      }
+    }
+
+    require('esbuild').build({
+      stdin: {
+        contents: `
+          import foo from "./foo" with { type: "external" }
+          foo()
+        `,
+      },
+      bundle: true,
+      format: 'esm',
+      write: false,
+      plugins: [examplePlugin],
+    }).then(result => {
+      console.log(result.outputFiles[0].text)
+    })
+    ```
+
+* Formatting support for the `@position-try` rule ([#3773](https://github.com/evanw/esbuild/issues/3773))
+
+    Chrome shipped this new CSS at-rule in version 125 as part of the [CSS anchor positioning API](https://developer.chrome.com/blog/anchor-positioning-api). With this release, esbuild now knows to expect a declaration list inside of the `@position-try` body block and will format it appropriately.
+
+* Always allow internal string import and export aliases ([#3343](https://github.com/evanw/esbuild/issues/3343))
+
+    Import and export names can be string literals in ES2022+. Previously esbuild forbid any usage of these aliases when the target was below ES2022. Starting with this release, esbuild will only forbid such usage when the alias would otherwise end up in output as a string literal. String literal aliases that are only used internally in the bundle and are "compiled away" are no longer errors. This makes it possible to use string literal aliases with esbuild's `inject` feature even when the target is earlier than ES2022.
+
 ## 0.21.3
 
 * Implement the decorator metadata proposal ([#3760](https://github.com/evanw/esbuild/issues/3760))
