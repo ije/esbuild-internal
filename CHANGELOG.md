@@ -1,5 +1,72 @@
 # Changelog
 
+## 0.21.5
+
+* Fix `Symbol.metadata` on classes without a class decorator ([#3781](https://github.com/evanw/esbuild/issues/3781))
+
+    This release fixes a bug with esbuild's support for the [decorator metadata proposal](https://github.com/tc39/proposal-decorator-metadata). Previously esbuild only added the `Symbol.metadata` property to decorated classes if there was a decorator on the class element itself. However, the proposal says that the `Symbol.metadata` property should be present on all classes that have any decorators at all, not just those with a decorator on the class element itself.
+
+* Allow unknown import attributes to be used with the `copy` loader ([#3792](https://github.com/evanw/esbuild/issues/3792))
+
+    Import attributes (the `with` keyword on `import` statements) are allowed to alter how that path is loaded. For example, esbuild cannot assume that it knows how to load `./bagel.js` as type `bagel`:
+
+    ```js
+    // This is an error with "--bundle" without also using "--external:./bagel.js"
+    import tasty from "./bagel.js" with { type: "bagel" }
+    ```
+
+    Because of that, bundling this code with esbuild is an error unless the file `./bagel.js` is external to the bundle (such as with `--bundle --external:./bagel.js`).
+
+    However, there is an additional case where it's ok for esbuild to allow this: if the file is loaded using the `copy` loader. That's because the `copy` loader behaves similarly to `--external` in that the file is left external to the bundle. The difference is that the `copy` loader copies the file into the output folder and rewrites the import path while `--external` doesn't. That means the following will now work with the `copy` loader (such as with `--bundle --loader:.bagel=copy`):
+
+    ```js
+    // This is no longer an error with "--bundle" and "--loader:.bagel=copy"
+    import tasty from "./tasty.bagel" with { type: "bagel" }
+    ```
+
+* Support import attributes with glob-style imports ([#3797](https://github.com/evanw/esbuild/issues/3797))
+
+    This release adds support for import attributes (the `with` option) to glob-style imports (dynamic imports with certain string literal patterns as paths). These imports previously didn't support import attributes due to an oversight. So code like this will now work correctly:
+
+    ```ts
+    async function loadLocale(locale: string): Locale {
+      const data = await import(`./locales/${locale}.data`, { with: { type: 'json' } })
+      return unpackLocale(locale, data)
+    }
+    ```
+
+    Previously this didn't work even though esbuild normally supports forcing the JSON loader using an import attribute. Attempting to do this used to result in the following error:
+
+    ```
+    ✘ [ERROR] No loader is configured for ".data" files: locales/en-US.data
+
+        example.ts:2:28:
+          2 │   const data = await import(`./locales/${locale}.data`, { with: { type: 'json' } })
+            ╵                             ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    ```
+
+    In addition, this change means plugins can now access the contents of `with` for glob-style imports.
+
+* Support `${configDir}` in `tsconfig.json` files ([#3782](https://github.com/evanw/esbuild/issues/3782))
+
+    This adds support for a new feature from the upcoming TypeScript 5.5 release. The character sequence `${configDir}` is now respected at the start of `baseUrl` and `paths` values, which are used by esbuild during bundling to correctly map import paths to file system paths. This feature lets base `tsconfig.json` files specified via `extends` refer to the directory of the top-level `tsconfig.json` file. Here is an example:
+
+    ```json
+    {
+      "compilerOptions": {
+        "paths": {
+          "js/*": ["${configDir}/dist/js/*"]
+        }
+      }
+    }
+    ```
+
+    You can read more in [TypeScript's blog post about their upcoming 5.5 release](https://devblogs.microsoft.com/typescript/announcing-typescript-5-5-rc/#the-configdir-template-variable-for-configuration-files). Note that this feature does not make use of template literals (you need to use `"${configDir}/dist/js/*"` not `` `${configDir}/dist/js/*` ``). The syntax for `tsconfig.json` is still just JSON with comments, and JSON syntax does not allow template literals. This feature only recognizes `${configDir}` in strings for certain path-like properties, and only at the beginning of the string.
+
+* Fix internal error with `--supported:object-accessors=false` ([#3794](https://github.com/evanw/esbuild/issues/3794))
+
+    This release fixes a regression in 0.21.0 where some code that was added to esbuild's internal runtime library of helper functions for JavaScript decorators fails to parse when you configure esbuild with `--supported:object-accessors=false`. The reason is that esbuild introduced code that does `{ get [name]() {} }` which uses both the `object-extensions` feature for the `[name]` and the `object-accessors` feature for the `get`, but esbuild was incorrectly only checking for `object-extensions` and not for `object-accessors`. Additional tests have been added to avoid this type of issue in the future. A workaround for this issue in earlier releases is to also add `--supported:object-extensions=false`.
+
 ## 0.21.4
 
 * Update support for import assertions and import attributes in node ([#3778](https://github.com/evanw/esbuild/issues/3778))
