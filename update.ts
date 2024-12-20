@@ -1,10 +1,8 @@
 #!/usr/bin/env -S deno run --allow-read --allow-write --allow-net
 
-import { Untar } from "https://deno.land/std@0.180.0/archive/untar.ts";
-import { readAll } from "https://deno.land/std@0.180.0/streams/read_all.ts";
-import { readerFromStreamReader } from "https://deno.land/std@0.180.0/streams/reader_from_stream_reader.ts";
-import { ensureDir } from "https://deno.land/std@0.180.0/fs/ensure_dir.ts";
-import { join } from "https://deno.land/std@0.180.0/path/mod.ts";
+import { UntarStream } from "jsr:@std/tar/untar-stream";
+import { ensureDir } from "jsr:@std/fs/ensure-dir";
+import { dirname, join } from "jsr:@std/path";
 
 const version = Deno.args[0];
 if (!/^\d+\.\d+\.\d+$/.test(version)) {
@@ -12,76 +10,61 @@ if (!/^\d+\.\d+\.\d+$/.test(version)) {
 }
 
 console.log(`Downloading esbuild-${version}.tar.gz ...`);
-const resp = await fetch(
-  `https://codeload.github.com/evanw/esbuild/tar.gz/refs/tags/v${version}`,
-);
-if (resp.status !== 200) {
-  console.error(await resp.text());
+const res = await fetch(`https://codeload.github.com/evanw/esbuild/tar.gz/refs/tags/v${version}`);
+if (res.status !== 200) {
+  console.error(await res.text());
   Deno.exit(1);
 }
 
-const entryList = new Untar(
-  readerFromStreamReader(
-    resp.body!.pipeThrough<Uint8Array>(new DecompressionStream("gzip"))
-      .getReader(),
-  ),
-);
-
 // clear dirs
 for await (const entry of Deno.readDir(".")) {
-  if (
-    entry.isDirectory && !entry.name.startsWith(".") && entry.name !== "images"
-  ) {
+  if (entry.isDirectory && !entry.name.startsWith(".") && entry.name !== "images") {
     await Deno.remove(join(Deno.cwd(), entry.name), { recursive: true });
   }
 }
 
-// write template files
+const entryList = res.body!.pipeThrough<Uint8Array>(new DecompressionStream("gzip")).pipeThrough(new UntarStream());
+
 for await (const entry of entryList) {
-  const fileName = entry.fileName.slice(`esbuild-${version}/`.length);
-  if (
-    fileName.startsWith("internal/api_helpers/") ||
-    fileName.startsWith("internal/cli_helpers/")
-  ) {
+  const fileName = entry.path.slice(`esbuild-${version}/`.length);
+  if (!entry.readable) {
     continue;
   }
-  if (
-    fileName.startsWith("internal/") &&
-    entry.type === "directory"
-  ) {
+  if (fileName.startsWith("internal/")) {
+    if (fileName.startsWith("internal/api_helpers/") || fileName.startsWith("internal/cli_helpers/")) {
+      entry.readable.cancel();
+      continue;
+    }
     const fp = fileName.slice("internal/".length);
-    await ensureDir(fp);
-  } else if (
-    fileName.startsWith("internal/") &&
-    entry.type === "file"
-  ) {
-    const fp = fileName.slice("internal/".length);
-    let code = new TextDecoder().decode(await readAll(entry));
-    code = code.replaceAll(
-      "github.com/evanw/esbuild/internal",
-      "github.com/ije/esbuild-internal",
-    );
+    let code = await (new Response(entry.readable).text());
+    code = code.replaceAll("github.com/evanw/esbuild/internal", "github.com/ije/esbuild-internal");
+    await ensureDir(dirname(fp));
     await Deno.writeTextFile(fp, code);
-  } else if (
-    fileName === "go.mod" ||
-    fileName === "go.sum"
-  ) {
-    let code = new TextDecoder().decode(await readAll(entry));
+  } else if (fileName === "go.mod") {
+    let code = await (new Response(entry.readable).text());
     code = code.replaceAll(
       "github.com/evanw/esbuild",
       "github.com/ije/esbuild-internal",
     );
     await Deno.writeTextFile(fileName, code);
   } else if (
-    fileName === "version.txt" ||
-    fileName === "CHANGELOG.md" ||
-    fileName === "LICENSE.md"
+    fileName === "version.txt"
+    || fileName === "CHANGELOG.md"
+    || fileName === "LICENSE.md"
+    || fileName === "go.sum"
   ) {
-    await Deno.writeFile(fileName, await readAll(entry));
+    const f = await Deno.create(fileName);
+    await entry.readable.pipeTo(f.writable);
   } else {
+    entry.readable.cancel();
     continue;
   }
   console.log("write", fileName);
 }
+
+await new Deno.Command("git", { args: ["add", "--all", "."], stderr: "piped", stdout: "piped" }).output();
+await new Deno.Command("git", { args: ["commit", "-m", `v${version}`], stderr: "piped", stdout: "piped" }).output();
+await new Deno.Command("git", { args: ["tag", `v${version}`], stderr: "piped", stdout: "piped" }).output();
+await new Deno.Command("git", { args: ["push", "origin", "--tags"], stderr: "piped", stdout: "piped" }).output();
 
 console.log("Updated to", version);
