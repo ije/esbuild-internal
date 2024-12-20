@@ -1,4 +1,4 @@
-> Expose amazing esbuild internal packages.
+> Using esbuild internal packages.
 
 <p align="center">
   <picture>
