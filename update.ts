@@ -50,6 +50,7 @@ for await (const entry of entryList) {
   } else if (
     fileName === "version.txt"
     || fileName === "CHANGELOG.md"
+    || fileName.startsWith("CHANGELOG-20")
     || fileName === "LICENSE.md"
     || fileName === "go.sum"
   ) {
