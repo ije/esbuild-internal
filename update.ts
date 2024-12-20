@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-read --allow-write --allow-net
+#!/usr/bin/env -S deno run --allow-read --allow-write --allow-net --allow-run
 
 import { UntarStream } from "jsr:@std/tar/untar-stream";
 import { ensureDir } from "jsr:@std/fs/ensure-dir";
@@ -65,6 +65,7 @@ for await (const entry of entryList) {
 
 await new Deno.Command("git", { args: ["add", "--all", "."], stderr: "piped", stdout: "piped" }).output();
 await new Deno.Command("git", { args: ["commit", "-m", `v${version}`], stderr: "piped", stdout: "piped" }).output();
+await new Deno.Command("git", { args: ["push", "origin"], stderr: "piped", stdout: "piped" }).output();
 await new Deno.Command("git", { args: ["tag", `v${version}`], stderr: "piped", stdout: "piped" }).output();
 await new Deno.Command("git", { args: ["push", "origin", "--tags"], stderr: "piped", stdout: "piped" }).output();
 
