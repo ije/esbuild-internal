@@ -31,11 +31,21 @@ for await (const entry of entryList) {
     continue;
   }
   if (fileName.startsWith("internal/")) {
-    if (fileName.startsWith("internal/api_helpers/") || fileName.startsWith("internal/cli_helpers/")) {
+    if (fileName.startsWith("internal/cli_helpers/")) {
       entry.readable.cancel();
       continue;
     }
     const fp = fileName.slice("internal/".length);
+    let code = await (new Response(entry.readable).text());
+    code = code.replaceAll("github.com/evanw/esbuild/internal", "github.com/ije/esbuild-internal");
+    await ensureDir(dirname(fp));
+    await Deno.writeTextFile(fp, code);
+  } else if (fileName.startsWith("pkg/api/")) {
+    if (fileName.endsWith("_test.go")) {
+      entry.readable.cancel();
+      continue;
+    }
+    const fp = fileName.slice("pkg/".length);
     let code = await (new Response(entry.readable).text());
     code = code.replaceAll("github.com/evanw/esbuild/internal", "github.com/ije/esbuild-internal");
     await ensureDir(dirname(fp));
@@ -61,6 +71,10 @@ for await (const entry of entryList) {
     continue;
   }
   console.log("write", fileName);
+}
+
+if (Deno.args.includes("--dry-run")) {
+  Deno.exit(0);
 }
 
 await new Deno.Command("git", { args: ["add", "--all", "."], stderr: "piped", stdout: "piped" }).output();
