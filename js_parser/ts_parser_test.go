@@ -2388,11 +2388,19 @@ func TestTSArrow(t *testing.T) {
 	expectPrintedTS(t, "x = a ? (b) : T => c : d", "x = a ? (b) => c : d;\n")
 	expectPrintedTS(t, "x = a ? b - (c) : d => e", "x = a ? b - c : (d) => e;\n")
 	expectPrintedTS(t, "x = a ? b = (c) : T => d : e", "x = a ? b = (c) => d : e;\n")
-	expectPrintedTS(t, "x = (\n  a ? (b = c) : { d: e }\n)", "x = a ? b = c : { d: e };\n") // Note: Newlines are important (they trigger backtracking)
 	expectParseErrorTS(t, "x = a ? (b = c) : T => d : (e = f) : g", "<stdin>: ERROR: Expected \";\" but found \":\"\n")
 	expectParseErrorTS(t, "x = a ? b ? (c = d) : T => e : (f = g)", "<stdin>: ERROR: Expected \":\" but found end of file\n")
 	expectParseErrorTS(t, "x = a ? - (b) : c => d : e", "<stdin>: ERROR: Expected \";\" but found \":\"\n")
 	expectParseErrorTS(t, "x = a ? b - (c) : d => e : f", "<stdin>: ERROR: Expected \";\" but found \":\"\n")
+
+	// Note: Newlines are important (they trigger backtracking)
+	expectPrintedTS(t, "x = (\n  a ? (b = c) : { d: e }\n)", "x = a ? b = c : { d: e };\n")
+
+	// Need to clone "#private" identifier state in the parser
+	expectPrintedTS(t, "x = class { #y; y = a ? (b : T) : T => this.#y : c }", "x = class {\n  #y;\n  y = a ? (b) => this.#y : c;\n};\n")
+
+	// Need to clone "in" operator state in the parser
+	expectPrintedTS(t, "for (x = a ? () : T => b in c : d; ; ) ;", "for (x = a ? () => b in c : d; ; ) ;\n")
 }
 
 func TestTSSuperCall(t *testing.T) {
@@ -2958,6 +2966,22 @@ func TestTSTypeOnlyImport(t *testing.T) {
 	expectParseErrorTS(t, "import { x, type 'y' as 'z' } from 'mod'", "<stdin>: ERROR: Expected identifier but found \"'z'\"\n")
 	expectParseErrorTS(t, "import { x, type as 'y' } from 'mod'", "<stdin>: ERROR: Expected \"}\" but found \"'y'\"\n")
 	expectParseErrorTS(t, "import { x, type y as 'z' } from 'mod'", "<stdin>: ERROR: Expected identifier but found \"'z'\"\n")
+
+	// See: https://github.com/tc39/proposal-defer-import-eval
+	expectPrintedTS(t, "import defer * as foo from 'bar'", "")
+	expectPrintedTS(t, "import defer * as foo from 'bar'; let x: foo.Type", "let x;\n")
+	expectPrintedTS(t, "import defer * as foo from 'bar'; let x = foo.value", "import defer * as foo from \"bar\";\nlet x = foo.value;\n")
+	expectPrintedTS(t, "import type defer from 'bar'", "")
+	expectParseErrorTS(t, "import type defer * as foo from 'bar'", "<stdin>: ERROR: Expected \"from\" but found \"*\"\n")
+
+	// See: https://github.com/tc39/proposal-source-phase-imports
+	expectPrintedTS(t, "import type source from 'bar'", "")
+	expectPrintedTS(t, "import source foo from 'bar'", "")
+	expectPrintedTS(t, "import source foo from 'bar'; let x: foo", "let x;\n")
+	expectPrintedTS(t, "import source foo from 'bar'; let x = foo", "import source foo from \"bar\";\nlet x = foo;\n")
+	expectPrintedTS(t, "import source type from 'bar'", "")
+	expectParseErrorTS(t, "import source type foo from 'bar'", "<stdin>: ERROR: Expected \"from\" but found \"foo\"\n")
+	expectParseErrorTS(t, "import type source foo from 'bar'", "<stdin>: ERROR: Expected \"from\" but found \"foo\"\n")
 }
 
 func TestTSTypeOnlyExport(t *testing.T) {

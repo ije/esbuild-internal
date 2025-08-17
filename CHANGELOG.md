@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.25.8
+
+* Fix another TypeScript parsing edge case ([#4248](https://github.com/evanw/esbuild/issues/4248))
+
+    This fixes a regression with a change in the previous release that tries to more accurately parse TypeScript arrow functions inside the `?:` operator. The regression specifically involves parsing an arrow function containing a `#private` identifier inside the middle of a `?:` ternary operator inside a class body. This was fixed by propagating private identifier state into the parser clone used to speculatively parse the arrow function body. Here is an example of some affected code:
+
+    ```ts
+    class CachedDict {
+      #has = (a: string) => dict.has(a);
+      has = window
+        ? (word: string): boolean => this.#has(word)
+        : this.#has;
+    }
+    ```
+
+* Fix a regression with the parsing of source phase imports
+
+    The change in the previous release to parse [source phase imports](https://github.com/tc39/proposal-source-phase-imports) failed to properly handle the following cases:
+
+    ```ts
+    import source from 'bar'
+    import source from from 'bar'
+    import source type foo from 'bar'
+    ```
+
+    Parsing for these cases should now be fixed. The first case was incorrectly treated as a syntax error because esbuild was expecting the second case. And the last case was previously allowed but is now forbidden. TypeScript hasn't added this feature yet so it remains to be seen whether the last case will be allowed, but it's safer to disallow it for now. At least Babel doesn't allow the last case when parsing TypeScript, and Babel was involved with the source phase import specification.
+
 ## 0.25.7
 
 * Parse and print JavaScript imports with an explicit phase ([#4238](https://github.com/evanw/esbuild/issues/4238))

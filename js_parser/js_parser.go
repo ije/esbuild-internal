@@ -382,7 +382,6 @@ type parser struct {
 	shouldFoldTypeScriptConstantExpressions bool
 
 	allowIn                     bool
-	allowPrivateIdentifiers     bool
 	hasTopLevelReturn           bool
 	latestReturnHadSemicolon    bool
 	messageAboutThisIsUndefined bool
@@ -3538,7 +3537,7 @@ func (p *parser) parsePrefix(level js_ast.L, errors *deferredErrors, flags exprF
 		return js_ast.Expr{Loc: loc, Data: js_ast.EThisShared}
 
 	case js_lexer.TPrivateIdentifier:
-		if !p.allowPrivateIdentifiers || !p.allowIn || level >= js_ast.LCompare {
+		if !p.allowIn || level >= js_ast.LCompare {
 			p.lexer.Unexpected()
 		}
 
@@ -4263,7 +4262,7 @@ func (p *parser) parseSuffix(left js_ast.Expr, level js_ast.L, errors *deferredE
 		case js_lexer.TDot:
 			p.lexer.Next()
 
-			if p.lexer.Token == js_lexer.TPrivateIdentifier && p.allowPrivateIdentifiers {
+			if p.lexer.Token == js_lexer.TPrivateIdentifier {
 				// "a.#b"
 				// "a?.b.#c"
 				if _, ok := left.Data.(*js_ast.ESuper); ok {
@@ -4373,7 +4372,7 @@ func (p *parser) parseSuffix(left js_ast.Expr, level js_ast.L, errors *deferredE
 				}}
 
 			default:
-				if p.lexer.Token == js_lexer.TPrivateIdentifier && p.allowPrivateIdentifiers {
+				if p.lexer.Token == js_lexer.TPrivateIdentifier {
 					// "a?.#b"
 					name := p.lexer.Identifier
 					nameLoc := p.lexer.Loc()
@@ -6450,9 +6449,7 @@ func (p *parser) parseClass(classKeyword logger.Range, name *ast.LocRef, classOp
 
 	// Allow "in" and private fields inside class bodies
 	oldAllowIn := p.allowIn
-	oldAllowPrivateIdentifiers := p.allowPrivateIdentifiers
 	p.allowIn = true
-	p.allowPrivateIdentifiers = true
 
 	// A scope is needed for private identifiers
 	scopeIndex := p.pushScopeForParsePass(js_ast.ScopeClassBody, bodyLoc)
@@ -6512,7 +6509,6 @@ func (p *parser) parseClass(classKeyword logger.Range, name *ast.LocRef, classOp
 	}
 
 	p.allowIn = oldAllowIn
-	p.allowPrivateIdentifiers = oldAllowPrivateIdentifiers
 
 	closeBraceLoc := p.saveExprCommentsHere()
 	p.lexer.Expect(js_lexer.TCloseBrace)
@@ -7939,12 +7935,30 @@ func (p *parser) parseStmt(opts parseStmtOpts) js_ast.Stmt {
 			}
 
 			if isSourceName && p.lexer.Token == js_lexer.TIdentifier {
+				if p.lexer.Raw() == "from" {
+					nameSubstring := p.lexer.Identifier
+					nameLoc := p.lexer.Loc()
+					p.lexer.Next()
+					if p.lexer.IsContextualKeyword("from") {
+						// "import source from from 'foo';"
+						p.markSyntaxFeature(compat.ImportSource, js_lexer.RangeOfIdentifier(p.source, defaultLoc))
+						phase = ast.SourcePhase
+						stmt.DefaultName = &ast.LocRef{Loc: nameLoc, Ref: p.storeNameInRef(nameSubstring)}
+						p.lexer.Next()
+					} else {
+						// "import source from 'foo';"
+						stmt.DefaultName = &ast.LocRef{Loc: defaultLoc, Ref: p.storeNameInRef(defaultName)}
+					}
+					break
+				}
+
 				// "import source foo from 'bar';"
 				p.markSyntaxFeature(compat.ImportSource, js_lexer.RangeOfIdentifier(p.source, defaultLoc))
 				phase = ast.SourcePhase
-				defaultName = p.lexer.Identifier
-				defaultLoc = p.lexer.Loc()
+				stmt.DefaultName = &ast.LocRef{Loc: p.lexer.Loc(), Ref: p.storeNameInRef(p.lexer.Identifier)}
 				p.lexer.Next()
+				p.lexer.ExpectContextualKeyword("from")
+				break
 			}
 
 			stmt.DefaultName = &ast.LocRef{Loc: defaultLoc, Ref: p.storeNameInRef(defaultName)}
