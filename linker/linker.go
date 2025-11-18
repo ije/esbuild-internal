@@ -9,10 +9,8 @@ package linker
 
 import (
 	"bytes"
-	"crypto/sha1"
 	"encoding/base64"
 	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 	"hash"
 	"net/url"
@@ -484,44 +482,9 @@ func (c *linkerContext) mangleLocalCSS(usedLocalNames map[string]bool) {
 			absPath := c.graph.Files[ref.SourceIndex].InputFile.Source.PrettyPaths.Abs
 			relPath := c.graph.Files[ref.SourceIndex].InputFile.Source.PrettyPaths.Rel
 
-			// Remove the file extension
-			if ext := c.fs.Ext(relPath); ext != "" {
-				relPath = relPath[:len(relPath)-len(ext)]
-			}
-
-			// Convert to CSS-safe class name by replacing invalid characters.
-			// CSS class names can contain letters, digits, hyphens, and underscores
-			// and must start with a letter, hyphen, or underscore
-			var safeName strings.Builder
-			safeName.Grow(len(relPath))
-			for _, ch := range relPath {
-				if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
-					(ch >= '0' && ch <= '9') || ch == '-' || ch == '_' {
-					safeName.WriteRune(ch)
-				} else if ch == '/' || ch == '\\' || ch == '.' {
-					// Convert path separators and dots to hyphens
-					safeName.WriteRune('-')
-				} else {
-					// Replace other invalid characters with underscores
-					safeName.WriteRune('_')
-				}
-			}
-			relPath = safeName.String()
-
-			// Ensure it starts with a valid character for CSS class names
-			if len(relPath) > 0 {
-				firstChar := relPath[0]
-				if !((firstChar >= 'a' && firstChar <= 'z') ||
-					(firstChar >= 'A' && firstChar <= 'Z') ||
-					firstChar == '-' || firstChar == '_') {
-					relPath = "_" + relPath
-				}
-			}
-
-			hash := sha1.Sum([]byte(absPath))
-			name := symbol.OriginalName + "_" + hex.EncodeToString(hash[:])[0:8]
+			name := symbol.OriginalName + "_" + ast.CssLocalHash(absPath)
 			if !c.options.MinifyIdentifiers {
-				name = name + "_" + relPath
+				name = name + "_" + ast.CssLocalAppendice(relPath)
 			}
 
 			mangledProps[ref] = name
