@@ -1,5 +1,91 @@
 # Changelog
 
+## 0.27.1
+
+* Fix bundler bug with `var` nested inside `if` ([#4348](https://github.com/evanw/esbuild/issues/4348))
+
+    This release fixes a bug with the bundler that happens when importing an ES module using `require` (which causes it to be wrapped) and there's a top-level `var` inside an `if` statement without being wrapped in a `{ ... }` block (and a few other conditions). The bundling transform needed to hoist these `var` declarations outside of the lazy ES module wrapper for correctness. See the issue for details.
+
+* Fix minifier bug with `for` inside `try` inside label ([#4351](https://github.com/evanw/esbuild/issues/4351))
+
+    This fixes an old regression from [version v0.21.4](https://github.com/evanw/esbuild/releases/v0.21.4). Some code was introduced to move the label inside the `try` statement to address a problem with transforming labeled `for await` loops to avoid the `await` (the transformation involves converting the `for await` loop into a `for` loop and wrapping it in a `try` statement). However, it introduces problems for cross-compiled JVM code that uses all three of these features heavily. This release restricts this transform to only apply to `for` loops that esbuild itself generates internally as part of the `for await` transform. Here is an example of some affected code:
+
+    ```js
+    // Original code
+    d: {
+      e: {
+        try {
+          while (1) { break d }
+        } catch { break e; }
+      }
+    }
+
+    // Old output (with --minify)
+    a:try{e:for(;;)break a}catch{break e}
+
+    // New output (with --minify)
+    a:e:try{for(;;)break a}catch{break e}
+    ```
+
+* Inline IIFEs containing a single expression ([#4354](https://github.com/evanw/esbuild/issues/4354))
+
+    Previously inlining of IIFEs (immediately-invoked function expressions) only worked if the body contained a single `return` statement. Now it should also work if the body contains a single expression statement instead:
+
+    ```js
+    // Original code
+    const foo = () => {
+      const cb = () => {
+        console.log(x())
+      }
+      return cb()
+    }
+
+    // Old output (with --minify)
+    const foo=()=>(()=>{console.log(x())})();
+
+    // New output (with --minify)
+    const foo=()=>{console.log(x())};
+    ```
+
+* The minifier now strips empty `finally` clauses ([#4353](https://github.com/evanw/esbuild/issues/4353))
+
+    This improvement means that `finally` clauses containing dead code can potentially cause the associated `try` statement to be removed from the output entirely in minified builds:
+
+    ```js
+    // Original code
+    function foo(callback) {
+      if (DEBUG) stack.push(callback.name);
+      try {
+        callback();
+      } finally {
+        if (DEBUG) stack.pop();
+      }
+    }
+
+    // Old output (with --minify --define:DEBUG=false)
+    function foo(a){try{a()}finally{}}
+
+    // New output (with --minify --define:DEBUG=false)
+    function foo(a){a()}
+    ```
+
+* Allow tree-shaking of the `Symbol` constructor
+
+    With this release, calling `Symbol` is now considered to be side-effect free when the argument is known to be a primitive value. This means esbuild can now tree-shake module-level symbol variables:
+
+    ```js
+    // Original code
+    const a = Symbol('foo')
+    const b = Symbol(bar)
+
+    // Old output (with --tree-shaking=true)
+    const a = Symbol("foo");
+    const b = Symbol(bar);
+
+    // New output (with --tree-shaking=true)
+    const b = Symbol(bar);
+    ```
+
 ## 0.27.0
 
 **This release deliberately contains backwards-incompatible changes.** To avoid automatically picking up releases like this, you should either be pinning the exact version of `esbuild` in your `package.json` file (recommended) or be using a version range syntax that only accepts patch upgrades such as `^0.26.0` or `~0.26.0`. See npm's documentation about [semver](https://docs.npmjs.com/cli/v6/using-npm/semver/) for more information.
