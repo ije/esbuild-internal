@@ -1,5 +1,85 @@
 # Changelog
 
+## 0.27.3
+
+* Preserve URL fragments in data URLs ([#4370](https://github.com/evanw/esbuild/issues/4370))
+
+    Consider the following HTML, CSS, and SVG:
+
+    * `index.html`:
+
+        ```html
+        <!DOCTYPE html>
+        <html>
+          <head><link rel="stylesheet" href="icons.css"></head>
+          <body><div class="triangle"></div></body>
+        </html>
+        ```
+
+    * `icons.css`:
+
+        ```css
+        .triangle {
+          width: 10px;
+          height: 10px;
+          background: currentColor;
+          clip-path: url(./triangle.svg#x);
+        }
+        ```
+
+    * `triangle.svg`:
+
+        ```xml
+        <svg xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <clipPath id="x">
+              <path d="M0 0H10V10Z"/>
+            </clipPath>
+          </defs>
+        </svg>
+        ```
+
+    The CSS uses a URL fragment (the `#x`) to reference the `clipPath` element in the SVG file. Previously esbuild's CSS bundler didn't preserve the URL fragment when bundling the SVG using the `dataurl` loader, which broke the bundled CSS. With this release, esbuild will now preserve the URL fragment in the bundled CSS:
+
+    ```css
+    /* icons.css */
+    .triangle {
+      width: 10px;
+      height: 10px;
+      background: currentColor;
+      clip-path: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg"><defs><clipPath id="x"><path d="M0 0H10V10Z"/></clipPath></defs></svg>#x');
+    }
+    ```
+
+* Parse and print CSS `@scope` rules ([#4322](https://github.com/evanw/esbuild/issues/4322))
+
+    This release includes dedicated support for parsing `@scope` rules in CSS. These rules include optional "start" and "end" selector lists. One important consequence of this is that the local/global status of names in selector lists is now respected, which improves the correctness of esbuild's support for [CSS modules](https://esbuild.github.io/content-types/#local-css). Minification of selectors inside `@scope` rules has also improved slightly.
+
+    Here's an example:
+
+    ```css
+    /* Original code */
+    @scope (:global(.foo)) to (:local(.bar)) {
+      .bar {
+        color: red;
+      }
+    }
+
+    /* Old output (with --loader=local-css --minify) */
+    @scope (:global(.foo)) to (:local(.bar)){.o{color:red}}
+
+    /* New output (with --loader=local-css --minify) */
+    @scope(.foo)to (.o){.o{color:red}}
+    ```
+
+* Fix a minification bug with lowering of `for await` ([#4378](https://github.com/evanw/esbuild/pull/4378), [#4385](https://github.com/evanw/esbuild/pull/4385))
+
+    This release fixes a bug where the minifier would incorrectly strip the variable in the automatically-generated `catch` clause of lowered `for await` loops. The code that generated the loop previously failed to mark the internal variable references as used.
+
+* Update the Go compiler from v1.25.5 to v1.25.7 ([#4383](https://github.com/evanw/esbuild/issues/4383), [#4388](https://github.com/evanw/esbuild/pull/4388))
+
+    This PR was contributed by [@MikeWillCook](https://github.com/MikeWillCook).
+
 ## 0.27.2
 
 * Allow import path specifiers starting with `#/` ([#4361](https://github.com/evanw/esbuild/pull/4361))
