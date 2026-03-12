@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.27.4
+
+* Fix a regression with CSS media queries ([#4395](https://github.com/evanw/esbuild/issues/4395), [#4405](https://github.com/evanw/esbuild/issues/4405), [#4406](https://github.com/evanw/esbuild/issues/4406))
+
+    Version 0.25.11 of esbuild introduced support for parsing media queries. This unintentionally introduced a regression with printing media queries that use the `<media-type> and <media-condition-without-or>` grammar. Specifically, esbuild was failing to wrap an `or` clause with parentheses when inside `<media-condition-without-or>`. This release fixes the regression.
+
+    Here is an example:
+
+    ```css
+    /* Original code */
+    @media only screen and ((min-width: 10px) or (min-height: 10px)) {
+      a { color: red }
+    }
+
+    /* Old output (incorrect) */
+    @media only screen and (min-width: 10px) or (min-height: 10px) {
+      a {
+        color: red;
+      }
+    }
+
+    /* New output (correct) */
+    @media only screen and ((min-width: 10px) or (min-height: 10px)) {
+      a {
+        color: red;
+      }
+    }
+    ```
+
+* Fix an edge case with the `inject` feature ([#4407](https://github.com/evanw/esbuild/issues/4407))
+
+    This release fixes an edge case where esbuild's `inject` feature could not be used with arbitrary module namespace names exported using an `export {} from` statement with bundling disabled and a target environment where arbitrary module namespace names is unsupported.
+
+    With the fix, the following `inject` file:
+
+    ```js
+    import jquery from 'jquery';
+    export { jquery as 'window.jQuery' };
+    ```
+
+    Can now always be rewritten as this without esbuild sometimes incorrectly generating an error:
+
+    ```js
+    export { default as 'window.jQuery' } from 'jquery';
+    ```
+
+* Attempt to improve API handling of huge metafiles ([#4329](https://github.com/evanw/esbuild/issues/4329), [#4415](https://github.com/evanw/esbuild/issues/4415))
+
+    This release contains a few changes that attempt to improve the behavior of esbuild's JavaScript API with huge metafiles (esbuild's name for the build metadata, formatted as a JSON object). The JavaScript API is designed to return the metafile JSON as a JavaScript object in memory, which makes it easy to access from within a JavaScript-based plugin. Multiple people have encountered issues where this API breaks down with a pathologically-large metafile.
+
+    The primary issue is that V8 has an implementation-specific maximum string length, so using the `JSON.parse` API with large enough strings is impossible. This release will now attempt to use a fallback JavaScript-based JSON parser that operates directly on the UTF8-encoded JSON bytes instead of using `JSON.parse` when the JSON metafile is too big to fit in a JavaScript string. The new fallback path has not yet been heavily-tested. The metafile will also now be generated with whitespace removed if the bundle is significantly large, which will reduce the size of the metafile JSON slightly.
+
+    However, hitting this case is potentially a sign that something else is wrong. Ideally you wouldn't be building something so enormous that the build metadata can't even fit inside a JavaScript string. You may want to consider optimizing your project, or breaking up your project into multiple parts that are built independently. Another option could potentially be to use esbuild's command-line API instead of its JavaScript API, which is more efficient (although of course then you can't use JavaScript plugins, so it may not be an option).
+
 ## 0.27.3
 
 * Preserve URL fragments in data URLs ([#4370](https://github.com/evanw/esbuild/issues/4370))
