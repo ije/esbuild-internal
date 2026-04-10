@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.27.7
+
+* Fix lowering of define semantics for TypeScript parameter properties ([#4421](https://github.com/evanw/esbuild/issues/4421))
+
+    The previous release incorrectly generated class fields for TypeScript parameter properties even when the configured target environment does not support class fields. With this release, the generated class fields will now be correctly lowered in this case:
+
+    ```ts
+    // Original code
+    class Foo {
+      constructor(public x = 1) {}
+      y = 2
+    }
+
+    // Old output (with --loader=ts --target=es2021)
+    class Foo {
+      constructor(x = 1) {
+        this.x = x;
+        __publicField(this, "y", 2);
+      }
+      x;
+    }
+
+    // New output (with --loader=ts --target=es2021)
+    class Foo {
+      constructor(x = 1) {
+        __publicField(this, "x", x);
+        __publicField(this, "y", 2);
+      }
+    }
+    ```
+
 ## 0.27.5
 
 * Fix for an async generator edge case ([#4401](https://github.com/evanw/esbuild/issues/4401), [#4417](https://github.com/evanw/esbuild/pull/4417))
