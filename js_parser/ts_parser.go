@@ -17,6 +17,9 @@ import (
 )
 
 func (p *parser) skipTypeScriptBinding() {
+	p.enterRecursion(p.lexer.Loc())
+	defer func() { p.recursionDepth-- }()
+
 	switch p.lexer.Token {
 	case js_lexer.TIdentifier, js_lexer.TThis:
 		p.lexer.Next()
@@ -214,6 +217,9 @@ var tsTypeIdentifierMap = map[string]tsTypeIdentifierKind{
 }
 
 func (p *parser) skipTypeScriptTypeWithFlags(level js_ast.L, flags skipTypeFlags) {
+	p.enterRecursion(p.lexer.Loc())
+	defer func() { p.recursionDepth-- }()
+
 loop:
 	for {
 		switch p.lexer.Token {
@@ -980,6 +986,7 @@ func (originalParser *parser) isTypeScriptArrowReturnTypeAfterQuestionAndBeforeC
 
 	// Clone all state that the parser needs to parse this arrow function body
 	p.allowIn = originalParser.allowIn
+	p.recursionDepth = originalParser.recursionDepth
 	p.lexer.IsLogDisabled = true
 	p.pushScopeForParsePass(js_ast.ScopeEntry, logger.Loc{Start: 0})
 	p.pushScopeForParsePass(js_ast.ScopeFunctionArgs, logger.Loc{Start: 1})
@@ -1621,6 +1628,9 @@ func (p *parser) getOrCreateExportedNamespaceMembers(name string, isExport bool)
 }
 
 func (p *parser) parseTypeScriptNamespaceStmt(loc logger.Loc, opts parseStmtOpts) js_ast.Stmt {
+	p.enterRecursion(loc)
+	defer func() { p.recursionDepth-- }()
+
 	// "namespace Foo {}"
 	nameLoc := p.lexer.Loc()
 	nameText := p.lexer.Identifier.String

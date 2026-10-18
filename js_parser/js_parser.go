@@ -60,6 +60,7 @@ type parser struct {
 	legacyOctalLiterals        map[js_ast.E]logger.Range
 	scopesInOrderForEnum       map[logger.Loc][]scopeOrder
 	binaryExprStack            []binaryExprVisitor
+	recursionDepth             int
 
 	// For strict mode handling
 	hoistedRefForSloppyModeBlockFn map[ast.Ref]ast.Ref
@@ -2183,6 +2184,9 @@ type propertyOpts struct {
 }
 
 func (p *parser) parseProperty(startLoc logger.Loc, kind js_ast.PropertyKind, opts propertyOpts, errors *deferredErrors) (js_ast.Property, bool) {
+	p.enterRecursion(p.lexer.Loc())
+	defer func() { p.recursionDepth-- }()
+
 	var flags js_ast.PropertyFlags
 	var key js_ast.Expr
 	var closeBracketLoc logger.Loc
@@ -4090,6 +4094,8 @@ func (p *parser) parsePrefix(level js_ast.L, errors *deferredErrors, flags exprF
 			p.lexer.Next()
 			p.skipTypeScriptType(js_ast.LLowest)
 			p.lexer.ExpectGreaterThan(false /* isInsideJSXElement */)
+			p.enterRecursion(loc)
+			defer func() { p.recursionDepth-- }()
 			value := p.parsePrefix(level, errors, flags)
 			return value
 		}
@@ -4230,6 +4236,9 @@ func (p *parser) parseExprWithFlags(level js_ast.L, flags exprFlag) js_ast.Expr 
 }
 
 func (p *parser) parseExprCommon(level js_ast.L, errors *deferredErrors, flags exprFlag) js_ast.Expr {
+	p.enterRecursion(p.lexer.Loc())
+	defer func() { p.recursionDepth-- }()
+
 	lexerCommentFlags := p.lexer.HasCommentBefore
 	expr := p.parsePrefix(level, errors, flags)
 
@@ -5249,6 +5258,9 @@ func (p *parser) parseJSXTag() (logger.Range, string, js_ast.Expr) {
 }
 
 func (p *parser) parseJSXElement(loc logger.Loc) js_ast.Expr {
+	p.enterRecursion(loc)
+	defer func() { p.recursionDepth-- }()
+
 	// Keep track of the location of the first JSX element for error messages
 	if p.firstJSXElementLoc.Start == -1 {
 		p.firstJSXElementLoc = loc
@@ -5997,6 +6009,9 @@ type parseBindingOpts struct {
 }
 
 func (p *parser) parseBinding(opts parseBindingOpts) js_ast.Binding {
+	p.enterRecursion(p.lexer.Loc())
+	defer func() { p.recursionDepth-- }()
+
 	loc := p.lexer.Loc()
 
 	switch p.lexer.Token {
@@ -7099,6 +7114,9 @@ type parseStmtOpts struct {
 }
 
 func (p *parser) parseStmt(opts parseStmtOpts) js_ast.Stmt {
+	p.enterRecursion(p.lexer.Loc())
+	defer func() { p.recursionDepth-- }()
+
 	loc := p.lexer.Loc()
 
 	if (p.lexer.HasCommentBefore & js_lexer.NoSideEffectsCommentBefore) != 0 {
@@ -13550,6 +13568,9 @@ pattern:
 // This function takes "exprIn" as input from the caller and produces "exprOut"
 // for the caller to pass along extra data. This is mostly for optional chaining.
 func (p *parser) visitExprInOut(expr js_ast.Expr, in exprIn) (js_ast.Expr, exprOut) {
+	p.enterRecursion(expr.Loc)
+	defer func() { p.recursionDepth-- }()
+
 	if in.assignTarget != js_ast.AssignTargetNone && !p.isValidAssignmentTarget(expr) {
 		p.log.AddError(&p.tracker, logger.Range{Loc: expr.Loc}, "Invalid assignment target")
 	}
@@ -17812,11 +17833,27 @@ var defaultJSXFragment = []string{"React", "Fragment"}
 
 const defaultJSXImportSource = "react"
 
+const maxRecursionDepth = 1024
+
+// This must bypass speculative parsing, which catches LexerPanic and retries.
+type recursionLimitPanic struct{ loc logger.Loc }
+
+func (p *parser) enterRecursion(loc logger.Loc) {
+	if p.recursionDepth >= maxRecursionDepth {
+		panic(recursionLimitPanic{loc})
+	}
+	p.recursionDepth++
+}
+
 func Parse(log logger.Log, source logger.Source, options Options) (result js_ast.AST, ok bool) {
 	ok = true
 	defer func() {
 		r := recover()
-		if _, isLexerPanic := r.(js_lexer.LexerPanic); isLexerPanic {
+		if limit, isLimit := r.(recursionLimitPanic); isLimit {
+			tracker := logger.MakeLineColumnTracker(&source)
+			log.AddError(&tracker, logger.Range{Loc: limit.loc}, "Source nesting is too deep")
+			ok = false
+		} else if _, isLexerPanic := r.(js_lexer.LexerPanic); isLexerPanic {
 			ok = false
 		} else if r != nil {
 			panic(r)

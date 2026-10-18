@@ -18,7 +18,7 @@ if (res.status !== 200) {
 
 // clear dirs
 for await (const entry of Deno.readDir(".")) {
-  if (entry.isDirectory && !entry.name.startsWith(".") && entry.name !== "images") {
+  if (entry.isDirectory && !entry.name.startsWith(".") && entry.name !== "images" && entry.name !== "patches") {
     await Deno.remove(join(Deno.cwd(), entry.name), { recursive: true });
   }
 }
@@ -71,6 +71,15 @@ for await (const entry of entryList) {
     continue;
   }
   console.log("write", fileName);
+}
+
+const patch = await new Deno.Command("git", {
+  args: ["apply", "patches/recursion-limit.patch"],
+  stdout: "inherit",
+  stderr: "inherit",
+}).output();
+if (!patch.success) {
+  throw new Error("Failed to apply the parser recursion limit");
 }
 
 if (Deno.args.includes("--dry-run")) {
